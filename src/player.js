@@ -454,7 +454,7 @@ export class Player {
     // here, which is exactly what leaves it standing still and fully
     // damageable while this runs.
     if (this._piloting) { this._updatePiloting(dt); return; }
-    if (this._watchT > 0) { this._updateWatching(dt); return; }
+    if (this._fallingT > 0) { this._updateFalling(dt); return; }
     const b = this.body;
     // Crouch (hold CTRL): trades speed for a steadier aim. Both heights still
     // span two voxel rows, so standing up can never wedge us into a ceiling.
@@ -626,29 +626,53 @@ export class Player {
     if (firing && !this._pilotFireWas) {
       this.game.requestAirstrike(this, p.x, p.z);
       this._piloting = false;
-      // Camera stays parked here watching the impact land, rather than
-      // snapping straight back to first-person — for the same delay the
-      // host actually uses before the explosion fires (game.js's
-      // AIRSTRIKE_TELEGRAPH_T, duplicated here — see that constant's own
-      // comment for why it isn't imported). This is a real balance
-      // tradeoff, not just a cosmetic camera change: the body stays
-      // frozen and exposed for the watch duration too, extending the
-      // vulnerable window beyond just the targeting phase.
-      this._watchT = 3;
+      // Camera doesn't snap straight back to first-person — it follows
+      // the missile down for the same delay the host actually uses
+      // before the explosion fires (game.js's AIRSTRIKE_TELEGRAPH_T,
+      // duplicated here — see that constant's own comment for why it
+      // isn't imported). Captured as _fallingT0 too, so the ease curve
+      // below stays correct even if the duration constant is retuned
+      // later without this exact literal being updated in lockstep.
+      // Real balance tradeoff, not just a cosmetic camera change: the
+      // body stays frozen and exposed for the whole fall, not just the
+      // targeting phase.
+      this._fallingT = 3;
+      this._fallingT0 = this._fallingT;
     }
     this._pilotFireWas = firing;
   }
 
-  // Camera stays exactly where targeting left it — no input moves it
-  // anymore, there's nothing left to confirm, just watching the impact
-  // point until the strike actually lands. Reuses _pilotPos directly
-  // rather than waiting on any confirmation from the host: the confirmed
-  // target IS that exact local position (already bounds-clamped every
-  // frame in _updatePiloting), so there's no desync to wait out.
-  _updateWatching(dt) {
-    this._watchT -= dt;
-    if (this._watchT < 0) this._watchT = 0;
-    this.camera.position.copy(this._pilotPos);
+  // The impact point is no longer locked in the instant it's confirmed —
+  // WASD keeps nudging it during the fall itself, at a much slower,
+  // deliberate pace than the initial targeting pan (a last-second
+  // correction, not a second full-map retarget). Camera eases DOWN from
+  // the piloting altitude toward a low altitude above wherever the
+  // (possibly still moving) target currently is, quadratic ease-in so it
+  // reads as accelerating under gravity rather than a flat linear drop.
+  // _pilotPos is mutated in place here and is what requestAirstrike sent
+  // as the target — the host's own pending-strike entry gets updated
+  // independently via the steering field on the regular movement uplink
+  // (see Game#update's uplink send and the host's 't:s' handler), so
+  // this local camera motion and the actual, host-authoritative impact
+  // point stay in sync without waiting on any round trip.
+  _updateFalling(dt) {
+    this._fallingT -= dt;
+    if (this._fallingT < 0) this._fallingT = 0;
+    const p = this._pilotPos;
+    const wish = new THREE.Vector3();
+    if (this.keys['KeyW']) wish.z -= 1;
+    if (this.keys['KeyS']) wish.z += 1;
+    if (this.keys['KeyD']) wish.x += 1;
+    if (this.keys['KeyA']) wish.x -= 1;
+    if (wish.lengthSq() > 0) wish.normalize();
+    const steerSpeed = 12; // AIRSTRIKE_STEER_SPEED in game.js — see that constant's comment
+    p.x = Math.max(0, Math.min(SX, p.x + wish.x * steerSpeed * dt));
+    p.z = Math.max(0, Math.min(SZ, p.z + wish.z * steerSpeed * dt));
+    const t = 1 - this._fallingT / this._fallingT0;
+    const ease = t * t;
+    const groundY = this.game.world.surface(Math.floor(p.x), Math.floor(p.z)) + 1;
+    const startY = SY + 30, endY = groundY + 12; // stays close but clear of the explosion itself, not literally in the crater
+    this.camera.position.set(p.x, startY + (endY - startY) * ease, p.z);
     this.camera.rotation.set(-Math.PI / 2, 0, 0, 'YXZ');
   }
 
@@ -682,7 +706,7 @@ export class Player {
     this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
     this._overchargeT = 0; this._overchargeUsed = false; // dying cancels an active buff outright and refreshes the one-time-per-life use
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
-    this._watchT = 0; // or die mid-watch (exposed and found, exactly the intended risk) — same clean reset, camera control just returns on next update() since alive is now false anyway
+    this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
     this.vmRoot.visible = false; // no floating gun while down
     this.resetZoom(); // don't die scoped in — the death camera shouldn't render through a sniper scope
     // Bots and remote players already burst apart on death (see their die()

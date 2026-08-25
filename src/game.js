@@ -87,6 +87,14 @@ const MAX_TURN_RATE = Math.PI * 10;
 // there) — both sides are commented to reference this constant by name
 // so a future retune of one doesn't silently desync from the other.
 const AIRSTRIKE_TELEGRAPH_T = 3;
+// Steering speed during the guided fall, in units/sec — deliberately much
+// slower than the 40u/s free-scan targeting pan (Player#_updatePiloting):
+// this is a last-second correction tool, not a second full-map retarget.
+// Over the full AIRSTRIKE_TELEGRAPH_T fall, caps total possible drift at
+// 36 units in one direction. Duplicated in player.js's own fall-update
+// for the local, unvalidated visual — same circular-import reason as
+// AIRSTRIKE_TELEGRAPH_T. This copy is what the host actually enforces.
+const AIRSTRIKE_STEER_SPEED = 12;
 // Bullet drop gravity — see Game#_dropCompensate. Matches the world's own
 // GRAVITY magnitude (entities.js) for internal consistency; each weapon's
 // dropVel is what actually tunes how much a given gun drops, same way the
@@ -268,19 +276,19 @@ const hud = {
   streakStatus(p) {
     const ready = $('airstrikeReady');
     if (ready) {
-      if (p._piloting || p._watchT > 0 || p._overchargeT > 0) ready.style.display = 'none';
+      if (p._piloting || p._fallingT > 0 || p._overchargeT > 0) ready.style.display = 'none';
       else if ((p._streak ?? 0) >= 10) { ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block'; }
       else if ((p._streak ?? 0) >= 5 && !p._overchargeUsed) { ready.textContent = 'overcharge ready — [F]'; ready.style.display = 'block'; }
       else ready.style.display = 'none';
     }
     const overlay = $('airstrikeHud');
     if (overlay) {
-      overlay.classList.toggle('on', !!p._piloting || p._watchT > 0);
+      overlay.classList.toggle('on', !!p._piloting || p._fallingT > 0);
       // Same reticle, different label: nothing left to confirm once a
-      // target's locked in, so "click to confirm" would be actively
-      // wrong during the watch phase.
+      // target's locked in, and the fall itself is now interactive —
+      // "click to confirm" would be actively wrong once WASD is steering.
       const label = overlay.querySelector('.label');
-      if (label) label.textContent = p._piloting ? 'airstrike — click to confirm' : 'airstrike inbound';
+      if (label) label.textContent = p._piloting ? 'airstrike — click to confirm' : 'airstrike falling — WASD to guide';
     }
     const active = $('overchargeActive');
     if (active) {
@@ -1886,6 +1894,31 @@ export class Game {
       // _broadcastSnapshot) so the client can read its own round trip —
       // no extra message, just one more number on traffic already flowing.
       if (Number.isFinite(d.ts)) p._pingTs = d.ts;
+      // Airstrike steering: piggybacked on this same uplink rather than a
+      // separate message. Untrusted like everything else here — bounds-
+      // clamp, and rate-limit the IMPLIED steering speed the same way
+      // ordinary movement is speed-gated above, so a patched client can't
+      // retarget faster than the real steering mechanic allows. Only
+      // applies if this player actually has a strike in flight — an
+      // unrelated or stale field is silently ignored, not trusted at all.
+      if (d.strike && Number.isFinite(d.strike.x) && Number.isFinite(d.strike.z) && this._pendingStrikes) {
+        const s = this._pendingStrikes.find(s => s.owner === p);
+        if (s) {
+          const sx = Math.max(0, Math.min(SX, d.strike.x)), sz = Math.max(0, Math.min(SZ, d.strike.z));
+          const sElapsed = Math.max(1 / 30, this.time - (s._lastSteerT ?? this.time));
+          const maxSteerDist = AIRSTRIKE_STEER_SPEED * 2 * sElapsed; // 2x slack, same jitter-tolerance philosophy as MAX_SPEED_SLACK
+          if (Math.hypot(sx - s.pos.x, sz - s.pos.z) <= maxSteerDist) {
+            s.pos.x = sx; s.pos.z = sz;
+            s.pos.y = this.world.surface(Math.floor(sx), Math.floor(sz)) + 1;
+            s._lastSteerT = this.time;
+            // Re-telegraph at the new position — everyone watching needs
+            // to see the marker actually track where it's heading, not a
+            // static lie about where the explosion will land.
+            if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph', x: s.pos.x, y: s.pos.y, z: s.pos.z });
+            this._telegraph(s.pos.x, s.pos.y, s.pos.z);
+          }
+        }
+      }
     } else if (d.t === 'a' && p.alive && !this.over) {
       // Airstrike is handled first and separately: unlike every other
       // action here, its target isn't near the sender's own position (the
@@ -2647,9 +2680,18 @@ export class Game {
     if (this._sendT <= 0 && this.net) {
       this._sendT = 1 / 30; // 33ms input age — the uplink is tiny, spend it
       const p = this.player;
-      this.net.send({ t: 's', x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z,
+      const out = { t: 's', x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z,
         yaw: Math.atan2(-Math.cos(p.yaw), Math.sin(p.yaw)), tool: p.tool,
-        c: p.crouched ? 1 : 0, ts: performance.now() });
+        c: p.crouched ? 1 : 0, ts: performance.now() };
+      // Piggybacked on this same, already-firing 30Hz message rather
+      // than a new send loop: while a called-in airstrike is falling,
+      // this also reports where it's CURRENTLY being steered to, so the
+      // host can update the real, authoritative impact point and
+      // re-telegraph it for everyone else watching — the marker has to
+      // actually track where the missile is heading, or the telegraph
+      // stops meaning anything the moment steering is added.
+      if (p._fallingT > 0) out.strike = { x: p._pilotPos.x, z: p._pilotPos.z };
+      this.net.send(out);
     }
     if (this.flags) for (const team of ['green', 'blue']) this.flags[team].clientUpdate(this.time);
     for (let i = 0; i < this.grenadeMeshes.length; i++) {
@@ -2703,6 +2745,26 @@ export class Game {
     if (this._pendingStrikes) {
       for (let i = this._pendingStrikes.length - 1; i >= 0; i--) {
         const s = this._pendingStrikes[i];
+        // The host/solo's OWN steering never crosses the wire at all —
+        // there's no message for it to arrive on, unlike a guest's
+        // (handled entirely in the 't:s' uplink case above). Synced
+        // directly from the trusted local player here instead, no
+        // validation needed since it was never untrusted input in the
+        // first place. Throttled and change-gated the same way the
+        // guest path is naturally throttled by its own uplink rate —
+        // without this, a held WASD key would re-broadcast the
+        // telegraph to every connected guest up to 60x/sec.
+        if (s.owner === this.player && this.player._fallingT > 0) {
+          const np = this.player._pilotPos;
+          const hostSteerElapsed = this.time - (s._lastHostTelegraphT ?? 0);
+          if ((s.pos.x !== np.x || s.pos.z !== np.z) && hostSteerElapsed >= 1 / 30) {
+            s.pos.x = np.x; s.pos.z = np.z;
+            s.pos.y = this.world.surface(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
+            s._lastHostTelegraphT = this.time;
+            this._telegraph(s.pos.x, s.pos.y, s.pos.z);
+            if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph', x: s.pos.x, y: s.pos.y, z: s.pos.z });
+          }
+        }
         s.t -= dt;
         if (s.t <= 0) { this._airstrikeImpact(s.pos, s.owner); this._pendingStrikes.splice(i, 1); }
       }

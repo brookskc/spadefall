@@ -278,7 +278,7 @@ const hud = {
     if (ready) {
       if (p._piloting || p._fallingT > 0 || p._overchargeT > 0) ready.style.display = 'none';
       else if ((p._streak ?? 0) >= 10) { ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block'; }
-      else if ((p._streak ?? 0) >= 5 && !p._overchargeUsed) { ready.textContent = 'overcharge ready — [F]'; ready.style.display = 'block'; }
+      else if ((p._streak ?? 0) - (p._overchargeAtStreak ?? 0) >= 5) { ready.textContent = 'overcharge ready — [F]'; ready.style.display = 'block'; }
       else ready.style.display = 'none';
     }
     const overlay = $('airstrikeHud');
@@ -716,7 +716,7 @@ class RemoteProxy {
     this.alive = false;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain
     this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
-    this._overchargeT = 0; this._overchargeUsed = false; // dying cancels an active buff and refreshes the one-time-per-life use
+    this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker to zero — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
     this._lastAimDir = null; this._lastAimT = null; // next life's first shot has no aim history to compare against — spawns face an arbitrary direction, not a continuation of whatever they were aiming at when they died
     this._lastNadeAimDir = null; this._lastNadeAimT = null; // same reasoning, separate baseline for the nade check
     this.game.effects.burst(this.body.eye(), 26,
@@ -1618,17 +1618,24 @@ export class Game {
 
   // Host/solo-authoritative, re-validated here for the same reason as
   // above: a guest's claim that it's eligible is never trusted on its own.
-  // One-time per life, NOT a repeating cooldown toggle — the original
-  // design let anyone above the streak threshold keep reactivating this
-  // roughly every 15s (10s active + 5s cooldown) for the rest of a life,
-  // which amounted to a near-permanent 1.5x/1.5x once someone was already
-  // winning — exactly the runaway-power problem the rest of this streak
-  // system is built to avoid. _overchargeUsed (cleared only on death, not
-  // by anything Airstrike does to _streak) is the actual gate now.
+  // Repeatable, but rate-limited by streak progress rather than time: the
+  // original unlimited-with-a-5s-cooldown design let anyone above the
+  // threshold keep reactivating this roughly every 15s for the rest of a
+  // life, a near-permanent 1.5x/1.5x once someone was already winning —
+  // exactly the runaway-power problem this system exists to avoid. The
+  // fix isn't "never again" (that punished long games with a whole
+  // streak's worth of dead potential) — it's "again every 5 more kills."
+  // _overchargeAtStreak tracks the streak value AT the last activation;
+  // the gate is (current streak - that value) >= 5, so the first use at
+  // streak 5 sets it to 5, unlocking again at streak 10, then 15, and so
+  // on — reset only on death (RemoteProxy#die / Player#die / _clientDied),
+  // not by anything Airstrike does to _streak, so spending an airstrike
+  // and rebuilding a streak in the same life doesn't grant a free extra
+  // Overcharge along the way.
   _activateOvercharge(p) {
-    if ((p._streak ?? 0) < 5 || p._overchargeT > 0 || p._overchargeUsed) return;
+    if ((p._streak ?? 0) - (p._overchargeAtStreak ?? 0) < 5 || p._overchargeT > 0) return;
     p._overchargeT = 30;
-    p._overchargeUsed = true;
+    p._overchargeAtStreak = p._streak ?? 0;
     if (p === this.player) sfx.overcharge();
     else if (p.isRemote) this.net.sendTo(p.id, { t: 'e', k: 'overcharge' });
   }
@@ -2546,14 +2553,18 @@ export class Game {
       }
       case 'overcharge':
         // Confirmation from the host that activation succeeded — sets the
-        // SAME duration and used-flag locally so this client's own
-        // countdown/HUD/re-activation-gate state matches what the host's
-        // authoritative copy is already running. Without setting the flag
-        // here too, the keydown handler's own local check (which gates
-        // BEFORE ever sending the request, not just after) would let this
-        // guest keep firing requests the host would silently ignore.
+        // SAME duration and repeat-eligibility tracker locally so this
+        // client's own countdown/HUD/re-activation-gate state matches
+        // what the host's authoritative copy is already running. Without
+        // setting this here too, the keydown handler's own local check
+        // (which gates BEFORE ever sending the request, not just after)
+        // would let this guest keep firing requests the host would
+        // silently ignore. Depends on this.player._streak already being
+        // accurate at this exact moment — see the 'hit' case above,
+        // which is what actually keeps a guest's own local streak in
+        // sync with the host's authoritative count in the first place.
         this.player._overchargeT = 30;
-        this.player._overchargeUsed = true;
+        this.player._overchargeAtStreak = this.player._streak ?? 0;
         sfx.overcharge();
         break;
       case 'col': { // host collapsed a structure: replay removal + dust only
@@ -2581,6 +2592,15 @@ export class Game {
         break;
       case 'hit':
         hud.hitmark(d.kill);
+        // Mirrors what _hitFeedback already did on the host's own
+        // authoritative copy of this player (the RemoteProxy) — without
+        // this, a guest's own LOCAL _streak never advanced at all, since
+        // this is the only message a guest's kills are ever reported
+        // back through. That silently broke Overcharge/Airstrike
+        // eligibility for anyone who wasn't hosting: the F-key gate has
+        // to run locally (it decides whether to even send a request),
+        // and it was checking a value that never left zero.
+        if (d.kill) this.player._streak = (this.player._streak ?? 0) + 1;
         if (d.tier) hud.killCallout(d.tier); // replaces the plain chime, same rule as the host-side path
         else d.kill ? sfx.kill() : sfx.hit();
         break;
@@ -2613,13 +2633,31 @@ export class Game {
 
   _clientDied() {
     this.player.alive = false;
+    // A guest's own death never goes through Player.die() at all — the
+    // host tells us we're dead over the wire and we land here instead.
+    // This mirrors die()'s own resets directly (everything except
+    // onDeath(), which is host-authoritative match-flow logic that
+    // doesn't belong on this side). Discovered as a genuine, direct
+    // consequence of the same gap: this was ALREADY missing the perk-
+    // related resets (multi-kill chain, streak, Overcharge, in-progress
+    // airstrike piloting/fall) before this fix, meaning none of them
+    // ever cleared between a guest's lives — silently breaking the whole
+    // perk system for anyone who wasn't hosting, on top of a few other
+    // real if smaller bugs (a visible gun model surviving death, stale
+    // crouch height/hitbox carrying into the next life).
+    this.player.health = 0;
+    this.player.deadT = 0;
+    this.player.crouched = false;
+    this.player.body.half.h = 1.75;
+    this.player.swing = 0;
+    this.player._mkCount = 0; this.player._mkT = null;
+    this.player._streak = 0;
+    this.player._overchargeT = 0; this.player._overchargeAtStreak = 0;
+    this.player._piloting = false;
+    this.player._fallingT = 0;
+    this.player.vmRoot.visible = false; // no floating gun while down
     this._respawnT = 10; // mirrors the host's human redeploy timer
     this.player.resetZoom(); // same reason as Player.die() — this is the guest's equivalent of it
-    // A GUEST's own death never goes through Player.die() at all — the host
-    // tells us we're dead over the wire and we land here instead. Without
-    // this, joining a match instead of hosting it was the one situation
-    // where your own death never disintegrated: the burst above and the
-    // ones in Bot.die()/RemoteProxy.die() covered everyone but you.
     this.effects.burst(this.player.body.eye(), 26,
       this.player.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
     sfx.hurt();
@@ -2772,10 +2810,10 @@ export class Game {
     // RemoteProxy has no update(dt) of its own the way Player does — its
     // state rides the network snapshot instead — so its Overcharge timer
     // needs its own tick here specifically, on the host's authoritative
-    // copy, since that's the one damage() actually reads. One-time per
-    // life now, so there's nothing to do once the active timer hits zero
-    // — no cooldown state to enter, _overchargeUsed already permanently
-    // blocks reactivation until this proxy's own die() clears it.
+    // copy, since that's the one damage() actually reads. Nothing further
+    // to do once the active timer hits zero — no cooldown state to enter,
+    // repeat-eligibility is governed entirely by streak progress
+    // (_overchargeAtStreak, checked in _activateOvercharge), not by time.
     for (const rp of this.remote.values()) {
       if (rp._overchargeT > 0) { rp._overchargeT -= dt; if (rp._overchargeT < 0) rp._overchargeT = 0; }
     }

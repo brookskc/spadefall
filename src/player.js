@@ -211,7 +211,7 @@ export class Player {
           this._piloting = true;
           const eye = this.body.eye();
           this._pilotPos = new THREE.Vector3(eye.x, SY + 30, eye.z);
-        } else if ((this._streak ?? 0) >= 5 && !(this._overchargeT > 0) && !this._overchargeUsed) {
+        } else if ((this._streak ?? 0) - (this._overchargeAtStreak ?? 0) >= 5 && !(this._overchargeT > 0)) {
           this.game.requestOvercharge(this);
         }
       }
@@ -444,10 +444,11 @@ export class Player {
     // Overcharge activated while still under 10 streak has to keep
     // counting down even after crossing into airstrike-eligible territory
     // and entering piloting mode — it finishes on its own schedule, not
-    // interrupted by what F does next. One-time per life now, not a
-    // cooldown loop — once it ends there's nothing further to tick down;
-    // _overchargeUsed (set on activation, cleared only on death) is what
-    // permanently blocks a second use for the rest of this life.
+    // interrupted by what F does next. Repeat-eligibility is governed by
+    // streak progress, not time: _overchargeAtStreak (set on activation,
+    // cleared only on death) tracks the streak value it was last used at,
+    // and the keydown gate above re-unlocks it once _streak has climbed
+    // 5 further than that.
     if (this._overchargeT > 0) { this._overchargeT -= dt; if (this._overchargeT < 0) this._overchargeT = 0; }
     // Short-circuits everything below — no movement, no aiming, no firing,
     // completely different camera. The body itself never gets touched
@@ -704,7 +705,7 @@ export class Player {
     this.swing = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
     this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
-    this._overchargeT = 0; this._overchargeUsed = false; // dying cancels an active buff outright and refreshes the one-time-per-life use
+    this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
     this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
     this.vmRoot.visible = false; // no floating gun while down

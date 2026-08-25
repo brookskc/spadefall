@@ -2818,6 +2818,19 @@ export class Game {
       this._markerT -= dt;
       if (this._markerT <= 0) this._strikeMarker.visible = false;
     }
+    // Force-hidden while THIS machine's own camera is piloting or falling:
+    // the marker is a 60-unit-tall pillar built to be seen from the
+    // ground by bystanders, never designed to be flown through — the
+    // guided-fall camera shares its exact XZ position and dives straight
+    // down through its body, which read as an opaque red square filling
+    // the view partway down. Checked independently of the fade timer
+    // above (which governs whether OTHER players still see it) — this is
+    // specifically about not rendering it INTO the camera that's
+    // currently diving through its own airspace, regardless of whose
+    // strike it actually is.
+    if (this._strikeMarker && (this.player._piloting || this.player._fallingT > 0)) {
+      this._strikeMarker.visible = false;
+    }
     if (this.mode === 'client') { this._clientUpdate(dt); this.world.flushDirty(); return; }
 
     // Pending airstrikes: host/solo only, since only this side is

@@ -1206,7 +1206,20 @@ export class Game {
   // ---------------- chat ----------------
   // Local echo is immediate; in a room the host is the relay (and the spam
   // filter), so a message reaches every screen exactly once.
+  // Dev/testing commands, host or solo only — checked before anything
+  // else, including the chat rate limit below, since these aren't real
+  // chat messages at all (never relayed, never worth rate-limiting the
+  // way spamming enter would be) and testing benefits from rapid
+  // iteration, not a 1.2s cooldown between each streak change. Never
+  // reaches a guest's own chat send path at all: theirs runs this exact
+  // same function, but their own this.mode is structurally 'client' on
+  // their own machine, so this branch can't fire for them regardless of
+  // what text they type — not gated behind a "secret" phrase (there's no
+  // such thing in unminified, fully-readable source), the only real
+  // boundary is "must be host or solo," which this.mode already
+  // guarantees on its own.
   sendChat(text, scope) {
+    if (this.mode !== 'client' && this._devCommand(text)) return;
     const now = performance.now();
     if (now < this._chatCd) return;         // easy on the enter key
     this._chatCd = now + 1200;
@@ -1214,6 +1227,36 @@ export class Game {
     hud.chatMsg({ name: p.name, team: p.team, text, scope });
     if (this.mode === 'client') this.net.send({ t: 'a', k: 'chat', text, scope });
     else if (this.mode === 'host') this._hostRelayChat(null, p.team, text, scope);
+  }
+
+  // Sets this.player's own state directly — for host/solo, this.player
+  // IS the authoritative copy the real activation flow already checks
+  // (KeyF -> requestOvercharge/requestAirstrike ->
+  // _activateOvercharge/_confirmAirstrike), unlike a guest's own local
+  // player object, which is never authoritative for anything. Feedback
+  // goes through hud.feed directly, not this.feed — this.feed broadcasts
+  // to every connected guest, and a quiet dev tool shouldn't announce
+  // itself to anyone but whoever's actually using it. Returns true if
+  // `text` was a recognized command (caller stops, never sends it as a
+  // real chat message); false otherwise, so ordinary chat is unaffected.
+  _devCommand(text) {
+    const t = text.trim();
+    const streakMatch = /^\/streak(?:\s+(-?\d+))?$/.exec(t);
+    if (streakMatch) {
+      this.player._streak = streakMatch[1] !== undefined ? Math.max(0, parseInt(streakMatch[1], 10)) : 10;
+      hud.feed(`DEV: streak set to ${this.player._streak}`);
+      return true;
+    }
+    if (t === '/streakreset') {
+      this.player._streak = 0;
+      this.player._overchargeAtStreak = 0;
+      this.player._overchargeT = 0;
+      this.player._piloting = false;
+      this.player._fallingT = 0;
+      hud.feed('DEV: streak/perk state cleared');
+      return true;
+    }
+    return false;
   }
 
   // Host side: show it here, then forward to everyone the message is for —

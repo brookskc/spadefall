@@ -7,7 +7,7 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { Body, disposeObject } from './entities.js';
+import { Body, disposeObject, footDust } from './entities.js';
 import { Avatar } from './avatar.js';
 import { stats } from './stats.js';
 
@@ -1175,11 +1175,12 @@ export class Game {
   // fixed neutral tone. Guards against no solid ground directly beneath
   // (an edge, a floating-point sliver at a block boundary) by just
   // skipping that one step's dust rather than guessing a color for it.
+  // Thin wrapper around entities.js's shared footDust — kept so the two
+  // existing call sites (own footsteps, and the entities() loop covering
+  // bots/remote proxies on host/solo) don't need to change, since they
+  // already have a Body handy and just want its position.
   _footDust(b) {
-    const bx = Math.floor(b.pos.x), by = Math.floor(b.pos.y) - 1, bz = Math.floor(b.pos.z);
-    const v = this.world.get(bx, by, bz);
-    if (!v) return;
-    this.effects.burst(new THREE.Vector3(bx + 0.5, by + 1, bz + 0.5), 3, PALETTE[v].color, 1.6);
+    footDust(this.world, this.effects, b.pos.x, b.pos.y, b.pos.z);
   }
 
   // Player tool entry points — route locally (solo/host) or to the host (client).
@@ -2820,7 +2821,7 @@ export class Game {
     }
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
-    for (const av of this.avatars.values()) av.update(this.time, this.world);
+    for (const av of this.avatars.values()) av.update(this.time, this.world, this.effects);
     this._sendT -= dt;
     if (this._sendT <= 0 && this.net) {
       this._sendT = 1 / 30; // 33ms input age — the uplink is tiny, spend it

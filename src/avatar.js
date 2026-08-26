@@ -1,6 +1,6 @@
 // avatar.js — remote soldiers: model, nametag, snapshot interpolation.
 import * as THREE from 'three';
-import { makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, disposeObject, setCrouch, placeShadow } from './entities.js';
+import { makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, disposeObject, setCrouch, placeShadow, footDust } from './entities.js';
 import { sfx } from './audio.js';
 
 export class Avatar {
@@ -68,7 +68,7 @@ export class Avatar {
   // Render just far enough in the past to bracket two snapshots: one
   // observed interval plus two jitter sigmas, clamped to sanity. A clean
   // 15Hz link lands near 80ms; the old fixed 130ms assumed the worst.
-  update(gameT, world = null) {
+  update(gameT, world = null, effects = null) {
     const now = performance.now() / 1000;
     const delay = Math.min(0.22, Math.max(0.06,
       1.15 * (this.interval || 0.083) + 2 * (this.jitter ?? 0)));
@@ -98,7 +98,18 @@ export class Avatar {
     // step sound where they actually are.
     if (this.alive && this._px !== undefined) {
       this._stepAcc = (this._stepAcc ?? 0) + Math.hypot(nx - this._px, nz - this._pz);
-      if (this._stepAcc >= 2.2) { this._stepAcc = 0; sfx.at('step', this.pos); }
+      if (this._stepAcc >= 2.2) {
+        this._stepAcc = 0;
+        sfx.at('step', this.pos);
+        // Closes the one real gap in muzzle-flash/footstep-dust coverage:
+        // a guest's own view of everyone ELSE stepping renders through
+        // here, not through either of the two sites in game.js — those
+        // only ever cover the local player's own steps plus whatever
+        // host/solo is directly simulating. footDust silently no-ops if
+        // effects wasn't passed in (guards its own inputs), so this is
+        // safe even before every caller of update() is updated to pass it.
+        footDust(world, effects, nx, ny, nz);
+      }
     }
     this._px = nx; this._pz = nz;
 

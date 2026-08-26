@@ -1,8 +1,25 @@
 // entities.js — voxel AABB physics and the little blocky soldiers.
 import * as THREE from 'three';
-import { SEA } from './world.js';
+import { SEA, PALETTE } from './world.js';
 
 const GRAVITY = -30;
+
+// Shared by Game#_footDust (the local player and, on host/solo, every
+// bot/remote proxy via the entities() loop) and Avatar#update (a guest's
+// own view of everyone ELSE stepping, which goes through this file's
+// interpolation instead) — one implementation instead of two that could
+// drift apart. Colors from the real block underfoot, matching
+// blockBurst's own precedent of debris reflecting the actual material.
+// Silently does nothing if there's no solid ground directly underfoot
+// (an edge, a floating-point sliver at a block boundary) or no effects
+// system available yet, rather than guessing.
+export function footDust(world, effects, x, y, z) {
+  if (!world || !effects) return;
+  const bx = Math.floor(x), by = Math.floor(y) - 1, bz = Math.floor(z);
+  const v = world.get(bx, by, bz);
+  if (!v) return;
+  effects.burst(new THREE.Vector3(bx + 0.5, by + 1, bz + 0.5), 3, PALETTE[v].color, 1.6);
+}
 
 export class Body {
   constructor(world, x, y, z) {

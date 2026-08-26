@@ -1988,11 +1988,14 @@ export class Game {
             s.pos.x = sx; s.pos.z = sz;
             s.pos.y = this.world.surface(Math.floor(sx), Math.floor(sz)) + 1;
             s._lastSteerT = this.time;
-            // Re-telegraph at the new position — everyone watching needs
-            // to see the marker actually track where it's heading, not a
-            // static lie about where the explosion will land.
-            if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph', x: s.pos.x, y: s.pos.y, z: s.pos.z });
-            this._telegraph(s.pos.x, s.pos.y, s.pos.z);
+            // No re-telegraph here anymore — that existed purely to keep
+            // the (now-removed) marker mesh in sync for bystanders.
+            // Re-triggering the warning sound and feed message on every
+            // steering update (up to 30x/sec while a key is held) turned
+            // one clean warning into a continuous, overlapping alarm for
+            // the entire fall — the actual "why does an alarm go off"
+            // bug. _confirmAirstrike's own one-time telegraph is the
+            // only place this should ever fire.
           }
         }
       }
@@ -2845,24 +2848,21 @@ export class Game {
       for (let i = this._pendingStrikes.length - 1; i >= 0; i--) {
         const s = this._pendingStrikes[i];
         // The host/solo's OWN steering never crosses the wire at all —
+        // The host/solo's OWN steering never crosses the wire at all —
         // there's no message for it to arrive on, unlike a guest's
         // (handled entirely in the 't:s' uplink case above). Synced
         // directly from the trusted local player here instead, no
         // validation needed since it was never untrusted input in the
-        // first place. Throttled and change-gated the same way the
-        // guest path is naturally throttled by its own uplink rate —
-        // without this, a held WASD key would re-broadcast the
-        // telegraph to every connected guest up to 60x/sec.
+        // first place. No throttle needed either now: this used to also
+        // re-telegraph (broadcast + re-trigger the warning sound and
+        // feed message) on every change, which is why it was change-
+        // gated and rate-limited in the first place. With the marker
+        // gone and nothing left to re-telegraph, this is just a cheap
+        // position sync — safe to run every frame unconditionally.
         if (s.owner === this.player && this.player._fallingT > 0) {
           const np = this.player._pilotPos;
-          const hostSteerElapsed = this.time - (s._lastHostTelegraphT ?? 0);
-          if ((s.pos.x !== np.x || s.pos.z !== np.z) && hostSteerElapsed >= 1 / 30) {
-            s.pos.x = np.x; s.pos.z = np.z;
-            s.pos.y = this.world.surface(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
-            s._lastHostTelegraphT = this.time;
-            this._telegraph(s.pos.x, s.pos.y, s.pos.z);
-            if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph', x: s.pos.x, y: s.pos.y, z: s.pos.z });
-          }
+          s.pos.x = np.x; s.pos.z = np.z;
+          s.pos.y = this.world.surface(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
         }
         s.t -= dt;
         if (s.t <= 0) { this._airstrikeImpact(s.pos, s.owner); this._pendingStrikes.splice(i, 1); }

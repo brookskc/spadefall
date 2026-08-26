@@ -36,6 +36,24 @@ export class Effects {
       this.tracers.push({ mesh: m, life: 0 });
     }
 
+    // Muzzle flash — pooled small boxes, additive glow, same pattern as
+    // tracers just above but a fixed-size point burst rather than a
+    // stretched line, and even briefer — a snap, not a streak. Bright
+    // warm white rather than the tracer's own warmer yellow, reading as
+    // "the light source the tracer came from," not a second tracer.
+    this.flashes = [];
+    const fGeo = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+    const fMat = new THREE.MeshBasicMaterial({
+      color: 0xfff2c4, transparent: true, opacity: 0.95,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    for (let i = 0; i < 48; i++) {
+      const m = new THREE.Mesh(fGeo, fMat.clone());
+      m.visible = false;
+      scene.add(m);
+      this.flashes.push({ mesh: m, life: 0 });
+    }
+
     // Explosion flash — expanding fading box. Was a sphere; every other
     // piece of visible geometry in this game is boxes (the flag redesign
     // specifically tore out the one cylinder that ever existed) — this
@@ -62,6 +80,15 @@ export class Effects {
     t.mesh.visible = true;
     t.mesh.material.opacity = 0.9;
     t.life = 0.09;
+  }
+
+  muzzleFlash(pos) {
+    const f = this.flashes.find(f => f.life <= 0);
+    if (!f) return;
+    f.mesh.position.copy(pos);
+    f.mesh.visible = true;
+    f.mesh.material.opacity = 0.95;
+    f.life = 0.06;
   }
 
   burst(pos, count, hex, power = 5) {
@@ -99,6 +126,12 @@ export class Effects {
       t.life -= dt;
       t.mesh.material.opacity = Math.max(0, t.life / 0.09) * 0.9;
       if (t.life <= 0) t.mesh.visible = false;
+    }
+    for (const f of this.flashes) {
+      if (f.life <= 0) continue;
+      f.life -= dt;
+      f.mesh.material.opacity = Math.max(0, f.life / 0.06) * 0.95;
+      if (f.life <= 0) f.mesh.visible = false;
     }
     if (this.flashLife > 0) {
       this.flashLife -= dt;

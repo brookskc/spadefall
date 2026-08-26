@@ -1164,9 +1164,22 @@ export class Game {
   // 2 blocks of your ear) already played its sound locally.
   shotFx(muzzle, end, hit, hex, from, kind = 'smg') {
     this.effects.tracer(muzzle, end);
+    this.effects.muzzleFlash(muzzle);
     if (hit) this.effects.burst(end, 10, 0xc0392b, 4);
     else if (hex) this.effects.burst(end, 6, hex, 3);
     if (from.distanceToSquared(this.player.body.eye()) > 4) sfx.at(kind, muzzle);
+  }
+
+  // A small puff at whatever's actually underfoot, matching blockBurst's
+  // own precedent of coloring debris from the real block rather than a
+  // fixed neutral tone. Guards against no solid ground directly beneath
+  // (an edge, a floating-point sliver at a block boundary) by just
+  // skipping that one step's dust rather than guessing a color for it.
+  _footDust(b) {
+    const bx = Math.floor(b.pos.x), by = Math.floor(b.pos.y) - 1, bz = Math.floor(b.pos.z);
+    const v = this.world.get(bx, by, bz);
+    if (!v) return;
+    this.effects.burst(new THREE.Vector3(bx + 0.5, by + 1, bz + 0.5), 3, PALETTE[v].color, 1.6);
   }
 
   // Player tool entry points — route locally (solo/host) or to the host (client).
@@ -1183,7 +1196,9 @@ export class Game {
     const end = vox
       ? from.clone().addScaledVector(previewDir, Math.max(0, vox.dist - 0.05))
       : from.clone().addScaledVector(previewDir, 130);
-    this.effects.tracer(from.clone().addScaledVector(previewDir, 1.2).add(new THREE.Vector3(0, -0.12, 0)), end);
+    const muzzle = from.clone().addScaledVector(previewDir, 1.2).add(new THREE.Vector3(0, -0.12, 0));
+    this.effects.tracer(muzzle, end);
+    this.effects.muzzleFlash(muzzle);
     this.net.send({ t: 'a', k: 'shoot', o: arr(from), d: arr(dir), tool: p.tool });
   }
 
@@ -2800,7 +2815,7 @@ export class Game {
       }
       if (p.alive && b.onGround) {
         p._stepAcc = (p._stepAcc ?? 0) + moved;
-        if (p._stepAcc >= 2.2) { p._stepAcc = 0; sfx.step(0.45); }
+        if (p._stepAcc >= 2.2) { p._stepAcc = 0; sfx.step(0.45); this._footDust(b); }
       }
     }
     if (this.player.alive) this.player.update(dt);
@@ -2930,6 +2945,7 @@ export class Game {
         e._stepAcc = 0;
         if (e === this.player) sfx.step(0.45);     // your own feet: centered, quieter than everyone else's
         else sfx.at('step', b.pos);              // everyone else: placed
+        this._footDust(b);
       }
     }
 

@@ -15,7 +15,34 @@ export const PALETTE = [
   { color: 0x4a6cd4, name: 'blue'  },
   { color: 0x4a9e4a, name: 'green' },
 ];
+// Snapshot of the original colors above, taken once at module load — the
+// one place the canonical defaults survive PALETTE being mutated per-map
+// (see mapgen.js's applyPaletteOverrides). Whatever map loads next resets
+// to these before applying its own overrides, so a map with no override
+// for a given block never inherits the PREVIOUS map's tint.
+export const DEFAULT_PALETTE_COLORS = PALETTE.map(p => p?.color);
 export const BLOCK = { GRASS: 1, DIRT: 2, SAND: 3, STONE: 4, BLUE: 5, GREEN: 6 };
+
+// Soft vertical sky gradient, painted once on a canvas — moved here from
+// main.js and generalized to take its three color stops as parameters, so
+// both the initial pre-game default (main.js, before any map is loaded)
+// and per-map atmosphere (Game#_applyMapAtmosphere, called after every
+// generateMap) can share one implementation instead of two copies that
+// could drift apart.
+export function skyGradient(top = '#4f9be8', mid = '#9ecdf3', bottom = '#dceefc') {
+  const c = document.createElement('canvas');
+  c.width = 2; c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, top);
+  grad.addColorStop(0.55, mid);
+  grad.addColorStop(1, bottom);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 2, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 // Classic per-face shading baked into vertex colors — crisp, flat, cheap.
 // Tinted per channel: the sunlit top reads warm, the shadowed sides cool.
@@ -31,7 +58,7 @@ const FACE_TINT = [
 // block type without any texture. ±5%, baked like everything else.
 function jitter(x, y, z) {
   const s = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453;
-  return 0.95 + 0.1 * (s - Math.floor(s));
+  return 0.92 + 0.16 * (s - Math.floor(s)); // ±8%, widened from ±5% — same computation either way, baked into vertex colors once at mesh-build time, so this costs nothing extra at render time
 }
 // Baked per-vertex ambient occlusion: a corner walled in by solid neighbors
 // renders darker than an open one. Pure vertex color — free on the GPU.
@@ -86,6 +113,7 @@ export class VoxelWorld {
     const puffMat = new THREE.MeshBasicMaterial({
       color: 0xffffff, transparent: true, opacity: 0.82, depthWrite: false,
     });
+    this.cloudMat = puffMat; // exposed so per-map atmosphere can retint it (see Game#_applyMapAtmosphere) — shared across every puff, so one color set touches all of them
     const rnd = mulberry32(20240);
     for (let i = 0; i < 16; i++) {
       const cl = new THREE.Group();

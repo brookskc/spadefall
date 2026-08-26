@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Game } from './game.js';
 import { initAudio } from './audio.js';
-import { SX, SZ } from './world.js';
+import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
@@ -49,21 +49,12 @@ function makeSun() {
 }
 scene.add(makeSun());
 
-// Soft vertical sky gradient, painted once on a canvas.
-function skyGradient() {
-  const c = document.createElement('canvas');
-  c.width = 2; c.height = 256;
-  const g = c.getContext('2d');
-  const grad = g.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0, '#4f9be8');
-  grad.addColorStop(0.55, '#9ecdf3');
-  grad.addColorStop(1, '#dceefc');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 2, 256);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
+// Soft vertical sky gradient — moved to world.js (and generalized to take
+// color-stop parameters) so per-map atmosphere can share the same
+// implementation instead of duplicating it. Called here with no
+// arguments, matching its defaults exactly — this stays the pre-game
+// fallback background, immediately overwritten by the real map's
+// atmosphere the moment the Game constructor runs below.
 
 // ---------------- lobby ----------------
 let playing = false;

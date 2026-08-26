@@ -1,8 +1,8 @@
 // game.js — orchestration: combat, flags, grenades, score, HUD.
 // Modes: 'solo' (local only), 'host' (authoritative, broadcasts), 'client' (thin).
 import * as THREE from 'three';
-import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE } from './world.js';
-import { generateMap, BASE, MAPS, mapsForMode } from './mapgen.js';
+import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
+import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere } from './mapgen.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
@@ -774,6 +774,7 @@ export class Game {
     this.world = new VoxelWorld(scene);
     this.mapIndex = 0;                   // MAPS rotation position
     generateMap(this.world, this.seed, this.mapIndex);
+    this._applyMapAtmosphere(this.mapIndex);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
     this.effects = new Effects(scene);
@@ -833,6 +834,23 @@ export class Game {
   }
 
   // Tear down and regenerate (host room start / client welcome / map rotation).
+  // Repaints the scene's sky, fog, cloud, and water tint to match whichever
+  // map just loaded — called after every generateMap() (the initial one
+  // in the constructor above, and the one inside rebuild() below), since
+  // a map rotation mid-session needs this refreshed just as much as the
+  // very first load does. VoxelWorld's own constructor (called just before
+  // generateMap in both places) is what creates world.water/cloudMat, so
+  // both are guaranteed to already exist by the time this runs.
+  _applyMapAtmosphere(mapIndex) {
+    const a = mapAtmosphere(mapIndex);
+    const oldSky = this.scene.background;
+    this.scene.background = skyGradient(...a.sky);
+    oldSky?.dispose?.(); // avoid leaking the previous map's canvas texture across rotations
+    this.scene.fog.color.setHex(a.fog);
+    this.world.water.material.color.setHex(a.water);
+    this.world.cloudMat.color.setHex(a.cloud);
+  }
+
   rebuild(seed, map = this.mapIndex) {
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
@@ -843,6 +861,7 @@ export class Game {
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
+    this._applyMapAtmosphere(map);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
     // Bodies capture the world instance at construction; the player and any

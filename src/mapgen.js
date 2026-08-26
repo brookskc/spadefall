@@ -1,7 +1,7 @@
 // mapgen.js — procedural terrain with two team bases, in four themed maps.
 // MAPS order is the rotation order; generateMap(world, seed, mapIndex) fills
 // world.data, re-anchors BASE, and meshes everything via world.buildAll().
-import { SX, SY, SZ, SEA, BLOCK } from './world.js';
+import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS } from './world.js';
 
 // Deterministic value noise — smooth, seedable, dependency-free.
 function makeNoise(seed) {
@@ -30,16 +30,32 @@ function mulberry32(a) {
 // rotation (its long sniper lanes punish flag runs) but kept for deathmatch
 // and king of the hill, mirrored about midfield so the hill fight is fair.
 // hill: king-of-the-hill zone — center column and radius in blocks.
+// atmosphere: optional sky/fog/cloud/water tint for this map (see
+// applyAtmosphere below and Game#_applyMapAtmosphere) — every field is
+// optional and falls back to the neutral default (GREENBELT's own look,
+// which is the baseline every other map used to be stuck with regardless
+// of theme). paletteOverrides: optional per-block-name color overrides,
+// reset to DEFAULT_PALETTE_COLORS before each map's own overrides apply
+// (see applyPaletteOverrides), so a map with no override never inherits
+// whatever the PREVIOUS map tinted. First-pass color choices — the whole
+// point of this being data instead of hardcoded is that retuning any of
+// these later is just changing a hex value here, nothing structural.
 export const MAPS = [
   { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null },
-  { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null },
-  { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null },
+  { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
+    atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4 } },
+  { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
+    atmosphere: { sky: ['#3d6b52', '#7ba889', '#c7d9c2'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 } },
+    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 } },
+    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    atmosphere: { sky: ['#4a7fc4', '#a8c8e8', '#e0ecf5'], fog: 0xc5d8ea } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 } },
+    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    atmosphere: { sky: ['#c25a3a', '#e08a5a', '#f0c090'], fog: 0xd9a878, cloud: 0xe8c4a8, water: 0x6a5548 },
+    paletteOverrides: { stone: 0x6e4a42 } },
 ];
 
 // Mutated by each generator; game.js reads spawn points and flag stands here.
@@ -529,10 +545,34 @@ MAPS[4].gen = genCrown;
 MAPS[5].gen = genCaldera;
 
 // ---------------------------------------------------------------- entry
+// Resets every named palette entry to its true default, then applies
+// whatever this map wants different — so a map with no paletteOverrides
+// at all always sees the real original colors, never a leftover tint
+// from whichever map generated right before it (PALETTE is one shared,
+// mutable array read at mesh-build time, not something copied per map).
+function applyPaletteOverrides(mapIndex) {
+  const overrides = MAPS[mapIndex % MAPS.length].paletteOverrides ?? {};
+  for (let i = 1; i < PALETTE.length; i++)
+    PALETTE[i].color = overrides[PALETTE[i].name] ?? DEFAULT_PALETTE_COLORS[i];
+}
+
+// GREENBELT's own look (no atmosphere entry) is the neutral baseline every
+// other map's fields fall back to individually — a map can override just
+// its fog, say, and still inherit the default sky/cloud/water untouched.
+const DEFAULT_ATMOSPHERE = { sky: ['#4f9be8', '#9ecdf3', '#dceefc'], fog: 0xcfe4f7, cloud: 0xffffff, water: 0x2f6fb8 };
+export function mapAtmosphere(mapIndex) {
+  const a = MAPS[mapIndex % MAPS.length].atmosphere ?? {};
+  return { ...DEFAULT_ATMOSPHERE, ...a };
+}
+
 export function generateMap(world, seed = 1979, mapIndex = 0) {
   // Re-anchor the bases to this map's defaults before the generator runs.
   BASE.green.x = 36; BASE.green.z = SZ / 2; BASE.green.plateau = 16;
   BASE.blue.x = SX - 36; BASE.blue.z = SZ / 2; BASE.blue.plateau = 16;
+  // Must land before buildAll() below — chunk colors are baked into
+  // vertex data once at mesh-build time, not read live per frame, so the
+  // override has to be in place before generation, not after.
+  applyPaletteOverrides(mapIndex);
   world.data.fill(0);
   MAPS[mapIndex % MAPS.length].gen(world, seed);
   world.buildAll();

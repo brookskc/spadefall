@@ -1697,17 +1697,20 @@ export class Game {
   // that's supposed to, so the whole point of the marker (and the delay
   // in _confirmAirstrike above) is giving the target team a real chance
   // to see it coming and get clear — not free, unavoidable damage.
+  // Sound + feed message only — the visual pillar this used to also
+  // create/reposition here is gone. It was built to be seen from the
+  // ground by bystanders, but the guided-fall camera shares its exact
+  // XZ position and dives straight through it, and no ordering fix
+  // reliably kept it out of that camera's view: hiding it required
+  // running strictly after every possible _telegraph() call in a given
+  // frame, but host/solo's own steering sync and a guest's incoming
+  // broadcast handling both call this function from places that run
+  // AFTER any hide check placed earlier in the frame, undoing it the
+  // instant a key was held — a flashing show/hide every single frame
+  // steering was active, not an occasional glitch. Simplest fix that's
+  // actually correct: no visual, nothing to be in the way of.
   _telegraph(x, y, z) {
     sfx.telegraph();
-    if (!this._strikeMarker) {
-      const geo = new THREE.BoxGeometry(1.5, 60, 1.5);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xe05a4e, transparent: true, opacity: 0.55, depthWrite: false });
-      this._strikeMarker = new THREE.Mesh(geo, mat);
-      this.scene.add(this._strikeMarker);
-    }
-    this._strikeMarker.position.set(x, y + 30, z);
-    this._strikeMarker.visible = true;
-    this._markerT = 3; // ticked down in update() below, on every machine — no explicit "hide" message needed, it just matches the 3s delay above
     this.feed('AIRSTRIKE INBOUND');
   }
 
@@ -2832,28 +2835,6 @@ export class Game {
     {
       const p = this.player, e = p.body.eye();
       setListener({ x: e.x, y: e.y, z: e.z, rx: Math.sin(p.yaw), rz: Math.cos(p.yaw) });
-    }
-    // Marker fade runs unconditionally, before the client/host split below
-    // — every machine independently draws its own copy of this mesh (see
-    // _telegraph), so every machine needs to independently time out its
-    // own copy too, host and guests alike, not just whichever one is
-    // authoritative for the actual strike.
-    if (this._strikeMarker && this._strikeMarker.visible) {
-      this._markerT -= dt;
-      if (this._markerT <= 0) this._strikeMarker.visible = false;
-    }
-    // Force-hidden while THIS machine's own camera is piloting or falling:
-    // the marker is a 60-unit-tall pillar built to be seen from the
-    // ground by bystanders, never designed to be flown through — the
-    // guided-fall camera shares its exact XZ position and dives straight
-    // down through its body, which read as an opaque red square filling
-    // the view partway down. Checked independently of the fade timer
-    // above (which governs whether OTHER players still see it) — this is
-    // specifically about not rendering it INTO the camera that's
-    // currently diving through its own airspace, regardless of whose
-    // strike it actually is.
-    if (this._strikeMarker && (this.player._piloting || this.player._fallingT > 0)) {
-      this._strikeMarker.visible = false;
     }
     if (this.mode === 'client') { this._clientUpdate(dt); this.world.flushDirty(); return; }
 

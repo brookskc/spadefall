@@ -1622,7 +1622,13 @@ export class Game {
   // craterR: below this range, always hits regardless of cover (you're
   // standing in the fireball itself). dmgRadius/baseDamage/minDamage:
   // linear falloff from baseDamage at the center to minDamage at the edge.
-  _blastDamage(pos, owner, craterR, dmgRadius, baseDamage, minDamage) {
+  // noCoverR defaults to craterR — grenades don't pass it, so their
+  // behavior is completely unchanged. Airstrike passes a wider, explicit
+  // value instead (see _airstrikeImpact): the visual crater size and the
+  // "cover doesn't matter here" radius don't have to be the same number,
+  // they just always were for grenades because nobody had a reason to
+  // pull them apart until now.
+  _blastDamage(pos, owner, craterR, dmgRadius, baseDamage, minDamage, noCoverR = craterR) {
     for (const e of this.entities()) {
       if (!e.alive) continue;
       // Measured to center mass, not the eye — a shot to the ground under
@@ -1632,7 +1638,7 @@ export class Game {
       if (d >= dmgRadius) continue;
       // Cover has to mean something: without this, a blast behind a wall
       // it never breached still dealt damage through solid stone.
-      if (d > craterR && !this.losClear(pos, center)) continue;
+      if (d > noCoverR && !this.losClear(pos, center)) continue;
       this.damage(e, Math.max(minDamage, baseDamage * (1 - d / dmgRadius)), owner, pos);
       // Grenades can catch their own thrower (this loop is entities(), no
       // team filter, unlike gunfire/melee which only ever loop foesOf) —
@@ -1710,13 +1716,31 @@ export class Game {
   // 10-kill streak's worth of buildup. Same explodeAt + editLog/'boom'
   // sync pattern as a grenade, just larger numbers throughout.
   _airstrikeImpact(pos, owner) {
-    const R = 4.5;
+    const R = 4.5; // visual crater radius — unchanged
     this.explodeAt(pos.x, pos.y, pos.z, R, owner);
     if (this.mode === 'host') {
       this.editLog.push(['b', pos.x, pos.y, pos.z, R]);
       this.net.broadcast({ t: 'e', k: 'boom', x: pos.x, y: pos.y, z: pos.z, r: R });
     }
-    this._blastDamage(pos, owner, R, 14, 180, 20);
+    // The gap that made "hit in/around the target should kill them" not
+    // quite true: anywhere the raw damage falloff below is already
+    // lethal against full health (100hp) deserves to actually BE lethal,
+    // not silently zeroed by minor cover a few units past the crater's
+    // edge — the old behavior only ignored cover inside the crater
+    // itself (R=4.5), even though the falloff alone stays lethal out to
+    // ~6.22 units. Derived, not hardcoded, so a future retune of the
+    // damage numbers below keeps this radius honest automatically:
+    // dmgRadius * (1 - maxHealth/baseDamage). Deliberately the EXACT
+    // value, not rounded up — the strict ">" comparison in _blastDamage
+    // already treats a hit exactly at this distance as inside the
+    // no-cover zone, so no margin is needed; rounding UP would be a real
+    // mistake here (caught by a failing test before this shipped), since
+    // it widens which distances ignore cover without touching how much
+    // damage they deal — past this exact point, damage is BELOW 100
+    // regardless, so a wider radius would just ignore cover for hits
+    // that were never going to be lethal anyway, achieving nothing.
+    const NO_COVER_R = 14 * (1 - 100 / 180); // ≈ 6.222
+    this._blastDamage(pos, owner, R, 14, 180, 20, NO_COVER_R);
   }
 
   // Visual + terrain side of an explosion — identical on host and clients.

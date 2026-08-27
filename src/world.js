@@ -133,6 +133,17 @@ function dampColor(c) {
 // Baked per-vertex ambient occlusion: a corner walled in by solid neighbors
 // renders darker than an open one. Pure vertex color — free on the GPU.
 const AO_LEVEL = [0.33, 0.57, 0.79, 1.0]; // widened for a punchier, more sculptural feel — same curve shape as before (each level's deviation from full brightness scaled by 1.4x), not arbitrary new numbers. Was [0.52, 0.69, 0.85, 1.0].
+// Edge definition: a subtle extra darkening where a different block type
+// borders this voxel at one of AO's own probe positions — index is a
+// direct count of mismatched-type neighbors (0-3), unlike AO_LEVEL's
+// inverted indexing. Deliberately a much narrower range than AO's own
+// (0.33-1.0) — this is meant to read as a hint of seam definition, not
+// another layer of heavy shading stacked on top of it. Applies to every
+// block type, including BLUE/GREEN (placed, team-colored blocks): unlike
+// patch blending or dampness, this never changes a block's hue or
+// identity, just adds definition at the seam between two materials, so
+// there's no reason to exclude a player's own build from it.
+const EDGE_LEVEL = [1.0, 0.94, 0.89, 0.85];
 // Corner order matters: with indices (0,1,2),(2,1,3) the triangles must wind
 // counter-clockwise seen from OUTSIDE, or the face is backface-culled and the
 // terrain shows sky-holes when viewed along ±z.
@@ -299,14 +310,33 @@ export class VoxelWorld {
               const s0 = o[t0] ? 1 : -1, s1 = o[t1] ? 1 : -1;
               const p = [n[0], n[1], n[2]];
               p[t0] += s0;
-              const side0 = this.get(p[0], p[1], p[2]) ? 1 : 0;
+              const nv0 = this.get(p[0], p[1], p[2]);
+              const side0 = nv0 ? 1 : 0;
               p[t0] -= s0; p[t1] += s1;
-              const side1 = this.get(p[0], p[1], p[2]) ? 1 : 0;
+              const nv1 = this.get(p[0], p[1], p[2]);
+              const side1 = nv1 ? 1 : 0;
               p[t0] += s0;
-              const corn = this.get(p[0], p[1], p[2]) ? 1 : 0;
+              const nvc = this.get(p[0], p[1], p[2]);
+              const corn = nvc ? 1 : 0;
               const a = side0 && side1 ? 0 : 3 - (side0 + side1 + corn);
-              ao.push(a);
-              const b = AO_LEVEL[a];
+              // Edge definition: the same three neighbor probes above,
+              // but checking whether a solid probe is a genuinely
+              // DIFFERENT block type from this voxel, not just whether
+              // it's occupied — a subtle extra darkening where two
+              // different materials meet (a grass column next to a
+              // taller stone outcrop, say), independent of and
+              // deliberately much weaker than AO's own occlusion
+              // darkening. Reuses nv0/nv1/nvc, already fetched for AO —
+              // no new voxel lookups. Note this only catches VERTICAL
+              // material transitions (whatever's at the probe height,
+              // one step above this face), not flat, same-height
+              // boundaries like a beach where sand meets grass at equal
+              // elevation — genuinely catching those would need probing
+              // sideways along the face's own plane, a different check
+              // this reuse deliberately doesn't add.
+              const edges = (nv0 && nv0 !== v ? 1 : 0) + (nv1 && nv1 !== v ? 1 : 0) + (nvc && nvc !== v ? 1 : 0);
+              const b = AO_LEVEL[a] * EDGE_LEVEL[edges];
+              ao.push(b); // the diagonal-flip check below now compares actual final brightness, not just raw AO counts, so it accounts for edge darkening too — safe for the no-edge case too, since EDGE_LEVEL[0]=1.0 makes this identical to comparing AO_LEVEL[a] alone, which is monotonic in a exactly like the old raw counts were
               col.push(jr * tint[0] * b, jg * tint[1] * b, jb * tint[2] * b);
             }
             // Flip the quad diagonal toward the brighter corners — otherwise

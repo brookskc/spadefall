@@ -45,7 +45,7 @@ export const MAPS = [
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
     atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4 } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
-    atmosphere: { sky: ['#3d6b52', '#7ba889', '#c7d9c2'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a } },
+    atmosphere: { sky: ['#75a98d', '#b1c8b8', '#e3ebe0'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
     hill: { x: SX / 2, z: SZ / 2, r: 8 },
     atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae } },

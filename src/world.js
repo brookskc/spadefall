@@ -62,7 +62,7 @@ function jitter(x, y, z) {
 }
 // Baked per-vertex ambient occlusion: a corner walled in by solid neighbors
 // renders darker than an open one. Pure vertex color — free on the GPU.
-const AO_LEVEL = [0.52, 0.69, 0.85, 1.0];
+const AO_LEVEL = [0.33, 0.57, 0.79, 1.0]; // widened for a punchier, more sculptural feel — same curve shape as before (each level's deviation from full brightness scaled by 1.4x), not arbitrary new numbers. Was [0.52, 0.69, 0.85, 1.0].
 // Corner order matters: with indices (0,1,2),(2,1,3) the triangles must wind
 // counter-clockwise seen from OUTSIDE, or the face is backface-culled and the
 // terrain shows sky-holes when viewed along ±z.

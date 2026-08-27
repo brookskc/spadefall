@@ -478,12 +478,39 @@ export class Bot {
     if (!beeline && !b.inWater && this.wetT <= 0 && !undermining && dir.lengthSq() > 0.01) {
       const blocked = w.solid(Math.floor(b.pos.x + dir.x * 1.2), fy, Math.floor(b.pos.z + dir.z * 1.2))
         || w.solid(Math.floor(b.pos.x + dir.x * 1.2), fy + 1, Math.floor(b.pos.z + dir.z * 1.2));
+      let routed = false;
       if (blocked) for (const deg of [30, -30, 60, -60]) {
         const rad = deg * Math.PI / 180;
         const rx = dir.x * Math.cos(rad) - dir.z * Math.sin(rad);
         const rz = dir.x * Math.sin(rad) + dir.z * Math.cos(rad);
         const px = Math.floor(b.pos.x + rx * 1.4), pz = Math.floor(b.pos.z + rz * 1.4);
-        if (!w.solid(px, fy, pz) && !w.solid(px, fy + 1, pz)) { dir.set(rx, 0, rz).normalize(); break; }
+        if (!w.solid(px, fy, pz) && !w.solid(px, fy + 1, pz)) { dir.set(rx, 0, rz).normalize(); routed = true; break; }
+      }
+      // Nothing clear immediately to either side — before ever reaching
+      // for the shovel, check a bit further along the wall for somewhere
+      // it's already open: a gate, a tunnel a bot or player already dug,
+      // any existing gap. No memory of who dug what or when — this reads
+      // the world exactly as it stands right now, so it finds a genuinely
+      // fresh hole exactly as readily as a made one from ten minutes ago,
+      // which is the actual point: prefer whatever's already open over
+      // making something new, not specifically "remember the old ones."
+      // Checked at two distances along the same heading, both required
+      // clear, so a lone gap glimpsed only at the far point (something
+      // else in the way closer in) doesn't get treated as reachable. Same
+      // four diagonal angles as the short-range pass, not +-90: a purely
+      // sideways probe never actually advances into the wall's own plane
+      // at all (its forward component is zero), so it would read as
+      // "clear" whether or not a real opening exists a few blocks over —
+      // trivially true, not a genuine check.
+      if (blocked && !routed) for (const deg of [30, -30, 60, -60]) {
+        const rad = deg * Math.PI / 180;
+        const rx = dir.x * Math.cos(rad) - dir.z * Math.sin(rad);
+        const rz = dir.x * Math.sin(rad) + dir.z * Math.cos(rad);
+        const mx = Math.floor(b.pos.x + rx * 2.5), mz = Math.floor(b.pos.z + rz * 2.5);
+        const px = Math.floor(b.pos.x + rx * 5), pz = Math.floor(b.pos.z + rz * 5);
+        const midOpen = !w.solid(mx, fy, mz) && !w.solid(mx, fy + 1, mz);
+        const farOpen = !w.solid(px, fy, pz) && !w.solid(px, fy + 1, pz);
+        if (midOpen && farOpen) { dir.set(rx, 0, rz).normalize(); break; }
       }
     }
     // Probe the contact column first, then a step beyond: a bot pressed

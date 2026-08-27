@@ -7,12 +7,13 @@ import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { GUN_CLASSES } from './player.js';
+import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps } from './settings.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
+renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -465,6 +466,54 @@ const mapPref = $('mapPref'), modePref = $('modePref');
   renderStartTeam();
 }
 
+// Graphics preset picker: Low/Medium/High. Pixel ratio applies live —
+// setPixelRatio can change on an already-running renderer. Antialiasing
+// cannot: it's fixed at WebGL context creation, so a change here only
+// takes effect next launch — gfxReloadNote says so explicitly rather
+// than silently doing nothing visible until a reload happens to occur.
+// Particle pool caps (see settings.js/effects.js) apply on the next
+// Effects construction, which a map rebuild already triggers often
+// enough that this isn't worth forcing immediately either.
+{
+  const opts = document.querySelectorAll('#gfxOpts .opt');
+  const note = $('gfxReloadNote');
+  const startAA = gfxPreset().antialias; // what the renderer was actually built with, to detect a genuine pending AA change
+  function renderGfx() {
+    const level = getGfxLevel();
+    for (const el of opts) el.classList.toggle('picked', el.dataset.gfx === level);
+    if (note) note.classList.toggle('show', gfxPreset(level).antialias !== startAA);
+  }
+  for (const el of opts) {
+    el.addEventListener('click', () => {
+      const level = el.dataset.gfx;
+      setGfxLevel(level);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset(level).pixelRatio));
+      renderGfx();
+    });
+  }
+  renderGfx();
+}
+
+// FPS counter toggle — off by default, so it never appears unasked for.
+// The frame loop below only touches #fps's text when it's visible; this
+// handler owns visibility itself, for instant feedback on click.
+{
+  const opts = document.querySelectorAll('#fpsOpts .opt');
+  function renderFpsOpt() {
+    const on = getShowFps();
+    for (const el of opts) el.classList.toggle('picked', el.dataset.fps === (on ? 'on' : 'off'));
+    const el = $('fps');
+    if (el) el.style.display = on ? 'block' : 'none';
+  }
+  for (const el of opts) {
+    el.addEventListener('click', () => {
+      setShowFps(el.dataset.fps === 'on');
+      renderFpsOpt();
+    });
+  }
+  renderFpsOpt();
+}
+
 // Reads the preference the picker above sets, or undefined if the player
 // never touched it ('auto') — this is what every fresh-join call site
 // sends so the host can honor it. Migration/rejoin knocks don't use this:
@@ -805,6 +854,10 @@ if (params.get('mp') === 'host') {
 
 // ---------------- loop ----------------
 const clock = new THREE.Clock();
+// FPS tracking: an exponential moving average (raw 1/dt is far too
+// jittery frame to frame to read), display text only refreshed every
+// 0.4s so it's actually readable rather than flickering every frame.
+let fpsEma = 60, fpsDisplayT = 0;
 let menuT = Math.PI * 0.15;
 let menuMapT = 0; // seconds the current backdrop map has been showing
 // Test hook: ?mmt=2 rotates every 2s.
@@ -845,6 +898,18 @@ function frame() {
   requestAnimationFrame(frame);
   const wallDt = clock.getDelta();          // real elapsed time
   const dt = Math.min(wallDt, 0.05);        // sim step, capped for physics
+
+  if (wallDt > 0) fpsEma = fpsEma * 0.9 + (1 / wallDt) * 0.1;
+  fpsDisplayT += wallDt;
+  if (fpsDisplayT >= 0.4) {
+    fpsDisplayT = 0;
+    const el = $('fps');
+    if (el && el.style.display !== 'none') {
+      const f = Math.round(fpsEma);
+      el.textContent = f + ' fps';
+      el.className = f < 25 ? 'bad' : f < 45 ? 'warn' : '';
+    }
+  }
 
   // The host is authoritative — the simulation must never pause, even while
   // the host's own menu is up, or every client freezes with it.

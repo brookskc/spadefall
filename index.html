@@ -123,6 +123,14 @@
     letter-spacing:2px; opacity:.5; text-align:right; }
   #ping.warn { opacity:.85; color:#ffd97a; }
   #ping.bad { opacity:.9; color:#e05a4e; }
+  /* Same corner-label treatment as #ping, directly below it — opt-in
+     (off by default, toggled via style.display in JS, same pattern
+     #airstrikeReady already uses), so it never competes for attention
+     with anything else here unless the player asked to see it. */
+  #fps { position:absolute; right:22px; top:36px; font-size:12px;
+    letter-spacing:2px; opacity:.5; text-align:right; display:none; }
+  #fps.warn { opacity:.85; color:#ffd97a; }
+  #fps.bad { opacity:.9; color:#e05a4e; }
   /* semi-transparent overview, top left under the room tag; 192px = exactly
      3px per map cell, so the pixelated upscale stays perfectly square */
   #minimap { position:absolute; left:22px; top:48px; width:192px; height:192px;
@@ -349,6 +357,22 @@
   #startTeamOpts .opt[data-team="blue"].picked { color:var(--blue); }
   #startTeamOpts .opt[data-team="auto"].picked { color:#ffd97a; }
 
+  /* Display settings — same picker pattern as the team/class pickers
+     above, just two smaller groups side by side. Not home-only or
+     only-paused: unlike everything else in .prefs, this is genuinely
+     useful in both contexts — set it up before playing, or drop it down
+     mid-session if a match is running rough. */
+  #displaySettings { margin-top:14px; font-size:12px; letter-spacing:2px;
+    text-transform:uppercase; display:flex; gap:28px; justify-content:center; }
+  #displaySettings .lbl { opacity:.5; margin-bottom:4px; }
+  #gfxOpts, #fpsOpts { display:flex; gap:14px; }
+  #gfxOpts .opt, #fpsOpts .opt { opacity:.5; cursor:pointer; }
+  #gfxOpts .opt:hover, #fpsOpts .opt:hover { opacity:.8; }
+  #gfxOpts .opt.picked, #fpsOpts .opt.picked { opacity:1; color:#ffd97a; }
+  #gfxReloadNote { margin-top:6px; font-size:11px; letter-spacing:1px;
+    opacity:0; text-transform:none; transition:opacity .2s; }
+  #gfxReloadNote.show { opacity:.6; }
+
   /* chat — lower left, above the vitals panel */
   #chat { position:absolute; left:22px; bottom:102px; width:380px; max-width:44vw;
     font-size:13px; }
@@ -393,6 +417,7 @@
     <div id="scopeNotches"><div class="center"></div></div>
     <div class="panel" id="roomcode">ROOM <b>····</b></div>
     <div id="ping"></div>
+    <div id="fps"></div>
     <canvas id="minimap" width="192" height="192"></canvas>
     <div class="panel" id="vitals">
       <div id="healthbar"><div id="healthfill"></div></div>
@@ -489,6 +514,24 @@
     <div class="support home-only">
       enjoying this — <a class="plink" href="https://ko-fi.com/prairielab" target="_blank" rel="noopener">support it on ko-fi</a>
     </div>
+    <div id="displaySettings">
+      <div>
+        <div class="lbl">graphics</div>
+        <div id="gfxOpts">
+          <span class="opt" data-gfx="low">LOW</span>
+          <span class="opt" data-gfx="medium">MEDIUM</span>
+          <span class="opt" data-gfx="high">HIGH</span>
+        </div>
+      </div>
+      <div>
+        <div class="lbl">show fps</div>
+        <div id="fpsOpts">
+          <span class="opt" data-fps="off">OFF</span>
+          <span class="opt" data-fps="on">ON</span>
+        </div>
+      </div>
+    </div>
+    <div id="gfxReloadNote">antialiasing changes take effect next launch</div>
   </div>
 
   <div class="screen hidden" id="browser">

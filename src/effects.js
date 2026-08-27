@@ -1,8 +1,8 @@
 // effects.js — tracers, debris, explosions, screen shake. Small pools, no GC churn.
 import * as THREE from 'three';
 import { PALETTE } from './world.js';
+import { gfxPreset } from './settings.js';
 
-const MAX_DEBRIS = 320;
 const _m = new THREE.Matrix4(), _c = new THREE.Color(), _q = new THREE.Quaternion();
 const _s = new THREE.Vector3(), _p = new THREE.Vector3();
 
@@ -10,12 +10,18 @@ export class Effects {
   constructor(scene) {
     this.scene = scene;
     this.shake = 0;
+    // Pool capacities read once, from whatever graphics preset is active
+    // at construction — a modest but genuine performance lever: fewer
+    // simultaneous instances to update during a chaotic firefight, which
+    // is exactly when frame drops are most noticeable on weak hardware.
+    const preset = gfxPreset();
+    this.maxDebris = preset.debris;
 
     // Debris — one InstancedMesh, recycled slots.
     this.debris = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.16, 0.16, 0.16),
       new THREE.MeshBasicMaterial(),
-      MAX_DEBRIS
+      this.maxDebris
     );
     this.debris.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.debris.count = 0;
@@ -29,7 +35,7 @@ export class Effects {
       color: 0xffe9a8, transparent: true, opacity: 0.9,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    for (let i = 0; i < 48; i++) {
+    for (let i = 0; i < preset.tracers; i++) {
       const m = new THREE.Mesh(tGeo, tMat.clone());
       m.visible = false;
       scene.add(m);
@@ -47,7 +53,7 @@ export class Effects {
       color: 0xfff2c4, transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    for (let i = 0; i < 48; i++) {
+    for (let i = 0; i < preset.flashes; i++) {
       const m = new THREE.Mesh(fGeo, fMat.clone());
       m.visible = false;
       scene.add(m);
@@ -92,7 +98,7 @@ export class Effects {
   }
 
   burst(pos, count, hex, power = 5) {
-    for (let i = 0; i < count && this.particles.length < MAX_DEBRIS; i++) {
+    for (let i = 0; i < count && this.particles.length < this.maxDebris; i++) {
       this.particles.push({
         pos: pos.clone().add(new THREE.Vector3((Math.random() - .5) * .6, Math.random() * .5, (Math.random() - .5) * .6)),
         vel: new THREE.Vector3((Math.random() - .5) * power, Math.random() * power, (Math.random() - .5) * power),

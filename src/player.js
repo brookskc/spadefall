@@ -870,6 +870,20 @@ export class Player {
     this._flyPos = null; // fresh flycam start point next death, not wherever it last was
     this.crouched = false;
     this.body.half.h = 1.75;
+    // Killstreak and related perk state: die() already clears all of this
+    // on a normal mid-match death, making this redundant (but harmless)
+    // for that path. It's not redundant here: rebuild() (a new match
+    // starting, or a map rotating) calls respawn() directly, with no
+    // preceding death, whenever the previous match ended while this
+    // player was still alive. Without this, an active streak — or an
+    // in-progress Overcharge, or mid-fall airstrike piloting — would
+    // silently carry into the next match instead of starting clean.
+    this._mkCount = 0; this._mkT = null;
+    this._streak = 0;
+    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._piloting = false; this._fallingT = 0;
+    this._lastAimDir = null; this._lastAimT = null;
+    this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this.vmRoot.visible = true;
     this._syncViewmodel(); // full belt: the hand holds a frag again
     sfx.respawn();

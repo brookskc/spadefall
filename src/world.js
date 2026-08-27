@@ -60,6 +60,51 @@ function jitter(x, y, z) {
   const s = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453;
   return 0.92 + 0.16 * (s - Math.floor(s)); // ±8%, widened from ±5% — same computation either way, baked into vertex colors once at mesh-build time, so this costs nothing extra at render time
 }
+// Smooth, low-frequency noise for broad color patches — deliberately NOT
+// the same technique as jitter() above (a high-frequency per-voxel hash
+// that varies completely between adjacent voxels, which is what makes it
+// read as fine speckle). Summing a few sine waves at small frequencies
+// instead makes neighboring voxels return similar values, only drifting
+// slowly across space — patches of tens of voxels, not per-voxel fleck.
+// A local, simpler cousin of mapgen.js's own value-noise, not a shared
+// import: mapgen.js already imports FROM world.js, so the reverse would
+// create a circular dependency. salt gives each block type an
+// independently-phased pattern so grass and dirt patches, say, don't
+// happen to line up at the same x,z. Bounded in [0,1] by construction —
+// three sines each in [-1,1] sum to at most [-3,3], so no clamping needed.
+function patchNoise(x, z, salt) {
+  const s = Math.sin((x + salt * 71) * 0.07 + (z + salt * 37) * 0.11)
+          + Math.sin((x + salt * 19) * 0.045 - (z + salt * 53) * 0.09 + 1.7)
+          + Math.sin((x + salt * 83) * 0.095 + (z + salt * 29) * 0.06 + 3.3);
+  return (s / 3 + 1) / 2;
+}
+// Which block types get patch coloring, and the derived variant colors to
+// blend between — computed once per buildAll() (map load or rotation),
+// not per voxel: the HSL offsets are the same for every voxel of a given
+// type within one map, so recomputing them per-voxel across a whole
+// chunk's worth of terrain would just be repeating identical work.
+// Derived from PALETTE itself via small, symmetric HSL offsets rather
+// than hardcoded new hex values — this is what keeps patches
+// automatically matching whatever the palette says, including any
+// future per-map override (Caldera's darkened stone, say), the same
+// "read live from PALETTE" property footstep dust and the map-atmosphere
+// system both already rely on. BLUE/GREEN (the placed, team-colored
+// block types) are deliberately excluded — a player's own team-colored
+// wall should stay a predictable, recognizable color, not develop random
+// patchiness.
+const PATCH_TYPES = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.SAND, BLOCK.STONE];
+let patchVariants = null;
+function computePatchVariants() {
+  const v = {};
+  for (const t of PATCH_TYPES) {
+    const base = new THREE.Color(PALETTE[t].color);
+    v[t] = {
+      low: base.clone().offsetHSL(-0.012, -0.06, -0.05),
+      high: base.clone().offsetHSL(0.012, 0.06, 0.05),
+    };
+  }
+  return v;
+}
 // Baked per-vertex ambient occlusion: a corner walled in by solid neighbors
 // renders darker than an open one. Pure vertex color — free on the GPU.
 const AO_LEVEL = [0.33, 0.57, 0.79, 1.0]; // widened for a punchier, more sculptural feel — same curve shape as before (each level's deviation from full brightness scaled by 1.4x), not arbitrary new numbers. Was [0.52, 0.69, 0.85, 1.0].
@@ -184,6 +229,7 @@ export class VoxelWorld {
   }
 
   buildAll() {
+    patchVariants = computePatchVariants(); // palette may have just changed (new map, or an override) — recompute once here, reused by every buildChunk call below and by any later single-chunk rebuild triggered by a dig, since the palette can't change again until the next buildAll()
     for (let cx = 0; cx < SX / CHUNK; cx++)
       for (let cz = 0; cz < SZ / CHUNK; cz++) this.buildChunk(cx, cz);
   }
@@ -204,6 +250,8 @@ export class VoxelWorld {
           const v = this.data[idx(x, y, z)];
           if (!v) continue;
           c.setHex(PALETTE[v].color);
+          const variant = patchVariants?.[v];
+          if (variant) c.lerpColors(variant.low, variant.high, patchNoise(x, z, v));
           const j = jitter(x, y, z);
           const jr = c.r * j, jg = c.g * j, jb = c.b * j;
           for (let f = 0; f < 6; f++) {

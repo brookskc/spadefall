@@ -122,7 +122,22 @@ export class Bot {
   // single file down the middle of the map.
   _laned(pos) {
     const v = pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y ?? 0, pos.z);
-    v.z += this.lane;
+    // Tapers the lane spread to zero as the destination gets close, rather
+    // than holding a fixed lane offset (+-18, see the constructor) all
+    // the way in. The spread is good for crossing open midfield without
+    // bunching up — that's the whole reason lanes exist — but the enemy
+    // base's perimeter wall (buildBase, mapgen.js) only opens gates
+    // within 2 units of the flag's own z. A full 18-unit lane offset
+    // points two-thirds of attacking bots at solid wall instead of a
+    // gate or the flag itself — and goal() keeps recomputing that same
+    // offset point every frame, so a bot stuck on it never moves off,
+    // just digs at whatever's in front of it indefinitely. Full offset
+    // stays in beyond ~35 units out (still spread crossing the field);
+    // zero within 15 (already converged well before the wall's own
+    // 9-unit radius comes into play).
+    const d = Math.hypot(v.x - this.body.pos.x, v.z - this.body.pos.z);
+    const taper = Math.min(1, Math.max(0, (d - 15) / 20));
+    v.z += this.lane * taper;
     return v;
   }
 

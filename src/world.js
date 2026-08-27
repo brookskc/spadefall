@@ -105,6 +105,31 @@ function computePatchVariants() {
   }
   return v;
 }
+// Water-proximity dampness: ground near sea level shifts darker and
+// cooler, reusing patch blending's exact "shift toward an HSL-offset
+// variant" mechanism above with a different signal — height relative to
+// SEA instead of noise. A cheap approximation, worth being upfront
+// about: checking height alone also catches low-lying ground that isn't
+// true coastline, not just actual shorelines. A precise version (check
+// for an actually-nearby water voxel) is possible but costs more per
+// vertex; starting with this and only reaching for that if the
+// approximation looks wrong in practice. Symmetric around SEA (applies
+// both just above and just below the waterline) rather than one-sided,
+// since that's simpler to reason about and tune than deciding how much
+// weaker the underwater side should be — submerged terrain already gets
+// visually distinguished by the semi-transparent water plane on top of
+// it regardless.
+const DAMP_RANGE = 4;  // blocks above/below SEA where dampness fades in/out
+const DAMP_MAX = 0.55; // peak blend strength right at SEA — never fully overrides the base color, just shifts it
+function dampness(y) {
+  const dist = Math.abs(y - SEA);
+  if (dist >= DAMP_RANGE) return 0;
+  const t = 1 - dist / DAMP_RANGE;
+  return t * t * (3 - 2 * t) * DAMP_MAX; // smoothstep ease, same formula mapgen.js's own noise already uses for its falloffs
+}
+function dampColor(c) {
+  return c.clone().offsetHSL(0.025, 0.06, -0.10); // cooler (shifted toward blue), a touch more saturated, and darker — a wet-look shift, not a hue swap
+}
 // Baked per-vertex ambient occlusion: a corner walled in by solid neighbors
 // renders darker than an open one. Pure vertex color — free on the GPU.
 const AO_LEVEL = [0.33, 0.57, 0.79, 1.0]; // widened for a punchier, more sculptural feel — same curve shape as before (each level's deviation from full brightness scaled by 1.4x), not arbitrary new numbers. Was [0.52, 0.69, 0.85, 1.0].
@@ -251,7 +276,11 @@ export class VoxelWorld {
           if (!v) continue;
           c.setHex(PALETTE[v].color);
           const variant = patchVariants?.[v];
-          if (variant) c.lerpColors(variant.low, variant.high, patchNoise(x, z, v));
+          if (variant) {
+            c.lerpColors(variant.low, variant.high, patchNoise(x, z, v));
+            const damp = dampness(y);
+            if (damp > 0) c.lerp(dampColor(c), damp);
+          }
           const j = jitter(x, y, z);
           const jr = c.r * j, jg = c.g * j, jb = c.b * j;
           for (let f = 0; f < 6; f++) {

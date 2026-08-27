@@ -3,7 +3,6 @@
 import * as THREE from 'three';
 import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
 import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere } from './mapgen.js';
-import { Foliage } from './foliage.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
@@ -776,9 +775,7 @@ export class Game {
     this.mapIndex = 0;                   // MAPS rotation position
     generateMap(this.world, this.seed, this.mapIndex);
     this._applyMapAtmosphere(this.mapIndex);
-    this.foliage = new Foliage(scene);
-    this.foliage.build(this.world);
-    this.world.onEdit = (x, z) => { hud.mapDirty(x, z); this.foliage.onEdit(x, z, this.world); };
+    this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
     this.effects = new Effects(scene);
     this.bots = [];                        // before Player: its first spawnPoint reads these
@@ -865,8 +862,7 @@ export class Game {
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
     this._applyMapAtmosphere(map);
-    this.foliage.build(this.world);
-    this.world.onEdit = (x, z) => { hud.mapDirty(x, z); this.foliage.onEdit(x, z, this.world); };
+    this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
     // Bodies capture the world instance at construction; the player and any
     // remote proxies survive rebuild, so rebind them or they'd keep colliding

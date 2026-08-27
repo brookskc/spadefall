@@ -106,6 +106,7 @@ export class Bot {
     this.responding = false;   // rushing to recover our dropped flag?
     this.deadT = -1;           // corpse tumble timer, while dead
     this.skill = BOT_SKILL * (0.85 + Math.random() * 0.3); // individual jitter
+    this._reactJitter = 0.8 + Math.random() * 0.5; // re-rolled per engagement (see update()); initialized here too so reactT is never NaN before the first target acquisition
     this.lane = ((this.id % 3) - 1) * 18; // advance on a front, not a file
     this.role = 'attack';      // ctf only: defend | mid | attack (recomputed)
     this.patrol = null;        // current roam waypoint when there's no intel
@@ -238,7 +239,16 @@ export class Bot {
 
     // --- pick something to shoot (it has to actually see it first) ---
     const seen = this._acquire();
-    if (seen !== this.target) this.aimT = 0;    // fresh eyes: reaction time
+    if (seen !== this.target) {
+      this.aimT = 0;    // fresh eyes: reaction time
+      // Re-rolled on every fresh engagement, not just fixed per-bot at
+      // spawn: real reflexes vary encounter to encounter, not only
+      // person to person. Without this, the same bot reacted at exactly
+      // the same speed every single time it spotted you, which reads as
+      // mechanically consistent — the "aimbot" tell — even once the
+      // reaction delay itself was long enough on paper.
+      this._reactJitter = 0.8 + Math.random() * 0.5;
+    }
     if (seen) {
       // New eyes on an enemy: report it. Teammates hunt from these sightings.
       if (seen !== this.target) g.pingIntel(seen.body.pos, seen.team);
@@ -246,7 +256,14 @@ export class Bot {
     }
     else if ((this.memoryT -= dt) <= 0) this.target = null;
     if (this.target) this.aimT += dt;
-    const reactT = 0.35 / this.skill; // better bots shoulder faster
+    // Base raised from 0.35 -> 0.55: 0.35s (300-410ms at normal skill) is
+    // at the very fast edge of human visual reaction time even before
+    // accounting for actually aiming, not just noticing — landing closer
+    // to "sees you and is already on target" than "reacts like a person."
+    // Combined with the per-engagement jitter above, normal difficulty
+    // now spans roughly 0.38-0.84s bot to bot and encounter to encounter,
+    // instead of a near-fixed ~0.3-0.4s every single time.
+    const reactT = (0.55 * this._reactJitter) / this.skill; // better bots shoulder faster
 
     // --- movement ---
     const goal = this.goal();
@@ -664,7 +681,15 @@ export class Bot {
             this.target.body.pos.y + this.target.body.half.h * 0.5, this.target.body.pos.z);
           const aim = new THREE.Vector3().subVectors(aimAt, from).normalize();
           const held = Math.min(1, (this.aimT - reactT) / 1.0); // 0 fresh -> 1 well-aimed
-          const spreadMul = (1.8 - 1.3 * held) / this.skill;
+          // Fresh-shot end widened 1.8 -> 3.2: the very first shot right as
+          // reactT clears was still tight enough to land often against a
+          // center-mass-sized target, which is what actually read as
+          // "one-shot aimbot" even with the reaction delay working
+          // correctly — the delay was real, but the shot the moment it
+          // ended was still too good. Well-aimed end (0.5) is unchanged:
+          // a bot that's held aim for a full second earns real accuracy,
+          // same as it always did.
+          const spreadMul = (3.2 - 2.7 * held) / this.skill;
           g.fireHitscan(this, from, aim, { ...spec, spread: spec.spread * spreadMul });
         }
       }

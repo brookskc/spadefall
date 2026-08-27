@@ -375,14 +375,31 @@ export class Bot {
     // regardless of health, since CQB is bad for it no matter how healthy
     // it is — rifle/smg leave closeRetreat null, so only health matters
     // for them, unchanged from before.
+    // Objective commitment: a bot actively holding ground that matters — on
+    // or near the hill in KOTH, defending near the flag stand in CTF —
+    // tolerates more punishment before falling back. Abandoning the actual
+    // point over a routine wound undermines the job ("hold the hill,"
+    // "defend the flag") worse than the wound itself does. Halved rather
+    // than removed: still some self-preservation, since a dead bot holds
+    // nothing either.
+    let retreatHealth = profile.retreatHealth;
+    if (g.hill && b.pos.distanceTo(g.hill.pos) < g.hill.r + 4) retreatHealth *= 0.5;
+    else if (this.role === 'defend' && g.flags && b.pos.distanceTo(g.standOf(this.team)) < 14) retreatHealth *= 0.6;
     this.retreatT -= dt; this.retreatCd -= dt;
     if (this.target && this.retreatCd <= 0 && toFoe &&
-        (this.health < profile.retreatHealth ||
+        (this.health < retreatHealth ||
          (profile.closeRetreat != null && foeD < profile.closeRetreat))) {
       this.retreatT = 2.5; this.retreatCd = 9;
     }
     if (this.retreatT > 0 && toFoe) {
-      dir.set(-toFoe.x - this.heading * 0.5, 0, -toFoe.z).normalize();
+      // A flag carrier keeps heading home even while retreating — the
+      // generic "flee straight away from whoever's shooting" vector below
+      // has no idea which direction that actually is, and could easily
+      // point away from home as readily as toward it. Aggressively
+      // getting the flag home means staying on that line even wounded,
+      // not abandoning it to flee blind. The cover-building right after
+      // still helps a carrier survive the run, so that part stays.
+      if (!this.carrier) dir.set(-toFoe.x - this.heading * 0.5, 0, -toFoe.z).normalize();
       if (b.onGround && this.blocks >= 3 && this.buildT <= 0 && !this._hasCover(toFoe))
         this._build(toFoe);
     }

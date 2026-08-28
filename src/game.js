@@ -843,12 +843,54 @@ export class Game {
   // both are guaranteed to already exist by the time this runs.
   _applyMapAtmosphere(mapIndex) {
     const a = mapAtmosphere(mapIndex);
-    const oldSky = this.scene.background;
+    // If the player happened to be underwater right when this runs (a
+    // match ending, or a map rebuilding, mid-swim), the real previous
+    // sky texture is sitting in _skyBackup, not scene.background (which
+    // would currently hold the underwater overlay color instead) —
+    // dispose whichever one is actually the real texture, and reset the
+    // underwater state entirely so this map's fresh sky/fog become the
+    // source of truth again, rather than getting silently overwritten
+    // by a stale backup the next time the player happens to surface.
+    (this._skyBackup ?? this.scene.background)?.dispose?.();
+    this._underwater = false;
+    this._underwaterApplied = false;
+    this._skyBackup = null;
     this.scene.background = skyGradient(...a.sky);
-    oldSky?.dispose?.(); // avoid leaking the previous map's canvas texture across rotations
     this.scene.fog.color.setHex(a.fog);
+    this.scene.fog.near = 70; this.scene.fog.far = 230; // restored explicitly in case a rebuild lands mid-underwater, right as these were swapped to the murky-water values
     this.world.water.material.color.setHex(a.water);
     this.world.cloudMat.color.setHex(a.cloud);
+  }
+
+  // Called every frame, every mode — purely local/visual, no host
+  // authority needed. Swaps to a close, murky fog and a solid-color
+  // background (both matching this map's own water tint, so Caldera's
+  // murkier water, say, stays consistent underwater too) whenever the
+  // camera's eye position is below the surface; restores the normal
+  // sky/fog once it isn't. Hysteresis (different enter/exit thresholds,
+  // not one shared line) avoids flicker from bobbing right at the
+  // surface re-triggering the swap every frame.
+  _updateUnderwaterFog() {
+    const camY = this.player.camera.position.y;
+    if (!this._underwater && camY < SEA + 0.3) this._underwater = true;
+    else if (this._underwater && camY > SEA + 0.55) this._underwater = false;
+    if (this._underwater === this._underwaterApplied) return;
+    this._underwaterApplied = this._underwater;
+    if (this._underwater) {
+      this._skyBackup = this.scene.background;
+      const c = this.world.water.material.color;
+      this.scene.background = new THREE.Color(c.getHex());
+      this.scene.fog.color.copy(c);
+      this.scene.fog.near = 1;
+      this.scene.fog.far = 18;
+    } else {
+      this.scene.background = this._skyBackup;
+      this._skyBackup = null;
+      const a = mapAtmosphere(this.mapIndex);
+      this.scene.fog.color.setHex(a.fog);
+      this.scene.fog.near = 70;
+      this.scene.fog.far = 230;
+    }
   }
 
   rebuild(seed, map = this.mapIndex) {
@@ -2864,6 +2906,7 @@ export class Game {
   update(dt) {
     this.time += dt;
     this.world.animateSky(this.time);
+    this._updateUnderwaterFog();
     hud.minimap(this);
     hud.ping(this);
     hud.streakStatus(this.player);

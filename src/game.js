@@ -860,6 +860,13 @@ export class Game {
     this.scene.fog.near = 70; this.scene.fog.far = 230; // restored explicitly in case a rebuild lands mid-underwater, right as these were swapped to the murky-water values
     this.world.water.material.color.setHex(a.water);
     this.world.cloudMat.color.setHex(a.cloud);
+    // Horizon peaks: derived from this map's own fog color rather than a
+    // fixed one, so a per-map override (a darker, murkier fog on one map
+    // vs a brighter one on another) carries through to the distant
+    // silhouette automatically -- darkened, not copied directly, so it
+    // reads as a distinct shape against the fog/sky rather than blending
+    // straight into invisibility at the color it's already fading toward.
+    this.world.horizonMat.color.setHex(a.fog).multiplyScalar(0.72);
   }
 
   // Called every frame, every mode — purely local/visual, no host

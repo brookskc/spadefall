@@ -218,6 +218,39 @@ export class VoxelWorld {
       this.clouds.add(cl);
     }
     scene.add(this.clouds);
+
+    // Distant terrain on the horizon — same cheap-instancing trick as
+    // clouds above (one shared geometry, one shared material, many
+    // placed instances), but faceted and angular (a low-segment cone)
+    // instead of soft, matching terrain's blocky character rather than
+    // clouds' puffy one. Purely atmospheric, no collision: a ring well
+    // outside the playable SX*SZ area, beyond the fog's own far
+    // distance (230, see main.js) so these emerge from the haze at the
+    // edge of visibility rather than popping in sharply. Static, no
+    // drift — this represents fixed, distant land, not moving sky.
+    this.horizon = new THREE.Group();
+    const peakGeo = new THREE.ConeGeometry(1, 1, 5); // 5 radial segments: faceted, not smooth
+    const peakMat = new THREE.MeshBasicMaterial({ color: 0x6a7a8a });
+    this.horizonMat = peakMat; // exposed so per-map atmosphere can retint it (see Game#_applyMapAtmosphere), same pattern as cloudMat
+    const hrnd = mulberry32(90210);
+    const HCX = SX / 2, HCZ = SZ / 2;
+    for (let i = 0; i < 28; i++) {
+      const cl = new THREE.Group();
+      const peaks = 2 + (i % 3);
+      for (let p = 0; p < peaks; p++) {
+        const m = new THREE.Mesh(peakGeo, peakMat);
+        const w = 30 + hrnd() * 50, h = 18 + hrnd() * 32;
+        m.scale.set(w, h, w);
+        m.position.set((p - peaks / 2) * (w * 0.55), 0, 0);
+        m.rotation.y = hrnd() * Math.PI; // varies each peak's facets against its neighbors
+        cl.add(m);
+      }
+      const angle = (i / 28) * Math.PI * 2 + hrnd() * 0.15;
+      const radius = 270 + hrnd() * 70; // 270-340: past the fog's far=230, so nothing here ever renders sharp-edged
+      cl.position.set(HCX + Math.cos(angle) * radius, 16, HCZ + Math.sin(angle) * radius);
+      this.horizon.add(cl);
+    }
+    scene.add(this.horizon);
   }
 
   get(x, y, z) {
@@ -461,6 +494,11 @@ export class VoxelWorld {
     if (this.clouds.children.length) { // shared puff resources, freed once
       this.clouds.children[0].children[0].geometry.dispose();
       this.clouds.children[0].children[0].material.dispose();
+    }
+    this.horizon.removeFromParent();
+    if (this.horizon.children.length) { // shared peak resources, freed once
+      this.horizon.children[0].children[0].geometry.dispose();
+      this.horizon.children[0].children[0].material.dispose();
     }
   }
 

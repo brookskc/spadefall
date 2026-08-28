@@ -144,6 +144,12 @@ const AO_LEVEL = [0.33, 0.57, 0.79, 1.0]; // widened for a punchier, more sculpt
 // identity, just adds definition at the seam between two materials, so
 // there's no reason to exclude a player's own build from it.
 const EDGE_LEVEL = [1.0, 0.94, 0.89, 0.85];
+// Rim highlight: a baked approximation of what a true (view-dependent)
+// rim light would do, using pure geometry instead — there's no shader
+// here, so nothing can react to where the camera actually is. A modest
+// boost, gated tightly (see the probe below) so it reads as picking out
+// genuine edges rather than a general brightness bump.
+const RIM_HIGHLIGHT = 1.12;
 // Corner order matters: with indices (0,1,2),(2,1,3) the triangles must wind
 // counter-clockwise seen from OUTSIDE, or the face is backface-culled and the
 // terrain shows sky-holes when viewed along ±z.
@@ -334,8 +340,27 @@ export class VoxelWorld {
               // elevation — genuinely catching those would need probing
               // sideways along the face's own plane, a different check
               // this reuse deliberately doesn't add.
+              // Rim highlight: does the VOXEL ITSELF (not the air cell n
+              // used for AO above) have an exposed side right at this
+              // corner's tangent directions — a ledge, a step, a wall's
+              // own top edge? A different question from AO's ("is
+              // something outside this face blocking light") to this
+              // one's ("does this voxel's own body drop away right
+              // here"). Reuses t0/t1/s0 already computed above; only
+              // the base position differs (the voxel itself, not n).
+              // Gated to a===3 (AO's own brightest, fully-open case):
+              // a flat, open field already sits at that same level
+              // everywhere, so boosting on top of it without this gate
+              // would wash the whole field out instead of picking out
+              // genuine edges specifically.
+              const p2 = [x, y, z];
+              p2[t0] += s0;
+              const ledgeSide0 = !this.get(p2[0], p2[1], p2[2]);
+              p2[t0] -= s0; p2[t1] += s1;
+              const ledgeSide1 = !this.get(p2[0], p2[1], p2[2]);
+              const rim = a === 3 && (ledgeSide0 || ledgeSide1) ? RIM_HIGHLIGHT : 1;
               const edges = (nv0 && nv0 !== v ? 1 : 0) + (nv1 && nv1 !== v ? 1 : 0) + (nvc && nvc !== v ? 1 : 0);
-              const b = AO_LEVEL[a] * EDGE_LEVEL[edges];
+              const b = AO_LEVEL[a] * EDGE_LEVEL[edges] * rim;
               ao.push(b); // the diagonal-flip check below now compares actual final brightness, not just raw AO counts, so it accounts for edge darkening too — safe for the no-edge case too, since EDGE_LEVEL[0]=1.0 makes this identical to comparing AO_LEVEL[a] alone, which is monotonic in a exactly like the old raw counts were
               col.push(jr * tint[0] * b, jg * tint[1] * b, jb * tint[2] * b);
             }

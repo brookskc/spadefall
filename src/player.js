@@ -1,6 +1,6 @@
 // player.js — first-person controls, tools (rifle / smg / spade / block), viewmodel.
 import * as THREE from 'three';
-import { Body } from './entities.js';
+import { Body, faceTintedBox } from './entities.js';
 import { sfx } from './audio.js';
 import { stats } from './stats.js';
 import { SX, SY, SZ } from './world.js';
@@ -315,16 +315,16 @@ export class Player {
     // which meant unlocking "gold" or "crimson" silently recolored the
     // spade blade and the entire grenade too — well past what "gun colors"
     // was ever pitched as.
-    const dark = new THREE.MeshBasicMaterial({ color: stats.gunColor() });
+    const dark = new THREE.MeshBasicMaterial({ color: stats.gunColor(), vertexColors: true });
     this._gunMat = dark; // kept for live recoloring when the menu changes it mid-session
-    const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30 });
-    const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c });
+    const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
+    const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
-      color: this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a });
+      color: this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, vertexColors: true });
     this._blockMat = blockMat; // live-recolored by the team setter below
-    const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066 });
+    const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
     const mk = (w, h, d, mat, x, y, z, parent) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      const m = new THREE.Mesh(faceTintedBox(w, h, d), mat);
       m.position.set(x, y, z);
       parent.add(m);
       return m;

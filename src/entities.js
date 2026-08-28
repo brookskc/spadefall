@@ -198,13 +198,48 @@ export function placeShadow(parts, world, yaw = 0) {
   b.material = blobMats[Math.min(SHADOW_ALPHA.length - 1, Math.floor(t * SHADOW_ALPHA.length))];
 }
 
+// Bakes the exact same directional face-tint terrain voxels already use
+// (FACE_TINT in world.js) into a plain box's vertex colors, so blocky
+// character/viewmodel geometry gets the same "sculpted" shading instead
+// of one flat color per part. THREE's BoxGeometry always lays its 24
+// vertices out in this exact per-face order (verified directly against
+// a real BoxGeometry's own groups and normals, not assumed): +x, -x,
+// +y, -y, +z, -z — a dedicated set of 4 vertices per face, never shared
+// between faces, since each face needs its own normal even where
+// positions numerically coincide with a neighboring face's. Not the
+// same array order world.js's own FACE_TINT uses (-x, +x, -y, +y, -z,
+// +z) — this is deliberately remapped to BoxGeometry's actual order
+// rather than copied, since copying it directly would have quietly
+// tinted the wrong faces.
+const BOX_FACE_TINT = [
+  [0.68, 0.72, 0.79], // +x
+  [0.68, 0.72, 0.79], // -x
+  [1.08, 1.03, 0.90], // +y (sun)
+  [0.45, 0.45, 0.47], // -y
+  [0.80, 0.84, 0.91], // +z
+  [0.80, 0.84, 0.91], // -z
+];
+export function faceTintedBox(w, h, d) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const colors = new Float32Array(geo.attributes.position.count * 3);
+  for (let face = 0; face < 6; face++) {
+    const [r, gg, b] = BOX_FACE_TINT[face];
+    for (let v = 0; v < 4; v++) {
+      const i = (face * 4 + v) * 3;
+      colors[i] = r; colors[i + 1] = gg; colors[i + 2] = b;
+    }
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
+
 export function makeSoldier(teamColor) {
   const g = new THREE.Group();
-  const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066 });
-  const cloth = new THREE.MeshBasicMaterial({ color: teamColor });
-  const dark = new THREE.MeshBasicMaterial({ color: 0x2b2b30 });
+  const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
+  const cloth = new THREE.MeshBasicMaterial({ color: teamColor, vertexColors: true });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
   const box = (w, h, d, mat, x, y, z, parent = g) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    const m = new THREE.Mesh(faceTintedBox(w, h, d), mat);
     m.position.set(x, y, z);
     parent.add(m);
     return m;
@@ -223,7 +258,7 @@ export function makeSoldier(teamColor) {
   const brim = box(0.4, 0.12, 0.4, cloth, 0, 1.62, 0); // helmet brim
   const gun = box(0.09, 0.12, 0.7, dark, 0.2, 1.1, -0.35);
   // The spade rides in the right hand too, shown only while digging.
-  const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c });
+  const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
   const spade = new THREE.Group();
   box(0.05, 0.05, 0.55, wood, 0, 0, -0.18, spade);   // handle
   box(0.17, 0.22, 0.04, dark, 0, 0, -0.48, spade);   // blade

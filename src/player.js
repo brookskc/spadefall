@@ -460,7 +460,14 @@ export class Player {
     const b = this.body;
     // Crouch (hold CTRL): trades speed for a steadier aim. Both heights still
     // span two voxel rows, so standing up can never wedge us into a ceiling.
-    this.crouched = !!(this.keys['ControlLeft'] || this.keys['ControlRight']);
+    // Crouch itself never applies while swimming — Ctrl is repurposed
+    // there entirely (see the dive thrust further down), and letting it
+    // also set crouched would drag in every land-crouch side effect that
+    // has nothing to do with diving: a shorter hitbox, ledge-guard, the
+    // slide trigger, and — the one that actually mattered here — a 55%
+    // horizontal speed penalty that would have made "hold Ctrl to dive"
+    // also quietly cripple your swimming speed the whole time you held it.
+    this.crouched = !b.inWater && !!(this.keys['ControlLeft'] || this.keys['ControlRight']);
     // Slide: crouch mid-sprint at speed and you skid low — a burst of
     // momentum, barely any steering, no ledge-guard. Jump pops out of it.
     this.slideT = Math.max(0, (this.slideT ?? 0) - dt);
@@ -507,6 +514,23 @@ export class Player {
     } else {
       b.vel.x += (wish.x - b.vel.x) * Math.min(1, dt * 12);
       b.vel.z += (wish.z - b.vel.z) * Math.min(1, dt * 12);
+    }
+    // Swim depth control: holding Space eases toward a steady rise,
+    // holding Ctrl toward a steady dive — real held control instead of
+    // the old jump()-only burst, which gave one short vel.y=4 push per
+    // discrete keypress (not per frame held) and had no downward
+    // equivalent at all, so reaching the surface meant spam-tapping and
+    // diving deeper wasn't possible except by not fighting gravity's own
+    // slow sink. Same ease-toward-target shape as the horizontal
+    // steering just above, just vertical and gated to water only —
+    // gravity (already weakened in Body#move while inWater) still
+    // applies normally otherwise, so letting go still means a natural,
+    // gentle sink, not a sudden stop.
+    if (b.inWater) {
+      const swimTarget = this.keys['Space'] ? 3
+        : (this.keys['ControlLeft'] || this.keys['ControlRight']) ? -3
+        : null;
+      if (swimTarget !== null) b.vel.y += (swimTarget - b.vel.y) * Math.min(1, dt * 8);
     }
     b.move(dt);
 

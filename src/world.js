@@ -14,6 +14,7 @@ export const PALETTE = [
   { color: 0x8a8d94, name: 'stone' },
   { color: 0x4a6cd4, name: 'blue'  },
   { color: 0x4a9e4a, name: 'green' },
+  { color: 0x6b7a5c, name: 'moss'  },
 ];
 // Snapshot of the original colors above, taken once at module load — the
 // one place the canonical defaults survive PALETTE being mutated per-map
@@ -21,7 +22,7 @@ export const PALETTE = [
 // to these before applying its own overrides, so a map with no override
 // for a given block never inherits the PREVIOUS map's tint.
 export const DEFAULT_PALETTE_COLORS = PALETTE.map(p => p?.color);
-export const BLOCK = { GRASS: 1, DIRT: 2, SAND: 3, STONE: 4, BLUE: 5, GREEN: 6 };
+export const BLOCK = { GRASS: 1, DIRT: 2, SAND: 3, STONE: 4, BLUE: 5, GREEN: 6, MOSS: 7 };
 
 // Soft vertical sky gradient, painted once on a canvas — moved here from
 // main.js and generalized to take its three color stops as parameters, so
@@ -92,7 +93,7 @@ function patchNoise(x, z, salt) {
 // block types) are deliberately excluded — a player's own team-colored
 // wall should stay a predictable, recognizable color, not develop random
 // patchiness.
-const PATCH_TYPES = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.SAND, BLOCK.STONE];
+const PATCH_TYPES = [BLOCK.GRASS, BLOCK.DIRT, BLOCK.SAND, BLOCK.STONE, BLOCK.MOSS];
 let patchVariants = null;
 function computePatchVariants() {
   const v = {};

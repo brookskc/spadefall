@@ -67,7 +67,28 @@ const BASE_H = SEA + 7; // plateau height above the sea
 
 const at = (x, z) => (z * SX + x);
 
-// Fill every column up to its height: cap block on top, dirt, then stone.
+// Deterministic, unseeded 3D noise for moss placement within the deep
+// stone layer below — same summed-low-frequency-sines style as
+// world.js's own patchNoise, just extended to 3D since moss needs to
+// vary through the whole stone volume (any y), not across one flat
+// surface the way patchNoise's 2D (x,z) does. Doesn't need a per-map
+// seed the way terrain shape does (makeNoise, above) — this is meant
+// as a subtle, local texture accent, not a terrain-shaping feature, so
+// staying identical across maps (like patchNoise/jitter already do) is
+// the right call, not a limitation to fix later.
+function mossNoise(x, y, z) {
+  const s = Math.sin(x * 0.09 + y * 0.13 + 1.1)
+          + Math.sin(z * 0.08 - y * 0.11 + 2.3)
+          + Math.sin(x * 0.05 + z * 0.07 + 4.7);
+  return (s / 3 + 1) / 2;
+}
+const MOSS_THRESHOLD = 0.66; // roughly the upper accent fraction, not a dominant presence
+
+// Fill every column up to its height: cap block on top, dirt, then
+// stone — moss-flecked via mossNoise rather than uniformly bare, the
+// one part of this that used to be completely monotonic regardless of
+// position (grass/dirt/sand already vary by cap() and height; the deep
+// stone layer never varied by anything at all before this).
 function fillColumns(world, height, cap, dirt = BLOCK.DIRT) {
   for (let z = 0; z < SZ; z++)
     for (let x = 0; x < SX; x++) {
@@ -76,7 +97,7 @@ function fillColumns(world, height, cap, dirt = BLOCK.DIRT) {
         let v;
         if (y === h) v = cap(x, z, h);
         else if (y > h - 4) v = dirt;
-        else v = BLOCK.STONE;
+        else v = mossNoise(x, y, z) > MOSS_THRESHOLD ? BLOCK.MOSS : BLOCK.STONE;
         world.data[(y * SZ + z) * SX + x] = v;
       }
     }

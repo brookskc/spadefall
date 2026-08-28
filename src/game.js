@@ -7,9 +7,13 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { Body, disposeObject, footDust } from './entities.js';
+import { disposeObject, footDust } from './entities.js';
 import { Avatar } from './avatar.js';
+import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
+import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
+  teamCounts, validateMovementReport, normalizeDirection } from './multiplayer.js';
+import { validClientMessage, validServerMessage } from './protocol.js';
 
 const WIN_SCORE = 3;
 // Team deathmatch: no flags, kills are points. ?killcap= lowers the bar for tests.
@@ -48,18 +52,9 @@ const BLOCK_HP = 150;
 // Hard cap on humans per room (host + guests): 5v5, matching _spawnBots'
 // per-team target below. Test hook: ?cap=2.
 const capParam = parseInt(QUERY.get('cap'), 10);
-export const MAX_HUMANS = Number.isInteger(capParam) ? Math.min(10, Math.max(2, capParam)) : 10;
-// Fastest legitimate horizontal movement in the game — not sprint (5.4×1.45
-// ≈ 7.83), the slide burst (player.js sets velocity to exactly 9 on a
-// crouch-cancel). The host clamps a reported position to world bounds and
-// checks it's finite, but never checked how FAR it moved: a patched client
-// could still teleport anywhere inside those bounds instantly, flag carrier
-// straight to the stand included. MAX_SPEED_SLACK is deliberately generous
-// (3x) so packet jitter or a retransmit after real loss never falsely
-// rejects an honest report — this closes outright teleportation, not a
-// moderate speed-hack sitting under the slack.
-const MAX_SPEED = 9;
-const MAX_SPEED_SLACK = 3;
+export const MAX_HUMANS = Number.isInteger(capParam) ? Math.min(HUMAN_CAP, Math.max(2, capParam)) : HUMAN_CAP;
+// Position authority limits live in multiplayer.js so they can be tested
+// without importing this DOM-heavy orchestrator.
 // Interest management: how close is "obviously aware of them regardless"
 // — footsteps, muzzle flash, standing right next to you — and also a
 // deliberate buffer against raycast edge cases exactly at point-blank
@@ -102,9 +97,6 @@ const AIRSTRIKE_STEER_SPEED = 12;
 const GRAVITY_DROP = 30;
 const $ = id => document.getElementById(id);
 const v3 = a => new THREE.Vector3(a[0], a[1], a[2]);
-// Wire numbers are untrusted: a patched client sending NaN/Infinity coords
-// would poison hit detection and physics for the whole room.
-const finite3 = a => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
 const arr = v => [v.x, v.y, v.z];
 const FLAG_CODE = { home: 0, carried: 1, dropped: 2 };
 
@@ -682,63 +674,6 @@ const safeFeedHtml = html => String(html ?? '').slice(0, 300)
   .replace(/&lt;\/span&gt;/g, '</span>')
   .replace(/&lt;b&gt;/g, '<b>').replace(/&lt;\/b&gt;/g, '</b>');
 
-// A network player as the host sees them: client-authoritative position,
-// host-authoritative health, flags, and respawns.
-class RemoteProxy {
-  constructor(game, id, name, team) {
-    this.game = game;
-    this.id = id;
-    this.name = name;
-    this.team = team;
-    this.isRemote = true;
-    const p = game.spawnPoint(team);
-    this.body = new Body(game.world, p.x, p.y, p.z);
-    this.health = 100;
-    this.alive = true;
-    this.carrier = false;
-    this.blocks = 50;
-    this.tool = 0;
-    // One gun class per life, same restriction as the local player.
-    // gunClass is what they're using RIGHT NOW; _pendingClass is what
-    // they'll spawn with next (set by a 'class' action, applied at
-    // respawn). New joiners start on rifle until they pick something —
-    // there's no pre-match loadout screen to read a preference from.
-    this.gunClass = 0;
-    this._pendingClass = 0;
-    this.yaw = 0;
-    this.nades = 3;            // host-enforced grenade stock (mirrors Player)
-    this.nadeRegen = 0;
-    this._actT = {};           // per-action rate gates (host enforces, not trusts)
-    this.avatar = new Avatar(game.scene, team, name, team === game.player.team);
-    this.avatar.push(p.x, p.y, p.z, 0);
-  }
-  die(killer) {
-    this.alive = false;
-    this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain
-    this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
-    this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker to zero — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
-    this._lastAimDir = null; this._lastAimT = null; // next life's first shot has no aim history to compare against — spawns face an arbitrary direction, not a continuation of whatever they were aiming at when they died
-    this._lastNadeAimDir = null; this._lastNadeAimT = null; // same reasoning, separate baseline for the nade check
-    this.game.effects.burst(this.body.eye(), 26,
-      this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
-    this.game.net.sendTo(this.id, { t: 'e', k: 'died' });
-    this.game.onDeath(this, killer);
-  }
-  respawn() {
-    const p = this.game.spawnPoint(this.team);
-    this.body.pos.set(p.x, p.y, p.z);
-    this.health = 100;
-    this.alive = true;
-    this.blocks = 50;
-    this.nades = 3;
-    this.nadeRegen = 0;
-    this.protT = 3; // spawn protection, host-enforced
-    this.gunClass = this._pendingClass; // whatever they last picked while dead
-    this.tool = this.gunClass;
-    this.game.net.sendTo(this.id, { t: 'e', k: 'spawn', x: p.x, y: p.y, z: p.z });
-  }
-}
-
 // ---------------------------------------------------------------- game
 export class Game {
   constructor(scene, camera, dom, opts = {}) {
@@ -751,7 +686,7 @@ export class Game {
     this.seed = opts.seed ?? 1979;
     this.editLog = [];                     // host: every world change, for late joiners
     this.blockHits = new Map();            // host/solo: 'x,y,z' -> remaining gunfire HP
-    this.remote = new Map();               // host: peerId -> RemoteProxy
+    this.remote = new Map();               // host: peerId -> RemotePlayer
     this.avatars = new Map();              // client: key -> Avatar
     this.myId = null;
     this.myIdx = null;      // client: our roster index (the welcome's 'me')
@@ -928,14 +863,21 @@ export class Game {
       ? { pos: new THREE.Vector3(hd.x + 0.5, this.world.surface(hd.x, hd.z), hd.z + 0.5),
           r: hd.r, owner: null, progress: 0, contested: false, capTeam: null }
       : null;
+    this.respawnTimers.clear();
     this.bots = [];
-    if (this.mode !== 'client') this._spawnBots();
+    // Start every human through a real new-round lifecycle. Mark guests dead
+    // first so spawn scoring never treats stale old-map positions as enemies.
+    for (const p of this.remote.values()) p.alive = false;
+    this.player.respawn();
+    if (this.mode !== 'client') {
+      for (const p of this.remote.values()) p.resetForRound();
+      this._spawnBots();
+    }
     this.captures = { green: 0, blue: 0 };
     this.editLog = [];
     this.blockHits.clear();
     this.grenades = [];
     for (const m of this.grenadeMeshes) m.visible = false;
-    this.respawnTimers.clear();
     // Omission state is per-world: a rebuilt map invalidates every row a
     // client reconstructed (client side) and everything a connection was
     // marked as sent (host side — the next tick goes out full).
@@ -952,7 +894,6 @@ export class Game {
     this.kd = new Map(); // fresh round, fresh scoreboard
     this._statsSeen = { k: 0, d: 0 }; // fresh baseline — see the constructor note
     this._kdSeed();
-    this.player.respawn();
     hud.score(this);
   }
 
@@ -1258,7 +1199,7 @@ export class Game {
   // authority, wait to hear back. p is the caller's OWN player object in
   // both branches — solo/host validates and spends the streak against it
   // directly; a guest never touches its own _streak here at all, since
-  // the host's copy (the RemoteProxy) is the only one that counts.
+  // the host's copy (the RemotePlayer) is the only one that counts.
   requestAirstrike(p, x, z) {
     if (this.mode !== 'client') return this._confirmAirstrike(p, x, z);
     this.net.send({ t: 'a', k: 'strike', x, z });
@@ -1267,7 +1208,7 @@ export class Game {
   // aim. Same authority split as every other request* method: solo/host
   // validates and activates directly against its own player object,
   // a guest's own _overchargeT is never touched locally, only the host's
-  // authoritative copy (its RemoteProxy) is what damage() ever checks.
+  // authoritative copy (its RemotePlayer) is what damage() ever checks.
   requestOvercharge(p) {
     if (this.mode !== 'client') return this._activateOvercharge(p);
     this.net.send({ t: 'a', k: 'overcharge' });
@@ -1401,7 +1342,7 @@ export class Game {
   // is already the one place every lethal hit passes through with the
   // attacker in hand, so a second chokepoint would just be a second place
   // for the two to drift out of sync. _mkCount/_mkT are tracked directly
-  // on whatever entity got the kill (Player, RemoteProxy, or Bot) rather
+  // on whatever entity got the kill (Player, RemotePlayer, or Bot) rather
   // than in some Game-level map — reset to zero on death (see each die()),
   // so a chain never survives past a life the way it shouldn't. A window
   // of 5 seconds SINCE THE LAST KILL, not since the first: three kills
@@ -1762,7 +1703,7 @@ export class Game {
   // _overchargeAtStreak tracks the streak value AT the last activation;
   // the gate is (current streak - that value) >= 5, so the first use at
   // streak 5 sets it to 5, unlocking again at streak 10, then 15, and so
-  // on — reset only on death (RemoteProxy#die / Player#die / _clientDied),
+  // on — reset only on death (RemotePlayer#die / Player#die / _clientDied),
   // not by anything Airstrike does to _streak, so spending an airstrike
   // and rebuilding a streak in the same life doesn't grant a free extra
   // Overcharge along the way.
@@ -1981,7 +1922,26 @@ export class Game {
   }
 
   // ---------------- host networking ----------------
+  _hasFootingAt(body, x, y, z) {
+    if (y < SEA + 0.55) return true; // swimming is its own supported state
+    const h = body.half;
+    const by = Math.floor(y - 0.08);
+    for (let xx = Math.floor(x - h.x); xx <= Math.floor(x + h.x); xx++)
+      for (let zz = Math.floor(z - h.x); zz <= Math.floor(z + h.x); zz++)
+        if (this.world.solid(xx, by, zz)) return true;
+    return false;
+  }
+
+  _correctRemotePosition(p) {
+    const now = performance.now();
+    if (now - (p._lastCorrectionAt ?? -Infinity) < 200) return;
+    p._lastCorrectionAt = now;
+    this.net.sendTo(p.id, { t: 'e', k: 'corr',
+      x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z });
+  }
+
   hostOnData(id, d) {
+    if (!validClientMessage(d)) return;
     // Matchmaking probe: answer on the same channel, before any join logic.
     if (d.t === 'ping') {
       // Room-browser probe: everything the list row wants to show.
@@ -2003,7 +1963,7 @@ export class Game {
         if (!p) return; // lapsed entry — fall through would double-spawn
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
-          r: this._rosterMsg() });
+          spawn: spawnRow(p.body, p.yaw + Math.PI / 2), r: this._rosterMsg() });
         this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
         return;
       }
@@ -2025,17 +1985,10 @@ export class Game {
       if (![d.x, d.y, d.z, d.yaw].every(Number.isFinite)) return;
       const nx = Math.min(Math.max(d.x, 0), SX), ny = Math.min(Math.max(d.y, -8), SY + 8),
         nz = Math.min(Math.max(d.z, 0), SZ);
-      // Speed cap: reject a horizontal jump an honest client couldn't have
-      // covered since its last accepted report. The reference point is
-      // p.body.pos itself, which respawn/migration restore also write
-      // directly — so a legitimate spawn jump is measured from the FRESH
-      // spawn point (already in body.pos by the time this runs), never the
-      // pre-death position, with no separate reset needed. Height is never
-      // rejected (falling is fast and legitimate); only x/z are gated.
-      const elapsed = Math.max(1 / 60, this.time - (p._lastPosT ?? this.time));
-      const maxDist = MAX_SPEED * MAX_SPEED_SLACK * elapsed;
-      const speedOk = Math.hypot(nx - p.body.pos.x, nz - p.body.pos.z) <= maxDist;
-      const cx = speedOk ? nx : p.body.pos.x, cz = speedOk ? nz : p.body.pos.z;
+      const elapsed = this.time - (p._lastPosT ?? this.time);
+      const movement = validateMovementReport(p.body.pos,
+        { x: nx, y: ny, z: nz, yaw: d.yaw }, elapsed);
+      if (!movement.ok) { this._correctRemotePosition(p); return; }
       // No-clip: speed-legal isn't enough on its own — the landing spot
       // itself has to be somewhere the player's actual body could occupy.
       // Reuses the exact whole-body AABB the physics itself already checks
@@ -2046,9 +1999,26 @@ export class Game {
       // report that's claiming to be inside a wall. An honest client's own
       // local physics already keeps it out of solid geometry in the first
       // place, so this only ever catches a dishonest one.
-      if (!p.body.overlapsSolid(cx, ny, cz)) p.body.pos.set(cx, ny, cz);
+      if (p.body.overlapsSolid(nx, ny, nz)) { this._correctRemotePosition(p); return; }
+
+      // A legal jump follows y(t)=y0+v0*t-15*t² (gravity is -30). Track the
+      // current unsupported interval so a zero-delta stream cannot hover in
+      // mid-air forever while still passing per-packet speed checks.
+      const supported = this._hasFootingAt(p.body, nx, ny, nz);
+      if (supported) p._airMove = null;
+      else {
+        const air = p._airMove ??= { t: 0, y0: p.body.pos.y };
+        air.t += movement.dt;
+        const highestLegal = air.y0 + 10.5 * air.t - 15 * air.t * air.t + 0.8;
+        if (ny > highestLegal) { this._correctRemotePosition(p); return; }
+      }
+
+      p.body.pos.set(nx, ny, nz);
       p._lastPosT = this.time;
-      p.tool = d.tool;
+      // The active belt contains exactly this life's gun plus spade/block/nade.
+      // Invalid client claims never become authoritative proxy state.
+      if (d.tool === p.gunClass || d.tool === 2 || d.tool === 3 || d.tool === 4)
+        p.tool = d.tool;
       p.yaw = d.yaw;
       p.crouched = !!d.c;
       p.avatar.push(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.yaw);
@@ -2104,21 +2074,19 @@ export class Game {
         this._activateOvercharge(p);
         return;
       }
-      if (!finite3(d.o) || !finite3(d.d)) return;
-      const o = v3(d.o), dir = v3(d.d).normalize();
-      // Sanity: actions must originate near the proxy's known position.
-      if (o.distanceToSquared(p.body.eye()) > 25) return;
+      const normalized = normalizeDirection(d.d);
+      if (!normalized) return;
+      // The client supplies aim only. The host's accepted body position owns
+      // the action origin, so a patched packet cannot shoot/build through a
+      // nearby wall by inventing an eye point on its far side.
+      const o = p.body.eye(), dir = v3(normalized);
       // Rate-limit by the tool's own interval (60% floor for frame jitter):
       // an honest client paces itself — a patched one must not get
       // per-packet full-auto, a shovel blender, or a grenade sprinkler.
       const now = this.time, gap = k => now - (p._actT[k] ?? -9);
       if (d.k === 'shoot') {
-        const spec = TOOLS[d.tool];
-        // The other two guns aren't in this life's belt — a patched client
-        // claiming otherwise must not get their damage/spread anyway. Non-
-        // gun tools (spade/block never fire 'shoot'; this only ever gates
-        // GUN_CLASSES members) and the player's own class pass through.
-        if (GUN_CLASSES.includes(d.tool) && d.tool !== p.gunClass) return;
+        if (!GUN_CLASSES.includes(p.tool) || p.tool !== p.gunClass) return;
+        const spec = TOOLS[p.tool];
         if (!spec?.damage || gap('shoot') < spec.interval * 0.6) return;
         // Rate-limit timestamp updates here, BEFORE the aim check below —
         // an implausible-aim rejection still has to cost its slot in the
@@ -2145,16 +2113,19 @@ export class Game {
         this.fireHitscan(p, o, dir, spec);
       }
       else if (d.k === 'dig') {
+        if (p.tool !== 2) return;
         if (gap('dig') < 0.2) return;
         p._actT.dig = now;
         this.playerDig(p, o, dir);
       }
       else if (d.k === 'place') {
+        if (p.tool !== 3) return;
         if (gap('place') < 0.12) return;
         p._actT.place = now;
         this.playerPlace(p, o, dir); // tryBuild enforces the block count
       }
       else if (d.k === 'nade') {
+        if (p.tool !== 4) return;
         if (gap('nade') < 0.6 || p.nades <= 0) return;
         p._actT.nade = now;
         p.nades--;
@@ -2200,29 +2171,23 @@ export class Game {
       return;
     }
     const name = cleanName(rawName); // one sanitizer, one fallback ('Player')
-    let team;
-    if (teamPref === 'green' || teamPref === 'blue') {
-      // Honored outright, no cap enforced — a lopsided human count just
-      // means the other side's bot seats fill in instead, the same
-      // graceful fallback the roster already leans on everywhere else.
-      // teamPref is wire data from an untrusted client, so it's checked
-      // against the exact two valid values rather than trusted as-is.
-      team = teamPref;
-    } else {
-      // Count the host on its ACTUAL team: after a baton pass the promoted
-      // host can be blue, and hardcoding green stacked every joiner wrong.
-      const humans = { green: 0, blue: 0 };
-      humans[this.player.team] = 1;
-      for (const p of this.remote.values()) humans[p.team]++;
-      team = humans.green <= humans.blue ? 'green' : 'blue';
+    // Preferences are best-effort: never put a sixth human on one side.
+    // When the requested side is full, fall back to the side with a seat;
+    // AUTO still chooses the less-populated human team.
+    const team = chooseTeam(teamPref, teamCounts(this.player.team, this.remote.values()));
+    if (!team) {
+      this.net.sendTo(id, { t: 'full' });
+      setTimeout(() => this.net.conns.get(id)?.close(), 400);
+      return;
     }
-    const proxy = new RemoteProxy(this, id, name, team);
+    const proxy = new RemotePlayer(this, id, name, team);
     proxy.ridx = this._nextPIdx++;
     this.remote.set(id, proxy);
     this._kdRow(proxy); // scoreboard seat from the moment they join
     this._removeBot(team);
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
-      log: this.editLog, mode: this.gameMode, me: proxy.ridx, r: this._rosterMsg() });
+      log: this.editLog, mode: this.gameMode, me: proxy.ridx,
+      spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
     this.feed(`${nameSpan(proxy)} joined ${team.toUpperCase()}`);
   }
@@ -2249,7 +2214,7 @@ export class Game {
     // Keep our old client index: every survivor's avatars and reconstructed
     // maps are keyed by it, and re-keying mid-match would orphan them all.
     this._hostIdx = oldIdx;
-    // Client stand-in avatars give way to real bodies — RemoteProxy and Bot
+    // Client stand-in avatars give way to real bodies — RemotePlayer and Bot
     // construct their own.
     for (const av of this.avatars.values()) av.dispose();
     this.avatars.clear();
@@ -2337,11 +2302,11 @@ export class Game {
     }, 60000);
   }
 
-  // Rebuild one RemoteProxy from its reconstructed full-state row
+  // Rebuild one RemotePlayer from its reconstructed full-state row
   // ([x, y, z, ry, hp, alive, carrier, tool, blocks, crouch]).
   _restoreProxy(id, name, idx, team, row) {
     const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades] = row;
-    const proxy = new RemoteProxy(this, id, name, team);
+    const proxy = new RemotePlayer(this, id, name, team);
     proxy.ridx = idx;
     proxy.body.pos.set(x, y, z);
     proxy.avatar.push(x, y, z, ry);
@@ -2463,7 +2428,7 @@ export class Game {
   // Scope: this closes the wallhack for GUESTS receiving this broadcast.
   // The host's own client still holds every live position directly in
   // memory to run the simulation at all — a malicious host reading its
-  // own RemoteProxy/Bot objects locally is the separate, unsolved
+  // own RemotePlayer/Bot objects locally is the separate, unsolved
   // host-authority problem, not something a wire-level filter can touch.
   _broadcastSnapshot() {
     const snap = this.snapshot();
@@ -2540,6 +2505,7 @@ export class Game {
   }
 
   clientOnData(d) {
+    if (!validServerMessage(d)) return;
     this.lastRecv = performance.now(); // host heartbeat (snapshots beat at 15Hz)
     this._unstableShown = false; // the link's talking again — clear the warning flag
     if (d.t === 'full') return this.onFull?.();
@@ -2568,6 +2534,17 @@ export class Game {
         this.onWelcome?.();
       } else {
         this.rebuild(d.seed, d.map ?? 0);
+        // The host chose the spawn when it created our RemotePlayer. Never
+        // independently roll another client-side spawn: doing so starts the
+        // two peers at different coordinates and makes the first movement
+        // report look like a teleport to the host.
+        const spawn = parseSpawnRow(d.spawn);
+        if (spawn) {
+          this.player.body.pos.set(spawn.x, spawn.y, spawn.z);
+          this.player.body.vel.set(0, 0, 0);
+          this.player.yaw = spawn.yaw;
+          this.player.pitch = 0;
+        }
         this._replayEdits(d.log);
         this._applyRoster(d.r);
         this.onWelcome?.();
@@ -2604,6 +2581,14 @@ export class Game {
         this.player.health = health;
         this.player.blocks = blocks;
         this.player.carrier = !!carrier;
+        // Ordinary movement remains client-predicted, but a large divergence
+        // means the host rejected a report or corrected state. Snap only then;
+        // applying every 15Hz row would make normal movement visibly stutter.
+        if (Math.hypot(this.player.body.pos.x - x, this.player.body.pos.y - y,
+                       this.player.body.pos.z - z) > 4) {
+          this.player.body.pos.set(x, y, z);
+          this.player.body.vel.set(0, 0, 0);
+        }
         // The host owns the grenade stock (its rate gate can refuse a throw
         // the client already counted). Without this the HUD drifts and the
         // belt eventually reads full while every throw is silently rejected.
@@ -2751,7 +2736,7 @@ export class Game {
       case 'hit':
         hud.hitmark(d.kill);
         // Mirrors what _hitFeedback already did on the host's own
-        // authoritative copy of this player (the RemoteProxy) — without
+        // authoritative copy of this player (the RemotePlayer) — without
         // this, a guest's own LOCAL _streak never advanced at all, since
         // this is the only message a guest's kills are ever reported
         // back through. That silently broke Overcharge/Airstrike
@@ -2770,8 +2755,15 @@ export class Game {
       case 'died': this._clientDied(); break;
       case 'spawn':
         this.player.respawn({ x: d.x, y: d.y, z: d.z });
+        if (Number.isFinite(d.yaw)) this.player.yaw = d.yaw;
         hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player);
         this._lastHealth = 100;
+        break;
+      case 'corr':
+        if ([d.x, d.y, d.z].every(Number.isFinite)) {
+          this.player.body.pos.set(d.x, d.y, d.z);
+          this.player.body.vel.set(0, 0, 0);
+        }
         break;
       case 'kd': // host's scoreboard, replaced wholesale on each death
         this.kd = new Map((d.rows || []).map(r =>
@@ -2955,7 +2947,7 @@ export class Game {
         if (s.t <= 0) { this._airstrikeImpact(s.pos, s.owner); this._pendingStrikes.splice(i, 1); }
       }
     }
-    // RemoteProxy has no update(dt) of its own the way Player does — its
+    // RemotePlayer has no update(dt) of its own the way Player does — its
     // state rides the network snapshot instead — so its Overcharge timer
     // needs its own tick here specifically, on the host's authoritative
     // copy, since that's the one damage() actually reads. Nothing further

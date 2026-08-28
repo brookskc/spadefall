@@ -1,6 +1,8 @@
 // net.js — PeerJS wrapper. Host-authoritative star topology over WebRTC.
 // Signaling rides the free PeerJS cloud; gameplay is pure browser-to-browser.
 // ?ns=name scopes all peer ids — tests and events get their own universe.
+import { isRecord } from './multiplayer.js';
+import { validPong } from './protocol.js';
 const ns = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
   .get('ns')?.replace(/[^\w-]/g, '').slice(0, 16); // guarded for headless import
 const PREFIX = 'spadefall-' + (ns ? ns + '-' : '');
@@ -130,6 +132,7 @@ export class Net {
       // its own balance pick otherwise. See Game#_hostAddPlayer.
       conn.on('open', () => conn.send({ t: 'hi', name, team }));
       conn.on('data', d => {
+        if (!isRecord(d)) return;
         if (d.t === 'w') done({ kind: 'join', conn, welcome: d });
         else if (d.t === 'full') done({ kind: 'full' });
       });
@@ -202,7 +205,7 @@ export class Net {
       const conn = peer.connect(target, { reliable: true });
       conn.on('open', () => conn.send({ t: 'ping' }));
       conn.on('data', d => {
-        if (d.t === 'pong')
+        if (validPong(d))
           done({ kind: 'room', humans: d.humans, max: d.max, map: d.map,
                  mode: d.mode, g: d.g, b: d.b, names: d.names ?? [] });
       });

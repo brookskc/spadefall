@@ -1,0 +1,79 @@
+// remote-player.js — the host-side lifecycle for one connected human.
+import { Avatar } from './avatar.js';
+import { Body } from './entities.js';
+
+export class RemotePlayer {
+  constructor(game, id, name, team) {
+    this.game = game;
+    this.id = id;
+    this.name = name;
+    this.team = team;
+    this.isRemote = true;
+    const p = game.spawnPoint(team);
+    this.body = new Body(game.world, p.x, p.y, p.z);
+    this.health = 100;
+    this.alive = true;
+    this.carrier = false;
+    this.blocks = 50;
+    this.tool = 0;
+    this.gunClass = 0;
+    this._pendingClass = 0;
+    this.yaw = team === 'green' ? -Math.PI / 2 : Math.PI / 2;
+    this.nades = 3;
+    this.nadeRegen = 0;
+    this._actT = {};
+    this.avatar = new Avatar(game.scene, team, name, team === game.player.team);
+    this.avatar.push(p.x, p.y, p.z, this.yaw);
+  }
+
+  die(killer) {
+    this.alive = false;
+    this._mkCount = 0; this._mkT = null;
+    this._streak = 0;
+    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._lastAimDir = null; this._lastAimT = null;
+    this._lastNadeAimDir = null; this._lastNadeAimT = null;
+    this.game.effects.burst(this.body.eye(), 26,
+      this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
+    this.game.net.sendTo(this.id, { t: 'e', k: 'died' });
+    this.game.onDeath(this, killer);
+  }
+
+  respawn(at = null, notify = true) {
+    const p = at ?? this.game.spawnPoint(this.team);
+    this.body.pos.set(p.x, p.y, p.z);
+    this.body.vel.set(0, 0, 0);
+    this.body.half.h = 1.75;
+    this.body.voidFall = false;
+    this.health = 100;
+    this.alive = true;
+    this.carrier = false;
+    this.blocks = 50;
+    this.nades = 3;
+    this.nadeRegen = 0;
+    this.crouched = false;
+    this.protT = 3;
+    this.gunClass = this._pendingClass;
+    this.tool = this.gunClass;
+    this._actT = {};
+    this._lastAimDir = null; this._lastAimT = null;
+    this._lastNadeAimDir = null; this._lastNadeAimT = null;
+    this._mkCount = 0; this._mkT = null;
+    this._streak = 0;
+    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._airMove = null;
+    this._lastPosT = null;
+    this.yaw = this.team === 'green' ? -Math.PI / 2 : Math.PI / 2;
+    this.avatar.setAlive(true);
+    this.avatar.push(p.x, p.y, p.z, this.yaw);
+    if (notify) this.game.net.sendTo(this.id, { t: 'e', k: 'spawn',
+      x: p.x, y: p.y, z: p.z, yaw: this.team === 'green' ? 0 : Math.PI });
+  }
+
+  resetForRound() {
+    this.avatar.dispose();
+    this.avatar = new Avatar(this.game.scene, this.team, this.name,
+      this.team === this.game.player.team);
+    this.respawn(null, true);
+  }
+}

@@ -1,15 +1,18 @@
 // tests/suite.mjs — assertions over the modules that do not touch the DOM:
 // world.js (storage, meshing, raycast, carve), mapgen.js, entities.js (Body).
 //
-// game.js / player.js / main.js are NOT covered: game.js reads
-// `location.search` at module scope, so importing it outside a browser throws.
-// See the audit notes on making the snapshot row codecs testable.
+// Browser/DOM orchestration in Player and main.js is covered by browser smoke
+// tests. Pure multiplayer authority rules are kept in multiplayer.js so this
+// suite can exercise them headlessly.
 import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapsForMode } from '../src/mapgen.js';
 import { Body } from '../src/entities.js';
 import { mergeSnapshot, qx, qy, qa } from '../src/game.js';
+import { chooseTeam, normalizeDirection, parseSpawnRow, spawnRow,
+  validateMovementReport } from '../src/multiplayer.js';
+import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -154,9 +157,9 @@ function meshingTests() {
   parity('edit in the middle of a chunk', [[103, 25, 103, BLOCK.BLUE]]);
   parity('edit on an x seam only', [[96, 25, 103, BLOCK.BLUE]]);
   parity('edit on a z seam only', [[103, 25, 96, BLOCK.BLUE]]);
-  parity('edit on a chunk CORNER (x and z seam)  [known failure]', [[96, 25, 96, BLOCK.BLUE]]);
-  parity('edit on the opposite corner cell        [known failure]', [[95, 25, 95, BLOCK.BLUE]]);
-  note('rebuildAt/carve dirty only the 4 orthogonal neighbours; AO probes read the diagonal');
+  parity('edit on a chunk corner rebuilds the diagonal AO neighbour', [[96, 25, 96, BLOCK.BLUE]]);
+  parity('edit on the opposite corner cell rebuilds diagonal AO', [[95, 25, 95, BLOCK.BLUE]]);
+  note('dirty propagation includes diagonal neighbours because baked AO probes diagonally');
 
   group('meshing: chunk lifecycle');
   const w = slab();
@@ -180,7 +183,7 @@ function hostileInputTests() {
   try { w.set(100, 25, 100, PALETTE.length); } catch (e) { threw = e; }
   ok('set() rejects an out-of-palette value without throwing',
     threw === null, String(threw).slice(0, 70));
-  note("_clientEvent case 'edit' passes d.v straight from the wire, so one bad byte kills the render loop");
+  note('world.set is the final defensive boundary for wire-driven edits');
 
   const w2 = new VoxelWorld(scene());
   generateMap(w2, 1, 0);
@@ -200,7 +203,47 @@ function hostileInputTests() {
   const big = w4.carve(128, 30, 128, 40);
   const ms = Date.now() - t0;
   ok('carve() clamps an oversized radius', big.length < 5000, `${big.length} voxels`);
-  note(`carve(r=40) removed ${big.length} voxels in ${ms}ms; the wire format lets a host send any r`);
+  note(`carve(r=40) was clamped and removed ${big.length} voxels in ${ms}ms`);
+}
+
+// ---------------------------------------------------------------------------
+function multiplayerRuleTests() {
+  group('multiplayer authority rules');
+  ok('preferred team is honored while it has capacity',
+    chooseTeam('blue', { green: 3, blue: 4 }) === 'blue');
+  ok('a full preferred team falls back to the open side',
+    chooseTeam('blue', { green: 3, blue: 5 }) === 'green');
+  ok('a full 5v5 room has no assignable team',
+    chooseTeam('green', { green: 5, blue: 5 }) === null);
+
+  const body = { pos: { x: 12, y: 30, z: 42 } };
+  const row = spawnRow(body, Math.PI);
+  const spawn = parseSpawnRow(row);
+  ok('welcome spawn rows round-trip exactly',
+    spawn?.x === 12 && spawn?.y === 30 && spawn?.z === 42 && spawn?.yaw === Math.PI);
+  ok('malformed welcome spawn rows are rejected', parseSpawnRow([1, 2, NaN, 0]) === null);
+
+  const prev = { x: 10, y: 20, z: 10 };
+  ok('ordinary movement passes host displacement rules',
+    validateMovementReport(prev, { x: 10.2, y: 20.2, z: 10.1, yaw: 0 }, 1 / 30).ok);
+  ok('horizontal teleport is rejected',
+    validateMovementReport(prev, { x: 40, y: 20, z: 10, yaw: 0 }, 1 / 30).reason === 'horizontal-speed');
+  ok('vertical teleport is rejected',
+    validateMovementReport(prev, { x: 10, y: 40, z: 10, yaw: 0 }, 1 / 30).reason === 'vertical-rise');
+  ok('zero-length action direction is rejected', normalizeDirection([0, 0, 0]) === null);
+  const dir = normalizeDirection([3, 0, 4]);
+  ok('action direction is normalized at the trust boundary',
+    Math.abs(dir[0] - 0.6) < 1e-9 && Math.abs(dir[2] - 0.8) < 1e-9);
+  ok('transported AUTO team preferences are accepted',
+    validClientMessage({ t: 'hi', name: 'Ada', team: null }));
+  ok('null client messages are rejected without dispatch', !validClientMessage(null));
+  ok('malformed state reports are rejected', !validClientMessage({ t: 's', x: NaN }));
+  ok('oversized collapse events are rejected', !validServerMessage({
+    t: 'e', k: 'col', cells: Array(12003).fill(0),
+  }));
+  ok('room browser rejects malformed names payloads', !validPong({
+    t: 'pong', humans: 1, max: 10, map: 0, mode: 'ctf', g: 0, b: 0, names: 'oops',
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -261,8 +304,7 @@ function bodyTests() {
   const b5 = new Body(voidWorld, 50.5, 5, 50.5);
   for (let i = 0; i < 300; i++) b5.move(1 / 60);
   ok('a void fall is caught by the safety net', b5.pos.y > -8, `y=${b5.pos.y}`);
-  note(`the faller ends up oscillating near y=${b5.pos.y.toFixed(2)} forever (SEA=${SEA}); `
-    + 'nothing kills or respawns a body that falls out of the world');
+  note(`the Body raises voidFall after parking at y=${b5.pos.y.toFixed(2)}; Game converts it into a normal death`);
 
   ok('surface() of an empty column reads as ground at y=0', voidWorld.surface(10, 10) === 0);
 }
@@ -455,11 +497,10 @@ export async function run() {
   raycastTests();
   meshingTests();
   hostileInputTests();
+  multiplayerRuleTests();
   bodyTests();
   timings();
   console.log(`\n${pass} passed, ${fail} failed`);
-  console.log(fail
-    ? '\nThe failures marked [known failure] are the open bugs from the audit.\n'
-    : '\nAll green.\n');
+  console.log(fail ? '\nRegression failures remain.\n' : '\nAll green.\n');
   return fail ? 1 : 0;
 }

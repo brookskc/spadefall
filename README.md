@@ -40,8 +40,10 @@ click, no DEPLOY gate; `Esc` cancels the search). It peeks at a small set of
 deterministic public slots, then joins the fullest room that still has space,
 so players pile into the same games instead of scattering across empty ones. If
 no room is open, it quietly claims a slot and hosts one for the next
-quick-matcher to find. Rooms cap at 8 human players, and humans always split
-across opposing teams: you fight *each other*, not side by side against bots.
+quick-matcher to find. Rooms cap at 10 human players (5 per side). AUTO joins
+the less-populated team; a GREEN or BLUE preference is honored while that side
+has a seat, then safely falls back to the other side. You fight *each other*,
+not side by side against bots.
 
 Every soldier, human or bot, wears its callsign on a floating nametag, tinted
 by team and occluded by terrain just like the body beneath it, so you can tell

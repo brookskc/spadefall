@@ -276,7 +276,7 @@ const hud = {
   streakStatus(p) {
     const ready = $('airstrikeReady');
     if (ready) {
-      if (p._piloting || p._fallingT > 0 || p._overchargeT > 0) ready.style.display = 'none';
+      if (p._piloting || p._fallingT > 0 || p._lingerT > 0 || p._overchargeT > 0) ready.style.display = 'none';
       else if ((p._streak ?? 0) >= 10) { ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block'; }
       else if ((p._streak ?? 0) - (p._overchargeAtStreak ?? 0) >= 5) { ready.textContent = 'overcharge ready — [F]'; ready.style.display = 'block'; }
       else ready.style.display = 'none';
@@ -1288,6 +1288,7 @@ export class Game {
       this.player._overchargeT = 0;
       this.player._piloting = false;
       this.player._fallingT = 0;
+      this.player._lingerT = 0;
       hud.feed('DEV: streak/perk state cleared');
       return true;
     }
@@ -2763,6 +2764,7 @@ export class Game {
     this.player._overchargeT = 0; this.player._overchargeAtStreak = 0;
     this.player._piloting = false;
     this.player._fallingT = 0;
+    this.player._lingerT = 0;
     this.player.vmRoot.visible = false; // no floating gun while down
     this._respawnT = 10; // mirrors the host's human redeploy timer
     this.player.resetZoom(); // same reason as Player.die() — this is the guest's equivalent of it

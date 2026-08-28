@@ -456,6 +456,7 @@ export class Player {
     // damageable while this runs.
     if (this._piloting) { this._updatePiloting(dt); return; }
     if (this._fallingT > 0) { this._updateFalling(dt); return; }
+    if (this._lingerT > 0) { this._updateLinger(dt); return; }
     const b = this.body;
     // Crouch (hold CTRL): trades speed for a steadier aim. Both heights still
     // span two voxel rows, so standing up can never wedge us into a ceiling.
@@ -675,6 +676,27 @@ export class Player {
     const startY = SY + 30, endY = groundY + 12; // stays close but clear of the explosion itself, not literally in the crater
     this.camera.position.set(p.x, startY + (endY - startY) * ease, p.z);
     this.camera.rotation.set(-Math.PI / 2, 0, 0, 'YXZ');
+    // The fall just completed this frame (fallingT was clamped to 0
+    // above): hold the overhead view here for a beat before handing
+    // control back, so whoever called this in actually gets to see the
+    // crater and whoever was standing in it, rather than the camera
+    // snapping straight to first-person the instant the explosion goes
+    // off. Frozen at a saved position, not recomputed live from groundY
+    // each linger frame — the explosion carves its crater into the
+    // terrain right where this is looking, so a live groundY read here
+    // would pull the camera down mid-linger as the ground actually drops
+    // away beneath it.
+    if (this._fallingT <= 0) {
+      this._lingerT = 1;
+      this._lingerPos = this.camera.position.clone();
+    }
+  }
+
+  _updateLinger(dt) {
+    this._lingerT -= dt;
+    if (this._lingerT < 0) this._lingerT = 0;
+    this.camera.position.copy(this._lingerPos);
+    this.camera.rotation.set(-Math.PI / 2, 0, 0, 'YXZ');
   }
 
   _useTool() {
@@ -708,6 +730,7 @@ export class Player {
     this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
     this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
+    this._lingerT = 0; // die during the post-impact linger (caught in someone else's fight, or your own blast) and the death camera takes over immediately — no frozen overhead view fighting the ragdoll for control
     this.vmRoot.visible = false; // no floating gun while down
     this.resetZoom(); // don't die scoped in — the death camera shouldn't render through a sniper scope
     // Bots and remote players already burst apart on death (see their die()
@@ -881,7 +904,7 @@ export class Player {
     this._mkCount = 0; this._mkT = null;
     this._streak = 0;
     this._overchargeT = 0; this._overchargeAtStreak = 0;
-    this._piloting = false; this._fallingT = 0;
+    this._piloting = false; this._fallingT = 0; this._lingerT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this.vmRoot.visible = true;

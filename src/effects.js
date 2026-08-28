@@ -16,6 +16,7 @@ export class Effects {
     // is exactly when frame drops are most noticeable on weak hardware.
     const preset = gfxPreset();
     this.maxDebris = preset.debris;
+    this.maxCasings = preset.casings;
 
     // Debris — one InstancedMesh, recycled slots.
     this.debris = new THREE.InstancedMesh(
@@ -27,6 +28,16 @@ export class Effects {
     this.debris.count = 0;
     this.particles = [];
     scene.add(this.debris);
+
+    this.casingParticles = [];
+    this.casings = this.maxCasings ? new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.035, 0.035, 0.12),
+      new THREE.MeshBasicMaterial({ color: 0xc9a24a }), this.maxCasings) : null;
+    if (this.casings) {
+      this.casings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.casings.count = 0;
+      scene.add(this.casings);
+    }
 
     // Tracers — pooled stretched boxes, additive glow.
     this.tracers = [];
@@ -88,13 +99,23 @@ export class Effects {
     t.life = 0.09;
   }
 
-  muzzleFlash(pos) {
+  muzzleFlash(pos, kind = 'rifle') {
     const f = this.flashes.find(f => f.life <= 0);
     if (!f) return;
     f.mesh.position.copy(pos);
+    const scale = kind === 'sniper' ? 1.35 : kind === 'smg' ? 0.72 : 1;
+    f.mesh.scale.set(scale, scale, scale);
     f.mesh.visible = true;
     f.mesh.material.opacity = 0.95;
     f.life = 0.06;
+  }
+
+  ejectCasing(pos) {
+    if (!this.casings || this.casingParticles.length >= this.maxCasings) return;
+    this.casingParticles.push({ pos: pos.clone(),
+      vel: new THREE.Vector3((Math.random() - 0.2) * 2.2, 1.5 + Math.random() * 1.8,
+        (Math.random() - 0.5) * 2), life: 0.8 + Math.random() * 0.5,
+      spin: Math.random() * 12 });
   }
 
   burst(pos, count, hex, power = 5) {
@@ -167,6 +188,25 @@ export class Effects {
     if (n) {
       this.debris.instanceMatrix.needsUpdate = true;
       if (this.debris.instanceColor) this.debris.instanceColor.needsUpdate = true;
+    }
+    let cn = 0;
+    for (const casing of this.casingParticles) {
+      casing.life -= dt;
+      if (casing.life <= 0) continue;
+      casing.vel.y -= 18 * dt;
+      casing.pos.addScaledVector(casing.vel, dt);
+      this.casingParticles[cn++] = casing;
+    }
+    this.casingParticles.length = cn;
+    if (this.casings) {
+      this.casings.count = cn;
+      for (let i = 0; i < cn; i++) {
+        const casing = this.casingParticles[i];
+        _q.setFromAxisAngle(_s.set(1, 0.35, 0.2).normalize(), casing.spin * casing.life);
+        _m.compose(casing.pos, _q, _s.setScalar(1));
+        this.casings.setMatrixAt(i, _m);
+      }
+      if (cn) this.casings.instanceMatrix.needsUpdate = true;
     }
     this.shake = Math.max(0, this.shake - dt * 1.8);
   }

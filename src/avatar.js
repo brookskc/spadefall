@@ -1,12 +1,14 @@
 // avatar.js — remote soldiers: model, nametag, snapshot interpolation.
 import * as THREE from 'three';
-import { makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, disposeObject, setCrouch, placeShadow, footDust } from './entities.js';
+import { makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, disposeObject,
+  setCrouch, setSoldierTool, placeShadow, footDust } from './entities.js';
 import { sfx } from './audio.js';
+import { teamHex } from './settings.js';
 
 export class Avatar {
   constructor(parent, team, name, friendly = false) {
     this.team = team;
-    this.parts = makeSoldier(team === 'blue' ? 0x4a6cd4 : 0x4a9e4a);
+    this.parts = makeSoldier(teamHex(team));
     this.group = this.parts.group;
     // Callsigns are for your own side. An enemy tag floats at y=2.15, above
     // the helmet — so a man crouched behind a two-block wall was fully hidden
@@ -64,6 +66,7 @@ export class Avatar {
   }
 
   setCrouch(on) { this.crouch = on; }
+  setTool(tool) { setSoldierTool(this.parts, tool); }
 
   // Render just far enough in the past to bracket two snapshots: one
   // observed interval plus two jitter sigmas, clamped to sanity. A clean

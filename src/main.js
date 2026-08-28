@@ -7,7 +7,10 @@ import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { GUN_CLASSES } from './player.js';
-import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps } from './settings.js';
+import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
+  getHudScale, setHudScale, getHudOpacity, setHudOpacity,
+  getBaseFov, setBaseFov, getMotionScale, getMotionLevel, setMotionLevel,
+  getColorMode, setColorMode } from './settings.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -514,6 +517,42 @@ const mapPref = $('mapPref'), modePref = $('modePref');
   renderFpsOpt();
 }
 
+// Accessibility/display choices apply live and remain cosmetic: they never
+// alter fog, draw distance, objective geometry, or multiplayer information.
+function choiceRow(id, read, write, apply) {
+  const opts = document.querySelectorAll(`#${id} .opt`);
+  const render = () => {
+    const value = String(read());
+    for (const el of opts) el.classList.toggle('picked', el.dataset.value === value);
+    apply(value);
+  };
+  for (const el of opts) el.addEventListener('click', () => {
+    write(el.dataset.value); render();
+  });
+  render();
+}
+
+choiceRow('hudScaleOpts', () => Math.round(getHudScale() * 100), setHudScale, value => {
+  $('hud').style.setProperty('--hud-scale', String(Number(value) / 100));
+});
+choiceRow('hudOpacityOpts', () => Math.round(getHudOpacity() * 100), setHudOpacity, value => {
+  $('hud').style.setProperty('--hud-alpha', String(Number(value) / 100));
+});
+choiceRow('fovOpts', getBaseFov, setBaseFov, value => {
+  game.player.baseFov = Number(value);
+  if (!game.player.aiming) {
+    camera.fov = game.player.baseFov;
+    camera.updateProjectionMatrix();
+  }
+});
+choiceRow('motionOpts', getMotionLevel, setMotionLevel, value => {
+  game.player.motionScale = getMotionScale();
+  document.body.classList.toggle('reduced-motion', value === 'reduced');
+});
+choiceRow('colorOpts', getColorMode, setColorMode, value => {
+  document.body.dataset.colors = value;
+});
+
 // Reads the preference the picker above sets, or undefined if the player
 // never touched it ('auto') — this is what every fresh-join call site
 // sends so the host can honor it. Migration/rejoin knocks don't use this:
@@ -858,6 +897,10 @@ const clock = new THREE.Clock();
 // jittery frame to frame to read), display text only refreshed every
 // 0.4s so it's actually readable rather than flickering every frame.
 let fpsEma = 60, fpsDisplayT = 0;
+const perfOn = params.has('perf');
+const perfSamples = new Float32Array(240);
+let perfCount = 0, perfCursor = 0;
+if (perfOn) $('perf').style.display = 'block';
 let menuT = Math.PI * 0.15;
 let menuMapT = 0; // seconds the current backdrop map has been showing
 // Test hook: ?mmt=2 rotates every 2s.
@@ -900,6 +943,11 @@ function frame() {
   const dt = Math.min(wallDt, 0.05);        // sim step, capped for physics
 
   if (wallDt > 0) fpsEma = fpsEma * 0.9 + (1 / wallDt) * 0.1;
+  if (perfOn && wallDt > 0) {
+    perfSamples[perfCursor] = wallDt * 1000;
+    perfCursor = (perfCursor + 1) % perfSamples.length;
+    perfCount = Math.min(perfSamples.length, perfCount + 1);
+  }
   fpsDisplayT += wallDt;
   if (fpsDisplayT >= 0.4) {
     fpsDisplayT = 0;
@@ -908,6 +956,15 @@ function frame() {
       const f = Math.round(fpsEma);
       el.textContent = f + ' fps';
       el.className = f < 25 ? 'bad' : f < 45 ? 'warn' : '';
+    }
+    if (perfOn && perfCount) {
+      const sorted = Array.from(perfSamples.slice(0, perfCount)).sort((a, b) => a - b);
+      const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+      const info = renderer.info.render;
+      $('perf').textContent = `${getGfxLevel().toUpperCase()}  ${innerWidth}×${innerHeight}\n`
+        + `frame p95 ${p95.toFixed(1)}ms\n`
+        + `${info.calls} calls  ${info.triangles} tris\n`
+        + `${game.effects.particles.length} debris`;
     }
   }
 

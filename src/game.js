@@ -7,13 +7,14 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { disposeObject, footDust } from './entities.js';
+import { disposeObject, footDust, retintVoxelBoxes } from './entities.js';
 import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
 import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
   teamCounts, validateMovementReport, normalizeDirection } from './multiplayer.js';
 import { validClientMessage, validServerMessage } from './protocol.js';
+import { teamHex } from './settings.js';
 
 const WIN_SCORE = 3;
 // Team deathmatch: no flags, kills are points. ?killcap= lowers the bar for tests.
@@ -29,6 +30,7 @@ const kothtimeParam = parseInt(QUERY.get('kothtime'), 10);
 const HOLD_LIMIT = Number.isInteger(kothtimeParam) ? Math.max(10, kothtimeParam) : 120;
 const CAP_TIME = 6;
 const REDEPLOY = 10; // seconds back at base after dying — humans and bots alike
+const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
 // A client declares the host dead after this much snapshot silence. Chosen
 // against the interval keepalive in main.js: a healthy backgrounded host
 // still steps its sim (and broadcasts) at least every 250ms under normal
@@ -144,7 +146,7 @@ class Flag {
     // rippled by writing vertex positions every frame — a smooth, soft object
     // standing in a world of hard axis-aligned voxels. It read as borrowed
     // from a different game, because it was.
-    const color = team === 'blue' ? 0x4a6cd4 : 0x4a9e4a;
+    const color = teamHex(team);
     this.group = new THREE.Group();
     const box = (w, h, d, mat, x, y, z, parent) => {
       const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
@@ -295,6 +297,24 @@ const hud = {
     if (next !== this._lastScore) { this._lastScore = next; $('score').innerHTML = next; }
     this._flagState(g);
   },
+  objective(g) {
+    const el = $('objective');
+    if (!el) return;
+    const p = g.player;
+    let target = null, label = '';
+    if (g.hill) { target = g.hill.pos; label = 'HILL'; }
+    else if (g.flags) {
+      if (p.carrier) { target = g.flags[p.team].home; label = 'RETURN'; }
+      else { const enemy = p.team === 'green' ? 'blue' : 'green'; target = g.flags[enemy].pos; label = 'FLAG'; }
+    }
+    if (!target || !p.alive) { el.style.display = 'none'; return; }
+    const dx = target.x - p.body.pos.x, dz = target.z - p.body.pos.z;
+    const look = p.lookDir();
+    const angle = Math.atan2(look.x * dz - look.z * dx, look.x * dx + look.z * dz);
+    el.style.display = 'flex';
+    el.querySelector('.arrow').style.transform = `rotate(${angle}rad)`;
+    el.querySelector('.label').textContent = `${label} ${Math.round(Math.hypot(dx, dz))}m`;
+  },
   _flagState(g) {
     if (g.hill) { // king of the hill: who owns the point, who's taking it
       const h = g.hill;
@@ -330,7 +350,7 @@ const hud = {
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     let html = '<table class="kd"><tr><th></th><th>K</th><th>D</th><th>K/D</th></tr>';
     for (const [key, r] of rows) {
-      const c = r.team === 'blue' ? '#8fa8ee' : '#8fd98f';
+      const c = teamCss(r.team);
       const ratio = (r.k / Math.max(1, r.d)).toFixed(2);
       html += `<tr${key === me ? ' class="me"' : ''}>`
         + `<td style="color:${c}">${esc(r.name)}</td>`
@@ -434,7 +454,7 @@ const hud = {
     }
     const n = document.createElement('span');
     n.className = 'cn';
-    n.style.color = m.team === 'blue' ? '#8fa8ee' : '#8fd98f';
+    n.style.color = teamCss(m.team);
     n.textContent = m.name;
     div.append(n, document.createTextNode(m.text));
     log.append(div);
@@ -539,7 +559,7 @@ const hud = {
     for (const team of ['green', 'blue']) {
       const st = BASE[team].flag;
       const cx = (st.x + 0.5) * s, cz = (st.z + 0.5) * s;
-      ctx.fillStyle = team === 'blue' ? '#7d9bff' : '#8fd98f';
+      ctx.fillStyle = teamCss(team);
       ctx.beginPath();
       ctx.moveTo(cx, cz - 4); ctx.lineTo(cx + 4, cz);
       ctx.lineTo(cx, cz + 4); ctx.lineTo(cx - 4, cz);
@@ -550,7 +570,7 @@ const hud = {
     if (g.flags) for (const team of ['green', 'blue']) {
       const f = g.flags[team];
       const cx = f.pos.x * s, cz = f.pos.z * s;
-      const col = team === 'blue' ? '#7d9bff' : '#8fd98f';
+      const col = teamCss(team);
       if (f.state === 'carried') {
         const r = 6 + 1.6 * Math.sin(g.time * 6);
         ctx.strokeStyle = 'rgba(255,255,255,.9)';
@@ -573,7 +593,7 @@ const hud = {
     if (g.hill) {
       const h = g.hill;
       const cx = h.pos.x * s, cz = h.pos.z * s;
-      const col = h.owner === 'blue' ? '#7d9bff' : h.owner === 'green' ? '#8fd98f' : '#e8ecf2';
+      const col = h.owner ? teamCss(h.owner) : '#e8ecf2';
       ctx.strokeStyle = col;
       ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(cx, cz, h.r * s, 0, 7); ctx.stroke();
@@ -655,8 +675,7 @@ const holdClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padSt
 // The six face-neighbor offsets, for the structural-support flood fill.
 const DIRS6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 
-const nameSpan = e =>
-  `<span style="color:${e.team === 'blue' ? '#8fa8ee' : '#8fd98f'}">${e.name}</span>`;
+const nameSpan = e => `<span style="color:${teamCss(e.team)}">${e.name}</span>`;
 
 // Names arrive over the network and land in HTML (kill feed) and canvas
 // (nametags): keep them to the same alphabet the callsign box enforces.
@@ -794,6 +813,7 @@ export class Game {
     this.scene.fog.color.setHex(a.fog);
     this.scene.fog.near = 70; this.scene.fog.far = 230; // restored explicitly in case a rebuild lands mid-underwater, right as these were swapped to the murky-water values
     this.world.water.material.color.setHex(a.water);
+    this.world.configureAtmosphere(this.mapIndex);
     this.world.cloudMat.color.setHex(a.cloud);
     // Horizon peaks: derived from this map's own fog color rather than a
     // fixed one, so a per-map override (a darker, murkier fog on one map
@@ -841,10 +861,13 @@ export class Game {
     for (const av of this.avatars.values()) av.dispose();
     this.avatars.clear();
     for (const t of ['green', 'blue']) this.flags?.[t].dispose();
+    if (this.hillVisual) { disposeObject(this.hillVisual.mesh); this.hillVisual = null; }
     this.seed = seed;
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
+    retintVoxelBoxes(this.player?.vmRoot);
+    for (const p of this.remote.values()) retintVoxelBoxes(p.avatar?.group);
     this._applyMapAtmosphere(map);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
@@ -863,6 +886,7 @@ export class Game {
       ? { pos: new THREE.Vector3(hd.x + 0.5, this.world.surface(hd.x, hd.z), hd.z + 0.5),
           r: hd.r, owner: null, progress: 0, contested: false, capTeam: null }
       : null;
+    if (this.hill) this._createHillVisual();
     this.respawnTimers.clear();
     this.bots = [];
     // Start every human through a real new-round lifecycle. Mark guests dead
@@ -1154,7 +1178,8 @@ export class Game {
   // 2 blocks of your ear) already played its sound locally.
   shotFx(muzzle, end, hit, hex, from, kind = 'smg') {
     this.effects.tracer(muzzle, end);
-    this.effects.muzzleFlash(muzzle);
+    this.effects.muzzleFlash(muzzle, kind);
+    this.effects.ejectCasing(muzzle);
     if (hit) this.effects.burst(end, 10, 0xc0392b, 4);
     else if (hex) this.effects.burst(end, 6, hex, 3);
     if (from.distanceToSquared(this.player.body.eye()) > 4) sfx.at(kind, muzzle);
@@ -1817,7 +1842,7 @@ export class Game {
         sfx.capture();
         this.feed(`${nameSpan(e)} <b>CAPTURED</b> the flag`);
         this.message(e.team === 'green' ? 'CAPTURE! GREEN SCORES' : 'CAPTURE! BLUE SCORES',
-          e.team === 'green' ? '#8fd98f' : '#8fa8ee');
+          teamCss(e.team));
         hud.score(this);
         if (this.captures[e.team] >= WIN_SCORE) this._end(e.team);
       }
@@ -1826,6 +1851,45 @@ export class Game {
   }
 
   // ---------------- king of the hill ----------------
+  _createHillVisual() {
+    const h = this.hill, cells = [];
+    const r = Math.max(4, Math.round(h.r));
+    for (let d = -r; d <= r; d += 2) {
+      cells.push([Math.round(h.pos.x + d), Math.round(h.pos.z - r)]);
+      cells.push([Math.round(h.pos.x + d), Math.round(h.pos.z + r)]);
+      if (Math.abs(d) < r) {
+        cells.push([Math.round(h.pos.x - r), Math.round(h.pos.z + d)]);
+        cells.push([Math.round(h.pos.x + r), Math.round(h.pos.z + d)]);
+      }
+    }
+    const material = new THREE.MeshBasicMaterial({ color: 0xe8ecf2, transparent: true,
+      opacity: 0.72, depthWrite: false });
+    const mesh = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.35, 0.12, 1.35), material, cells.length);
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    this.hillVisual = { mesh, material, cells, nextGroundT: 0 };
+    this._updateHillVisual(true);
+  }
+
+  _updateHillVisual(force = false) {
+    const v = this.hillVisual, h = this.hill;
+    if (!v || !h) return;
+    v.material.color.setHex(h.owner ? teamHex(h.owner) : 0xe8ecf2);
+    // A stepped pulse stays in the voxel language and avoids a smooth glow.
+    v.material.opacity = h.contested
+      ? 0.82 + 0.13 * Math.round((Math.sin(this.time * 7) + 1) * 2) / 4 : 0.72;
+    if (!force && this.time < v.nextGroundT) return;
+    v.nextGroundT = this.time + 0.25;
+    const matrix = new THREE.Matrix4();
+    for (let i = 0; i < v.cells.length; i++) {
+      const [x, z] = v.cells[i];
+      matrix.makeTranslation(x + 0.5, this.world.surface(x, z) + 1.07, z + 0.5);
+      v.mesh.setMatrixAt(i, matrix);
+    }
+    v.mesh.instanceMatrix.needsUpdate = true;
+  }
+
   // One point at map center. Stand on it alone for CAP_TIME seconds to take
   // it (or to flip it); once owned, the owner's clock accrues hold time
   // whether or not anyone is standing there — you lose it only when the
@@ -1855,7 +1919,7 @@ export class Game {
         sfx.capture();
         this.feed(sole === 'green' ? '<b>GREEN</b> holds the hill' : '<b>BLUE</b> holds the hill');
         this.message(sole === 'green' ? 'GREEN HOLDS THE HILL' : 'BLUE HOLDS THE HILL',
-          sole === 'green' ? '#8fd98f' : '#8fa8ee');
+          teamCss(sole));
       }
     } else if (!h.contested && h.progress > 0) {
       h.progress = Math.max(0, h.progress - dt * 1.5); // abandoned or owner-only: decay
@@ -1865,6 +1929,7 @@ export class Game {
       if (this.captures[h.owner] >= HOLD_LIMIT) this._end(h.owner);
     }
     hud.score(this);
+    this._updateHillVisual();
   }
 
   _end(winner) {
@@ -2017,8 +2082,10 @@ export class Game {
       p._lastPosT = this.time;
       // The active belt contains exactly this life's gun plus spade/block/nade.
       // Invalid client claims never become authoritative proxy state.
-      if (d.tool === p.gunClass || d.tool === 2 || d.tool === 3 || d.tool === 4)
+      if (d.tool === p.gunClass || d.tool === 2 || d.tool === 3 || d.tool === 4) {
         p.tool = d.tool;
+        p.avatar.setTool(d.tool);
+      }
       p.yaw = d.yaw;
       p.crouched = !!d.c;
       p.avatar.push(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.yaw);
@@ -2611,6 +2678,7 @@ export class Game {
       }
       av.setAlive(!!alive);
       av.setCrouch(!!crouch);
+      av.setTool(tool);
       av.push(x, y, z, ry);
     }
     for (const [idx, r] of this._fullB) {
@@ -2647,6 +2715,7 @@ export class Game {
       this.hill.progress = d.h[1];
       this.hill.contested = !!d.h[2];
       this.hill.capTeam = d.h[3];
+      this._updateHillVisual();
     }
     this.captures.green = d.c[0];
     this.captures.blue = d.c[1];
@@ -2809,8 +2878,7 @@ export class Game {
     this.player.vmRoot.visible = false; // no floating gun while down
     this._respawnT = 10; // mirrors the host's human redeploy timer
     this.player.resetZoom(); // same reason as Player.die() — this is the guest's equivalent of it
-    this.effects.burst(this.player.body.eye(), 26,
-      this.player.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
+    this.effects.burst(this.player.body.eye(), 26, teamHex(this.player.team), 6);
     sfx.hurt();
     hud.damage();
     hud.respawn(10);
@@ -2895,7 +2963,7 @@ export class Game {
   // Camera shake rides on top of whatever the player camera did.
   _shakeCamera() {
     if (this.effects.shake <= 0.001) return;
-    const s = this.effects.shake;
+    const s = this.effects.shake * (this.player.motionScale ?? 1);
     this.camera.position.x += (Math.random() - .5) * s * 0.4;
     this.camera.position.y += (Math.random() - .5) * s * 0.4;
     this.camera.rotation.z = (Math.random() - .5) * s * 0.05;
@@ -2907,6 +2975,7 @@ export class Game {
     this.world.animateSky(this.time);
     this._updateUnderwaterFog();
     hud.minimap(this);
+    hud.objective(this);
     hud.ping(this);
     hud.streakStatus(this.player);
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost

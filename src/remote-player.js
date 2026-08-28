@@ -1,6 +1,7 @@
 // remote-player.js — the host-side lifecycle for one connected human.
 import { Avatar } from './avatar.js';
 import { Body } from './entities.js';
+import { teamHex } from './settings.js';
 
 export class RemotePlayer {
   constructor(game, id, name, team) {
@@ -33,8 +34,7 @@ export class RemotePlayer {
     this._overchargeT = 0; this._overchargeAtStreak = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
-    this.game.effects.burst(this.body.eye(), 26,
-      this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
+    this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);
     this.game.net.sendTo(this.id, { t: 'e', k: 'died' });
     this.game.onDeath(this, killer);
   }

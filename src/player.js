@@ -4,6 +4,7 @@ import { Body, faceTintedBox } from './entities.js';
 import { sfx } from './audio.js';
 import { stats } from './stats.js';
 import { SX, SY, SZ } from './world.js';
+import { getBaseFov, getMotionScale, teamHex } from './settings.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -49,7 +50,6 @@ export const TOOLS = [
 // spade/block/nade stay universally available regardless of class.
 export const GUN_CLASSES = [0, 1, 5]; // rifle, smg, sniper
 
-const BASE_FOV = 75;
 // Bullet-drop gravity, duplicated from game.js's GRAVITY_DROP rather than
 // imported — game.js already imports FROM this file, so importing back
 // would be circular. Small tuning constants living separately per file
@@ -63,6 +63,8 @@ export class Player {
   constructor(game, camera, dom) {
     this.game = game;
     this.camera = camera;
+    this.baseFov = getBaseFov();
+    this.motionScale = getMotionScale();
     this.dom = dom;
     this.team = 'green';
     const b = game.spawnPoint('green');
@@ -118,7 +120,7 @@ export class Player {
   get team() { return this._team; }
   set team(t) {
     this._team = t;
-    this._blockMat?.color.setHex(t === 'blue' ? 0x4a6cd4 : 0x4a9e4a);
+    this._blockMat?.color.setHex(teamHex(t));
   }
 
   // ---------------- input ----------------
@@ -235,7 +237,7 @@ export class Player {
       if (document.pointerLockElement !== dom) return;
       // Sensitivity follows the zoom: sighted in, the same mouse travel
       // covers less view, so fine aim stays reachable.
-      const sens = 0.0022 * (this.camera.fov / BASE_FOV);
+      const sens = 0.0022 * (this.camera.fov / this.baseFov);
       this.yaw -= e.movementX * sens;
       this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - e.movementY * sens));
     });
@@ -320,7 +322,7 @@ export class Player {
     const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
     const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
-      color: this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, vertexColors: true });
+      color: teamHex(this.team), vertexColors: true });
     this._blockMat = blockMat; // live-recolored by the team setter below
     const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
     const mk = (w, h, d, mat, x, y, z, parent) => {
@@ -330,6 +332,7 @@ export class Player {
       return m;
     };
     this.vm = {};
+    this._magParts = {};
     const root = new THREE.Group();
     this.camera.add(root);
     this.vmRoot = root;
@@ -361,13 +364,16 @@ export class Player {
     const rifle = new THREE.Group();
     mk(0.05, 0.07, 0.85, dark, 0, 0, -0.5, rifle);       // barrel
     mk(0.07, 0.12, 0.35, wood, 0, -0.05, -0.05, rifle);  // stock
+    const rifleMag = mk(0.045, 0.12, 0.08, dark, 0, -0.095, -0.2, rifle);
+    this._magParts.rifle = { mesh: rifleMag, y: rifleMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.05, rifle);    // hand
     sights(rifle, -0.85, -0.12);
     this.vm.rifle = rifle;
 
     const smg = new THREE.Group();
     mk(0.06, 0.08, 0.5, dark, 0, 0, -0.32, smg);
-    mk(0.05, 0.16, 0.07, dark, 0, -0.11, -0.12, smg);    // magazine
+    const smgMag = mk(0.05, 0.16, 0.07, dark, 0, -0.11, -0.12, smg);
+    this._magParts.smg = { mesh: smgMag, y: smgMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.1, 0.05, smg);
     sights(smg, -0.53, -0.1);
     this.vm.smg = smg;
@@ -381,6 +387,8 @@ export class Player {
     const sniper = new THREE.Group();
     mk(0.045, 0.06, 1.05, dark, 0, 0, -0.55, sniper);       // long barrel
     mk(0.08, 0.13, 0.4, wood, 0, -0.055, -0.02, sniper);    // stock
+    const sniperMag = mk(0.05, 0.1, 0.08, dark, 0, -0.105, -0.2, sniper);
+    this._magParts.sniper = { mesh: sniperMag, y: sniperMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.06, sniper);      // hand
     const scopeBody = mk(0.06, 0.06, 0.28, dark, 0, 0.09, -0.35, sniper);
     const scopeLens = mk(0.07, 0.07, 0.03, dark, 0, 0.09, -0.5, sniper);
@@ -549,9 +557,11 @@ export class Player {
     this._sinceShot += dt;
     if (this._sinceShot > 0.12) this.climb = Math.max(0, this.climb - dt * 0.105);
     const eye = b.eye();
+    const motion = this.motionScale ?? 1;
     this.camera.position.set(eye.x,
-      eye.y + Math.sin(this.bob) * 0.045 * (moving ? 1 : 0) - (this.stepK ?? 0), eye.z);
-    this.camera.rotation.set(this.pitch + this.climb + this.recoil * 0.05, this.yaw - Math.PI / 2, 0, 'YXZ');
+      eye.y + Math.sin(this.bob) * 0.045 * (moving ? 1 : 0) * motion - (this.stepK ?? 0), eye.z);
+    this.camera.rotation.set(this.pitch + this.climb + this.recoil * 0.05 * motion,
+      this.yaw - Math.PI / 2, 0, 'YXZ');
     // three.js cameras look down -Z; the -PI/2 offset aligns it with our yaw convention.
 
     // Viewmodel sway + reload dip + spade chop (raise, then strike forward).
@@ -562,18 +572,32 @@ export class Player {
     const chop = this.tool === 2 ? Math.sin(this.swing * Math.PI) : 0;
     this.vmRoot.position.x = 0.28 * (1 - this.aimK);
     this.vmRoot.position.y = -0.26 + this.aimK * 0.17
-      + Math.sin(this.bob * 2) * 0.008 * (1 - this.aimK) - this.recoil * 0.04
+      + Math.sin(this.bob * 2) * 0.008 * (1 - this.aimK) * motion - this.recoil * 0.04 * motion
       + chop * 0.06
       - (this.reloading > 0 ? 0.18 * Math.sin(Math.PI * (1 - this.reloading / TOOLS[this.tool].reload)) : 0);
     this.vmRoot.position.z = -0.25 - chop * 0.22 + this.aimK * 0.1;
-    this.vmRoot.rotation.x = -this.recoil * 0.35 - chop * 0.5;
+    this.vmRoot.rotation.x = -this.recoil * 0.35 * motion - chop * 0.5;
+    for (const part of Object.values(this._magParts)) {
+      part.mesh.position.y = part.y;
+      part.mesh.rotation.x = 0;
+    }
+    if (this.reloading > 0) {
+      const spec = TOOLS[this.tool], part = this._magParts[spec.key];
+      if (part && spec.reload) {
+        const k = 1 - this.reloading / spec.reload;
+        const out = k < 0.32 ? k / 0.32 : k < 0.68 ? 1 : (1 - k) / 0.32;
+        const step = Math.round(Math.max(0, Math.min(1, out)) * 4) / 4;
+        part.mesh.position.y = part.y - step * 0.2;
+        part.mesh.rotation.x = step * 0.32;
+      }
+    }
     // Fully sighted in, the dot is gone entirely — the sights do the aiming.
     const xh = document.getElementById('crosshair');
     if (xh) xh.style.opacity = 1 - this.aimK;
 
     // Aim zoom.
     const aiming = this.mouseDown[2] && TOOLS[this.tool].zoom !== undefined;
-    const targetFov = aiming ? BASE_FOV / TOOLS[this.tool].zoom : BASE_FOV;
+    const targetFov = aiming ? this.baseFov / TOOLS[this.tool].zoom : this.baseFov;
     if (Math.abs(this.camera.fov - targetFov) > 0.1) {
       // Ease rate scales inversely with zoom — "a heavier, more magnified
       // optic takes proportionally longer to shoulder and stabilize."
@@ -760,7 +784,7 @@ export class Player {
     // Bots and remote players already burst apart on death (see their die()
     // methods) — your own death was the one case that never called this,
     // since it went straight to deathCam with no particle effect at all.
-    this.game.effects.burst(this.body.eye(), 26, this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
+    this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);
     sfx.hurt();
     this.game.hud.classPick(this._pendingClass); // show the current pick before any key is pressed
     this.game.onDeath(this, killer);
@@ -774,7 +798,7 @@ export class Player {
   // easing here on purpose: you're dead, there's no "smoothly" un-aim a
   // scope you can no longer use.
   resetZoom() {
-    this.camera.fov = BASE_FOV;
+    this.camera.fov = this.baseFov;
     this.camera.updateProjectionMatrix();
     this.aiming = false;
     this._updateScopeNotches(false); // un-hides the scope body/lens, hides the notch overlay

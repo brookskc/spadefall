@@ -1,6 +1,6 @@
 // entities.js — voxel AABB physics and the little blocky soldiers.
 import * as THREE from 'three';
-import { SEA, PALETTE } from './world.js';
+import { SEA, PALETTE, boxFaceTints } from './world.js';
 
 const GRAVITY = -30;
 
@@ -94,6 +94,21 @@ export class Body {
             else p.y = y - h.h - 0.001;
             this.vel.y = 0;
           } else {
+            // Water-exit step: a swimmer pressing into a shoreline lip should
+            // be able to mantle onto a block whose top is within one normal
+            // step of their feet. The ordinary auto-step below deliberately
+            // requires dry, grounded movement, which left players and bots
+            // pinned against even water-level blocks. Keep this in Body so
+            // every locally simulated body gets identical collision rules.
+            const waterStepY = this.step !== false && this.inWater
+              ? this._waterStepY(y + 1) : null;
+            if (waterStepY !== null) {
+              p.y = waterStepY;
+              this.vel.y = Math.max(0, this.vel.y);
+              this.onGround = true;
+              this._stepped = true;
+              return;
+            }
             // Auto-step: grounded and walking into a one-block rise with
             // headroom? Treat it as a stair, not a wall — lift onto it and
             // let the y-pass settle. Gated on walking (step === false while
@@ -128,6 +143,26 @@ export class Body {
         for (let x = x0; x <= x1; x++)
           if (this.world.solid(x, yy, z)) return false;
     return this._footing(y0);
+  }
+
+  // Return the exact feet height for a reachable shoreline mantle, or null.
+  // The lower bound prevents deep swimmers from snapping upward through a
+  // bank; the rise bound prevents this from becoming a general wall climb.
+  // At the candidate height, the whole body must be clear and the ledge must
+  // actually provide footing beneath the advanced horizontal position.
+  _waterStepY(blockTop) {
+    const p = this.pos, h = this.half;
+    const target = blockTop + 0.001;
+    const rise = target - p.y;
+    if (p.y < SEA - 1.25 || rise < -0.05 || rise > 1.251) return null;
+    const x0 = Math.floor(p.x - h.x), x1 = Math.floor(p.x + h.x);
+    const y0 = Math.floor(target),    y1 = Math.floor(target + h.h);
+    const z0 = Math.floor(p.z - h.x), z1 = Math.floor(p.z + h.x);
+    for (let yy = y0; yy <= y1; yy++)
+      for (let z = z0; z <= z1; z++)
+        for (let x = x0; x <= x1; x++)
+          if (this.world.solid(x, yy, z)) return null;
+    return this._footing(y0) ? target : null;
   }
 
   // Is there ground within one step anywhere under the footprint?
@@ -211,26 +246,34 @@ export function placeShadow(parts, world, yaw = 0) {
 // +z) — this is deliberately remapped to BoxGeometry's actual order
 // rather than copied, since copying it directly would have quietly
 // tinted the wrong faces.
-const BOX_FACE_TINT = [
-  [0.68, 0.72, 0.79], // +x
-  [0.68, 0.72, 0.79], // -x
-  [1.08, 1.03, 0.90], // +y (sun)
-  [0.45, 0.45, 0.47], // -y
-  [0.80, 0.84, 0.91], // +z
-  [0.80, 0.84, 0.91], // -z
-];
 export function faceTintedBox(w, h, d) {
   const geo = new THREE.BoxGeometry(w, h, d);
   const colors = new Float32Array(geo.attributes.position.count * 3);
+  const tints = boxFaceTints();
   for (let face = 0; face < 6; face++) {
-    const [r, gg, b] = BOX_FACE_TINT[face];
+    const [r, gg, b] = tints[face];
     for (let v = 0; v < 4; v++) {
       const i = (face * 4 + v) * 3;
       colors[i] = r; colors[i + 1] = gg; colors[i + 2] = b;
     }
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.userData.voxelFaceTint = true;
   return geo;
+}
+
+export function retintVoxelBoxes(root) {
+  const tints = boxFaceTints();
+  root?.traverse?.(object => {
+    const geo = object.geometry;
+    const attr = geo?.userData?.voxelFaceTint && geo.attributes?.color;
+    if (!attr || attr.count < 24) return;
+    for (let face = 0; face < 6; face++) {
+      const [r, g, b] = tints[face];
+      for (let v = 0; v < 4; v++) attr.setXYZ(face * 4 + v, r, g, b);
+    }
+    attr.needsUpdate = true;
+  });
 }
 
 export function makeSoldier(teamColor) {
@@ -245,6 +288,15 @@ export function makeSoldier(teamColor) {
     return m;
   };
 
+  // Two simple back-face shells give the character a readable blocky
+  // silhouette without a full-screen post-process or one duplicate pass per
+  // limb. They are depth-tested, so they never reveal a player through cover.
+  const outlineMat = new THREE.MeshBasicMaterial({ color: 0x10141b, side: THREE.BackSide });
+  const outline = (w, h, d, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w + 0.065, h + 0.065, d + 0.065), outlineMat);
+    m.position.set(x, y, z); g.add(m); return m;
+  };
+
   const legL = box(0.22, 0.6, 0.24, dark,  -0.14, 0.3, 0);
   const legR = box(0.22, 0.6, 0.24, dark,   0.14, 0.3, 0);
   legL.geometry.translate(0, -0.3, 0); legL.position.y = 0.6;
@@ -255,6 +307,8 @@ export function makeSoldier(teamColor) {
   armL.geometry.translate(0, -0.26, 0);
   armR.geometry.translate(0, -0.26, 0);
   const head = box(0.34, 0.34, 0.34, skin, 0, 1.42, 0);
+  outline(0.55, 0.62, 0.32, 0, 0.92, 0);
+  outline(0.34, 0.34, 0.34, 0, 1.42, 0);
   const brim = box(0.4, 0.12, 0.4, cloth, 0, 1.62, 0); // helmet brim
   const gun = box(0.09, 0.12, 0.7, dark, 0.2, 1.1, -0.35);
   // The spade rides in the right hand too, shown only while digging.
@@ -269,6 +323,18 @@ export function makeSoldier(teamColor) {
   g.add(blob);
 
   return { group: g, legL, legR, armL, armR, head, torso, gun, spade, blob, brim };
+}
+
+export function setSoldierTool(parts, tool) {
+  const gun = parts?.gun, spade = parts?.spade;
+  if (!gun || !spade) return;
+  spade.visible = tool === 2;
+  gun.visible = tool === 0 || tool === 1 || tool === 5;
+  if (!gun.visible) return;
+  const length = tool === 1 ? 0.72 : tool === 5 ? 1.34 : 1;
+  gun.scale.z = length;
+  gun.position.z = -0.35 - (length - 1) * 0.22;
+  gun.scale.y = tool === 5 ? 0.82 : tool === 1 ? 1.12 : 1;
 }
 
 // A floating callsign: crisp canvas sprite riding above the helmet. It's an

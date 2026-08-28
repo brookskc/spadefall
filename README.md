@@ -178,6 +178,15 @@ with everyone's K, D, and K/D. Fresh spawns get two seconds of protection —
 it drains twice as fast while you move and vanishes the moment you fire, so
 spawn-camping dies here but so does hiding in it.
 
+The display drawer includes Low, Medium, and High graphics presets plus HUD
+scale/opacity, field of view, reduced motion, and an alternate high-contrast
+team palette. Low keeps the original vertex-colored terrain path and omits
+ambient particles, shoreline foam, and ejected casings. Medium adds the
+nearest-filtered procedural voxel atlas, restrained ambience, foam, and a
+small casing pool. High raises those bounded effect pools without adding
+shadow maps or post-processing. All presets share the same stepped lighting,
+objective compass, readable soldier silhouettes, and terrain gameplay.
+
 Every sound sits in the world: footsteps, gunfire, and shovels pan to the
 correct ear and fade with distance. Gunfire carries across the map, but
 footsteps die out past ~24 blocks and digging past ~30 — quiet work stays

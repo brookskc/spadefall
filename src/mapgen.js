@@ -1,7 +1,8 @@
 // mapgen.js — procedural terrain with two team bases, in four themed maps.
 // MAPS order is the rotation order; generateMap(world, seed, mapIndex) fills
 // world.data, re-anchors BASE, and meshes everything via world.buildAll().
-import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS } from './world.js';
+import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS, setVoxelLight } from './world.js';
+import { teamHex } from './settings.js';
 
 // Deterministic value noise — smooth, seedable, dependency-free.
 function makeNoise(seed) {
@@ -41,20 +42,26 @@ function mulberry32(a) {
 // point of this being data instead of hardcoded is that retuning any of
 // these later is just changing a hex value here, nothing structural.
 export const MAPS = [
-  { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null },
+  { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null,
+    atmosphere: { sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
-    atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4 } },
+    atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4,
+      sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
-    atmosphere: { sky: ['#75a98d', '#b1c8b8', '#e3ebe0'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a } },
+    atmosphere: { sky: ['#75a98d', '#b1c8b8', '#e3ebe0'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a,
+      sun: [0.55, 1, -0.35], sunTint: [1.02, 1.05, 0.94] } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
     hill: { x: SX / 2, z: SZ / 2, r: 8 },
-    atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae } },
+    atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae,
+      sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
     hill: { x: SX / 2, z: SZ / 2, r: 8 },
-    atmosphere: { sky: ['#4a7fc4', '#a8c8e8', '#e0ecf5'], fog: 0xc5d8ea } },
+    atmosphere: { sky: ['#4a7fc4', '#a8c8e8', '#e0ecf5'], fog: 0xc5d8ea,
+      sun: [0.35, 1, -0.55], sunTint: [1.02, 1.03, 1.0] } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
     hill: { x: SX / 2, z: SZ / 2, r: 8 },
-    atmosphere: { sky: ['#c25a3a', '#e08a5a', '#f0c090'], fog: 0xd9a878, cloud: 0xe8c4a8, water: 0x6a5548 },
+    atmosphere: { sky: ['#c25a3a', '#e08a5a', '#f0c090'], fog: 0xd9a878, cloud: 0xe8c4a8, water: 0x6a5548,
+      sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
     paletteOverrides: { stone: 0x6e4a42 } },
 ];
 
@@ -575,12 +582,15 @@ function applyPaletteOverrides(mapIndex) {
   const overrides = MAPS[mapIndex % MAPS.length].paletteOverrides ?? {};
   for (let i = 1; i < PALETTE.length; i++)
     PALETTE[i].color = overrides[PALETTE[i].name] ?? DEFAULT_PALETTE_COLORS[i];
+  PALETTE[BLOCK.GREEN].color = teamHex('green');
+  PALETTE[BLOCK.BLUE].color = teamHex('blue');
 }
 
 // GREENBELT's own look (no atmosphere entry) is the neutral baseline every
 // other map's fields fall back to individually — a map can override just
 // its fog, say, and still inherit the default sky/cloud/water untouched.
-const DEFAULT_ATMOSPHERE = { sky: ['#4f9be8', '#9ecdf3', '#dceefc'], fog: 0xcfe4f7, cloud: 0xffffff, water: 0x2f6fb8 };
+const DEFAULT_ATMOSPHERE = { sky: ['#4f9be8', '#9ecdf3', '#dceefc'], fog: 0xcfe4f7,
+  cloud: 0xffffff, water: 0x2f6fb8, sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] };
 export function mapAtmosphere(mapIndex) {
   const a = MAPS[mapIndex % MAPS.length].atmosphere ?? {};
   return { ...DEFAULT_ATMOSPHERE, ...a };
@@ -594,6 +604,8 @@ export function generateMap(world, seed = 1979, mapIndex = 0) {
   // vertex data once at mesh-build time, not read live per frame, so the
   // override has to be in place before generation, not after.
   applyPaletteOverrides(mapIndex);
+  const atmosphere = mapAtmosphere(mapIndex);
+  setVoxelLight(atmosphere.sun, atmosphere.sunTint);
   world.data.fill(0);
   MAPS[mapIndex % MAPS.length].gen(world, seed);
   world.buildAll();

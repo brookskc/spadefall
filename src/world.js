@@ -1,5 +1,6 @@
 // world.js — the voxel world: storage, chunked meshing, raycasting, editing.
 import * as THREE from 'three';
+import { gfxPreset } from './settings.js';
 
 export const SX = 256, SY = 64, SZ = 256;   // world dimensions in voxels
 export const SEA = 20;                       // water plane height
@@ -55,6 +56,32 @@ const FACE_TINT = [
   [0.80, 0.84, 0.91], // -z
   [0.80, 0.84, 0.91], // +z
 ];
+const FACE_NORMALS = [
+  [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1],
+];
+
+// Four hard lighting bands, baked when a map meshes. Changing the map's sun
+// direction costs nothing per frame and keeps every face deliberately flat.
+export function setVoxelLight(sun = [0.45, 1, 0.25], warm = [1.06, 1.01, 0.90]) {
+  const len = Math.hypot(...sun) || 1;
+  const sx = sun[0] / len, sy = sun[1] / len, sz = sun[2] / len;
+  for (let i = 0; i < FACE_NORMALS.length; i++) {
+    const [nx, ny, nz] = FACE_NORMALS[i];
+    const dot = nx * sx + ny * sy + nz * sz;
+    let level = dot > 0.72 ? 1.06 : dot > 0.28 ? 0.88 : dot > -0.2 ? 0.72 : 0.56;
+    if (ny < 0) level = 0.43;
+    const lit = dot > 0.28;
+    FACE_TINT[i] = lit
+      ? [level * warm[0], level * warm[1], level * warm[2]]
+      : [level * 0.94, level * 0.98, level * 1.06];
+  }
+}
+
+// BoxGeometry's face order differs from the terrain mesher's. Dynamic
+// characters and the viewmodel read this mapping so they share its bands.
+export function boxFaceTints() {
+  return [FACE_TINT[1], FACE_TINT[0], FACE_TINT[3], FACE_TINT[2], FACE_TINT[5], FACE_TINT[4]];
+}
 // Deterministic per-voxel brightness jitter — breaks up flat walls of one
 // block type without any texture. ±5%, baked like everything else.
 function jitter(x, y, z) {
@@ -175,23 +202,77 @@ function mulberry32(a) {
   };
 }
 
+function makeVoxelAtlas() {
+  if (typeof document === 'undefined') return null;
+  const tile = 8, cols = 4, rows = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = tile * cols; canvas.height = tile * rows;
+  const g = canvas.getContext('2d');
+  for (let type = 1; type < PALETTE.length; type++) {
+    const tx = ((type - 1) % cols) * tile, ty = Math.floor((type - 1) / cols) * tile;
+    g.fillStyle = '#ffffff'; g.fillRect(tx, ty, tile, tile);
+    for (let y = 0; y < tile; y++) for (let x = 0; x < tile; x++) {
+      const hash = Math.abs(Math.sin((x + type * 13) * 17.17 + (y + type * 7) * 31.31));
+      let ink = false;
+      if (type === BLOCK.SAND) ink = y % 4 === 2 && (x + type) % 3 !== 0;
+      else if (type === BLOCK.STONE) ink = hash > 0.82 || (y === 5 && x > 1 && x < 6);
+      else if (type === BLOCK.GRASS) ink = hash > 0.87 || (y === 1 && x % 3 === 0);
+      else if (type === BLOCK.DIRT) ink = hash > 0.78;
+      else if (type === BLOCK.MOSS) ink = hash > 0.7;
+      else ink = (x + y) % 7 === 0; // team blocks: restrained stamped pattern
+      if (!ink) continue;
+      const shade = 205 + ((x * 11 + y * 7 + type * 5) % 25);
+      g.fillStyle = `rgb(${shade},${shade},${shade})`;
+      g.fillRect(tx + x, ty + y, 1, 1);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestMipmapNearestFilter;
+  texture.generateMipmaps = true;
+  return texture;
+}
+
 export class VoxelWorld {
   constructor(scene) {
     this.data = new Uint8Array(SX * SY * SZ);
     this.group = new THREE.Group();
     this.chunks = new Map();
-    this.material = new THREE.MeshBasicMaterial({ vertexColors: true });
+    this.textured = !!gfxPreset().textures;
+    this.atlas = this.textured ? makeVoxelAtlas() : null;
+    this.material = new THREE.MeshBasicMaterial({ vertexColors: true, map: this.atlas });
     scene.add(this.group);
 
     // Water — one translucent animated sheet.
     this.water = new THREE.Mesh(
       new THREE.PlaneGeometry(SX, SZ, 32, 32),
-      new THREE.MeshBasicMaterial({ color: 0x2f6fb8, transparent: true, opacity: 0.62 })
+      new THREE.MeshBasicMaterial({ color: 0x2f6fb8, vertexColors: true,
+        transparent: true, opacity: 0.62 })
     );
     this.water.rotation.x = -Math.PI / 2;
     this.water.position.set(SX / 2, SEA + 0.42, SZ / 2);
     scene.add(this.water);
     this._waterBase = this.water.geometry.attributes.position.array.slice();
+    this.water.geometry.setAttribute('color', new THREE.Float32BufferAttribute(
+      new Float32Array(this.water.geometry.attributes.position.count * 3).fill(1), 3));
+
+    // One pooled opaque-cube ambience mesh. Density is preset-controlled;
+    // map configuration below changes only motion and color.
+    this.ambienceMax = gfxPreset().ambience;
+    this.ambience = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.13, 0.13, 0.13),
+      new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true,
+        opacity: 0.72, depthWrite: false }), this.ambienceMax);
+    this.ambience.count = 0;
+    this.ambience.frustumCulled = false;
+    this._ambienceData = [];
+    this._ambMatrix = new THREE.Matrix4();
+    this._ambPos = new THREE.Vector3();
+    this._ambScale = new THREE.Vector3();
+    this._ambQuat = new THREE.Quaternion();
+    scene.add(this.ambience);
+    this.foam = null;
 
     // Clouds — the signature AoS sky: puffy clusters of scaled voxel boxes,
     // one shared geometry, one shared translucent material. They drift slowly
@@ -251,6 +332,46 @@ export class VoxelWorld {
       this.horizon.add(cl);
     }
     scene.add(this.horizon);
+  }
+
+  configureAtmosphere(mapIndex) {
+    const colors = [0xd9ed9b, 0xe8f8f4, 0xd8d59b, 0xf0bf72, 0xd4e0ed, 0xff8a55];
+    const modes = ['motes', 'spray', 'pollen', 'sand', 'dust', 'ash'];
+    const rnd = mulberry32(7000 + mapIndex * 97);
+    const count = this.ambienceMax;
+    this.ambience.count = count;
+    this._ambienceMode = modes[mapIndex] ?? 'motes';
+    this._ambienceData.length = 0;
+    const color = new THREE.Color(colors[mapIndex] ?? colors[0]);
+    for (let i = 0; i < count; i++) {
+      this._ambienceData.push({ x: rnd() * SX, y: SEA + 3 + rnd() * 38,
+        z: rnd() * SZ, speed: 0.35 + rnd() * 1.2, phase: rnd() * Math.PI * 2 });
+      this.ambience.setColorAt(i, color.clone().multiplyScalar(0.82 + rnd() * 0.28));
+    }
+    if (this.ambience.instanceColor) this.ambience.instanceColor.needsUpdate = true;
+    this._buildFoam();
+  }
+
+  _buildFoam() {
+    if (!gfxPreset().foam || this.foam) return;
+    const cells = [];
+    for (let z = 2; z < SZ - 2 && cells.length < 420; z += 3)
+      for (let x = 2; x < SX - 2 && cells.length < 420; x += 3) {
+      const top = this.surface(x, z);
+      if (top < SEA || top > SEA + 1) continue;
+      if (this.surface(x + 2, z) >= SEA && this.surface(x - 2, z) >= SEA
+          && this.surface(x, z + 2) >= SEA && this.surface(x, z - 2) >= SEA) continue;
+      cells.push([x + 0.5, SEA + 0.47, z + 0.5]);
+      }
+    if (!cells.length) return;
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1.45, 0.035, 0.42),
+      new THREE.MeshBasicMaterial({ color: 0xe8f5ee, transparent: true,
+        opacity: 0.68, depthWrite: false }), cells.length);
+    const matrix = new THREE.Matrix4();
+    cells.forEach((p, i) => { matrix.makeTranslation(...p); mesh.setMatrixAt(i, matrix); });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.foam = mesh;
+    this.water.parent.add(mesh);
   }
 
   get(x, y, z) {
@@ -316,7 +437,7 @@ export class VoxelWorld {
     const old = this.chunks.get(key);
     if (old) { this.group.remove(old); old.geometry.dispose(); this.chunks.delete(key); }
 
-    const pos = [], col = [], ind = [];
+    const pos = [], col = [], ind = [], uv = [];
     const c = new THREE.Color();
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
 
@@ -338,14 +459,21 @@ export class VoxelWorld {
             const face = FACES[f], d = face.dir;
             if (this.get(x + d[0], y + d[1], z + d[2])) continue;
             const tint = FACE_TINT[f];
+            const atlasIndex = v - 1, atlasCols = 4, atlasRows = 2;
+            const tileX = atlasIndex % atlasCols, tileY = Math.floor(atlasIndex / atlasCols);
+            const u0 = (tileX + 0.06) / atlasCols, u1 = (tileX + 0.94) / atlasCols;
+            const v0 = 1 - (tileY + 0.94) / atlasRows, v1 = 1 - (tileY + 0.06) / atlasRows;
+            const faceUv = [[u0, v0], [u0, v1], [u1, v0], [u1, v1]];
             // AO probes live in the air cell touching this face, one step to
             // each side of the corner plus the diagonal.
             const n = [x + d[0], y + d[1], z + d[2]];
             const t0 = d[0] === 0 ? 0 : 1, t1 = d[2] === 0 ? 2 : 1; // tangent axes
             const ao = [];
             const base = pos.length / 3;
-            for (const [ox, oy, oz] of face.corners) {
+            for (let corner = 0; corner < face.corners.length; corner++) {
+              const [ox, oy, oz] = face.corners[corner];
               pos.push(x + ox, y + oy, z + oz);
+              if (this.atlas) uv.push(...faceUv[corner]);
               const o = [ox, oy, oz];
               const s0 = o[t0] ? 1 : -1, s1 = o[t1] ? 1 : -1;
               const p = [n[0], n[1], n[2]];
@@ -411,6 +539,7 @@ export class VoxelWorld {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    if (this.atlas) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(ind);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.matrixAutoUpdate = false;
@@ -489,7 +618,14 @@ export class VoxelWorld {
     this.water.removeFromParent();
     this.water.geometry.dispose();
     this.water.material.dispose();
+    this.ambience.removeFromParent();
+    this.ambience.geometry.dispose();
+    this.ambience.material.dispose();
+    if (this.foam) {
+      this.foam.removeFromParent(); this.foam.geometry.dispose(); this.foam.material.dispose();
+    }
     this.material.dispose();
+    this.atlas?.dispose();
     this.clouds.removeFromParent();
     if (this.clouds.children.length) { // shared puff resources, freed once
       this.clouds.children[0].children[0].geometry.dispose();
@@ -505,12 +641,30 @@ export class VoxelWorld {
   // Per-frame sky life: water ripples, clouds drift and wrap past the map.
   animateSky(t) {
     const attr = this.water.geometry.attributes.position;
+    const colors = this.water.geometry.attributes.color;
     const base = this._waterBase;
     for (let i = 0; i < attr.count; i++) {
       const bx = base[i * 3], by = base[i * 3 + 1];
-      attr.array[i * 3 + 2] = Math.sin(t * 1.3 + bx * 0.12 + by * 0.09) * 0.14;
+      const wave = Math.sin(t * 1.3 + bx * 0.12 + by * 0.09) * 0.14;
+      attr.array[i * 3 + 2] = wave;
+      const band = wave > 0.055 ? 1.10 : wave < -0.055 ? 0.78 : 0.94;
+      colors.setXYZ(i, band * 0.92, band, band * 1.06);
     }
     attr.needsUpdate = true;
+    colors.needsUpdate = true;
+    const matrix = this._ambMatrix, quat = this._ambQuat;
+    for (let i = 0; i < this._ambienceData.length; i++) {
+      const p = this._ambienceData[i], mode = this._ambienceMode;
+      let x = p.x, y = p.y, z = p.z;
+      const scale = this._ambScale.set(1, 1, 1);
+      if (mode === 'sand') { x = (x + t * p.speed * 5) % SX; y = SEA + 2 + (p.y % 15); scale.set(2.4, 0.45, 0.45); }
+      else if (mode === 'ash') { y = SEA + ((p.y - SEA + t * p.speed) % 40); x += Math.sin(t + p.phase) * 2; }
+      else if (mode === 'spray') { y = SEA + 0.8 + Math.abs(Math.sin(t * p.speed + p.phase)) * 4; }
+      else { y += Math.sin(t * p.speed + p.phase) * 2; x += Math.sin(t * 0.3 + p.phase) * 2; }
+      matrix.compose(this._ambPos.set(x, y, z), quat, scale);
+      this.ambience.setMatrixAt(i, matrix);
+    }
+    if (this._ambienceData.length) this.ambience.instanceMatrix.needsUpdate = true;
     for (const cl of this.clouds.children)
       cl.position.x = ((cl.userData.x0 + t * cl.userData.speed) % (SX + 520)) - 260;
   }

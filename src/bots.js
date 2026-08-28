@@ -2,9 +2,11 @@
 // when the trail is cold, advance in lanes, group up past midfield, crouch-fire
 // at range, lob frags over cover, undermine towers, and dig through walls.
 import * as THREE from 'three';
-import { Body, makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, setCrouch, placeShadow } from './entities.js';
+import { Body, makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath,
+  setCrouch, setSoldierTool, placeShadow } from './entities.js';
 import { SEA, SX, SZ, BLOCK } from './world.js';
 import { TOOLS, GUN_CLASSES } from './player.js';
+import { teamHex } from './settings.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -69,7 +71,7 @@ export class Bot {
     this.name = name ?? NAMES[team][n++ % NAMES[team].length];
     const p = game.spawnPoint(team);
     this.body = new Body(game.world, p.x, p.y, p.z);
-    this.parts = makeSoldier(team === 'blue' ? 0x4a6cd4 : 0x4a9e4a);
+    this.parts = makeSoldier(teamHex(team));
     // Callsigns for your own side only — an enemy tag rides above the helmet
     // and gives away a man who is otherwise fully behind cover.
     if (team === game.player?.team) this.parts.group.add(makeNametag(this.name, team));
@@ -83,6 +85,7 @@ export class Bot {
     this.aimT = 0;             // reaction timer after acquiring target
     this.cooldown = Math.random();
     this.gunClass = randomClass(); // one of rifle/smg/sniper, rerolled each life
+    setSoldierTool(this.parts, this.gunClass);
     this.ammo = TOOLS[this.gunClass].mag;
     this.reloading = 0;
     this.stuck = 0;            // consecutive motionless samples
@@ -846,7 +849,7 @@ export class Bot {
     this._overchargeT = 0; this._overchargeAtStreak = 0; // ditto — bots never activate this, but stays correct regardless
     this.parts.gun.visible = true; // drop the spade, back to the rifle
     this.parts.spade.visible = false;
-    this.game.effects.burst(this.body.eye(), 26, this.team === 'blue' ? 0x4a6cd4 : 0x4a9e4a, 6);
+    this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);
     this.game.onDeath(this, killer);
   }
 
@@ -858,6 +861,7 @@ export class Bot {
     this.alive = true;
     this.protT = 3; // same spawn protection humans get
     this.gunClass = randomClass(); // rerolled each life, same as a human choosing
+    setSoldierTool(this.parts, this.gunClass);
     this.ammo = TOOLS[this.gunClass].mag;
     this.stuck = 0;
     this.sampleT = 0.4;

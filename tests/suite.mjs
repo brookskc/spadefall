@@ -300,6 +300,26 @@ function bodyTests() {
   for (let i = 0; i < 180; i++) { b4.vel.x = 5; b4.move(1 / 60); }
   ok('a guarded body still takes a one-block step down', b4.pos.x > 50, `x=${b4.pos.x}`);
 
+  const shore = new VoxelWorld(scene());
+  for (let x = 50; x < SX; x++) for (let z = 49; z <= 51; z++)
+    shore.data[((SEA - 1) * SZ + z) * SX + x] = BLOCK.STONE;
+  const swimmer = new Body(shore, 49.5, SEA - 0.35, 50.5);
+  swimmer.move(0); // classify the starting body as swimming before advancing
+  for (let i = 0; i < 30; i++) { swimmer.vel.x = 3.2; swimmer.move(1 / 60); }
+  ok('a swimmer can mantle onto a water-level block',
+    swimmer.pos.x > 50 && swimmer.pos.y >= SEA - 0.01,
+    `x=${swimmer.pos.x.toFixed(2)} y=${swimmer.pos.y.toFixed(2)}`);
+
+  const tallBank = new VoxelWorld(scene());
+  for (let x = 50; x < SX; x++) for (let z = 49; z <= 51; z++)
+    for (let y = SEA - 1; y <= SEA; y++)
+      tallBank.data[(y * SZ + z) * SX + x] = BLOCK.STONE;
+  const blockedSwimmer = new Body(tallBank, 49.5, SEA - 0.35, 50.5);
+  blockedSwimmer.move(0);
+  for (let i = 0; i < 30; i++) { blockedSwimmer.vel.x = 3.2; blockedSwimmer.move(1 / 60); }
+  ok('a swimmer cannot mantle through an occupied body space',
+    blockedSwimmer.pos.x < 50, `x=${blockedSwimmer.pos.x.toFixed(2)}`);
+
   const voidWorld = new VoxelWorld(scene());
   const b5 = new Body(voidWorld, 50.5, 5, 50.5);
   for (let i = 0; i < 300; i++) b5.move(1 / 60);

@@ -110,6 +110,16 @@ const FLAG_CODE = { home: 0, carried: 1, dropped: 2 };
 export const qx = v => Math.round(v * 256);
 export const qy = v => Math.round(v * 512);
 export const qa = a => Math.round(a / (2 * Math.PI) * 65536) & 0xFFFF;
+// Horizontal bearing from a viewer to a world-space source, expressed in
+// screen convention: 0 ahead, +PI/2 right, -PI/2 left, and PI behind.
+// CSS positive rotation is clockwise, so this value drives the damage
+// chevron directly without a sign flip.
+export function relativeBearing(yaw, fromX, fromZ, toX, toZ) {
+  const fx = Math.cos(yaw), fz = -Math.sin(yaw);
+  const rx = -fz, rz = fx;
+  const dx = toX - fromX, dz = toZ - fromZ;
+  return Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+}
 const dx = v => v / 256, dy = v => v / 512;
 const da = v => { const a = v / 65536 * 2 * Math.PI; return a > Math.PI ? a - 2 * Math.PI : a; };
 const rowsEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
@@ -1349,11 +1359,8 @@ export class Game {
   // a hit from directly behind has to read differently from a hit from
   // the side, not just collapse to the same "no left/right bias" value.
   _bearingTo(pos) {
-    const yaw = this.player.yaw, p = this.player.body.pos;
-    const fx = Math.cos(yaw), fz = -Math.sin(yaw);
-    const rx = -fz, rz = fx;
-    const dx = pos.x - p.x, dz = pos.z - p.z;
-    return Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+    const p = this.player.body.pos;
+    return relativeBearing(this.player.yaw, p.x, p.z, pos.x, pos.z);
   }
 
   // Shared by every attack that can attribute a single attacker (gunfire,
@@ -1545,15 +1552,21 @@ export class Game {
       const x0 = Math.floor(b.pos.x - b.half.x), x1 = Math.floor(b.pos.x + b.half.x);
       const y0 = Math.floor(b.pos.y),        y1 = Math.floor(b.pos.y + b.half.h);
       const z0 = Math.floor(b.pos.z - b.half.x), z1 = Math.floor(b.pos.z + b.half.x);
-      let hit = 0;
+      let hit = 0, source = null;
       for (let x = x0; x <= x1 && hit < 55; x++)
         for (let z = z0; z <= z1 && hit < 55; z++) {
           for (let y = y0; y <= y1; y++)
-            if (doomed.has(key(x, y, z))) { hit = 55; break; }
+            if (doomed.has(key(x, y, z))) {
+              hit = 55; source = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5); break;
+            }
           for (let y = y1 + 1; !hit && y <= y1 + 3; y++)
-            if (doomed.has(key(x, y, z))) hit = 30;
+            if (doomed.has(key(x, y, z))) {
+              hit = 30; source = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+            }
         }
-      if (hit) this.damage(e, hit, who);
+      // Falling masonry is the damage source, not whoever happened to
+      // remove its support. Point the victim toward the collapsing cell.
+      if (hit) this.damage(e, hit, who, source);
     }
     if (this.mode === 'host') {
       for (const c of cells) this.editLog.push([c.x, c.y, c.z, 0]); // late joiners

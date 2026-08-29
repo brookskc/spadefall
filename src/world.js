@@ -193,6 +193,10 @@ const FACES = [
 const idx = (x, y, z) => (y * SZ + z) * SX + x;
 
 // Small seeded PRNG so the cloud layout is identical on every load.
+// Clouds may travel beyond the playable square so the horizon still feels
+// populated, but keeping this margin well below the map width ensures most
+// clusters spend most of their cycle above or near the battlefield.
+const CLOUD_MARGIN = 96;
 function mulberry32(a) {
   return () => {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -294,7 +298,7 @@ export class VoxelWorld {
         cl.add(m);
       }
       cl.position.set(rnd() * SX, 66 + rnd() * 8, rnd() * SZ); // above the menu orbit (y=58)
-      cl.userData.x0 = cl.position.x + 260;      // offset so the wrap window is wide
+      cl.userData.x0 = cl.position.x + CLOUD_MARGIN;
       cl.userData.speed = 1.1 + rnd() * 1.3;     // voxels per second, leisurely
       this.clouds.add(cl);
     }
@@ -666,6 +670,7 @@ export class VoxelWorld {
     }
     if (this._ambienceData.length) this.ambience.instanceMatrix.needsUpdate = true;
     for (const cl of this.clouds.children)
-      cl.position.x = ((cl.userData.x0 + t * cl.userData.speed) % (SX + 520)) - 260;
+      cl.position.x = ((cl.userData.x0 + t * cl.userData.speed)
+        % (SX + CLOUD_MARGIN * 2)) - CLOUD_MARGIN;
   }
 }

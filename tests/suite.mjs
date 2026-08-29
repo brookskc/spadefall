@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapsForMode } from '../src/mapgen.js';
 import { Body } from '../src/entities.js';
-import { mergeSnapshot, qx, qy, qa } from '../src/game.js';
+import { mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
 import { chooseTeam, normalizeDirection, parseSpawnRow, spawnRow,
   validateMovementReport } from '../src/multiplayer.js';
 import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
@@ -244,6 +244,21 @@ function multiplayerRuleTests() {
   ok('room browser rejects malformed names payloads', !validPong({
     t: 'pong', humans: 1, max: 10, map: 0, mode: 'ctf', g: 0, b: 0, names: 'oops',
   }));
+}
+
+// ---------------------------------------------------------------------------
+function damageDirectionTests() {
+  group('damage direction: source bearing to screen edge');
+  const close = (a, b) => Math.abs(a - b) < 1e-9;
+  ok('source ahead maps to the top edge', close(relativeBearing(0, 10, 10, 20, 10), 0));
+  ok('source on the right maps clockwise to the right edge',
+    close(relativeBearing(0, 10, 10, 10, 20), Math.PI / 2));
+  ok('source on the left maps counter-clockwise to the left edge',
+    close(relativeBearing(0, 10, 10, 10, 0), -Math.PI / 2));
+  ok('source behind maps to the bottom edge',
+    close(Math.abs(relativeBearing(0, 10, 10, 0, 10)), Math.PI));
+  ok('bearing follows a rotated player view',
+    close(relativeBearing(Math.PI / 2, 10, 10, 10, 0), 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +533,7 @@ export async function run() {
   meshingTests();
   hostileInputTests();
   multiplayerRuleTests();
+  damageDirectionTests();
   bodyTests();
   timings();
   console.log(`\n${pass} passed, ${fail} failed`);

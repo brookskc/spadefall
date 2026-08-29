@@ -311,7 +311,7 @@ export class Player {
     // exactly what YOU see when you look at your own gun, not something
     // shown off to anyone else.
     //
-    // dark is deliberately gun-only (rifle/smg/sniper barrels + sights) —
+    // dark is deliberately gun-only (rifle/smg/sniper colorable bodies) —
     // toolDark is a SEPARATE, fixed material for the spade and grenade at
     // the same default color. Both used to be the same shared material,
     // which meant unlocking "gold" or "crimson" silently recolored the
@@ -319,6 +319,11 @@ export class Player {
     // was ever pitched as.
     const dark = new THREE.MeshBasicMaterial({ color: stats.gunColor(), vertexColors: true });
     this._gunMat = dark; // kept for live recoloring when the menu changes it mid-session
+    // Fixed neutral hardware keeps the weapon's construction readable when
+    // the unlockable gun material is changed to a bright or unusual color.
+    // Sights, muzzle hardware, rails, and action pieces should look like
+    // functional parts, not like one uninterrupted recolored cuboid.
+    const metal = new THREE.MeshBasicMaterial({ color: 0x424952, vertexColors: true });
     const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
     const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
@@ -357,12 +362,21 @@ export class Player {
       // rifle and smg) up to the aim line (0.09) — thinning it down last
       // time left its bottom floating 0.015 above the barrel with nothing
       // connecting them. Width stays thin; only height needed the fix.
-      mk(0.006, 0.055, 0.012, dark, 0, 0.0625, frontZ, g);   // front post
-      mk(0.008, 0.04, 0.03, dark, -0.0085, 0.07, rearZ, g);  // rear wing L
-      mk(0.008, 0.04, 0.03, dark,  0.0085, 0.07, rearZ, g);  // rear wing R
+      mk(0.006, 0.055, 0.012, metal, 0, 0.0625, frontZ, g); // front post
+      // Build the rear sight around one centered parent. Besides making the
+      // invariant explicit, the centered bridge gives both tiny wings the
+      // same visual anchor; without it, face shading made the isolated SMG
+      // wings read as a single sight shifted to the right.
+      const rear = new THREE.Group();
+      rear.position.set(0, 0, rearZ); g.add(rear);
+      mk(0.034, 0.012, 0.032, metal, 0, 0.044, 0, rear);       // bridge
+      mk(0.008, 0.04, 0.03, metal, -0.0085, 0.07, 0, rear);   // wing L
+      mk(0.008, 0.04, 0.03, metal,  0.0085, 0.07, 0, rear);   // wing R
     };
     const rifle = new THREE.Group();
     mk(0.05, 0.07, 0.85, dark, 0, 0, -0.5, rifle);       // barrel
+    mk(0.06, 0.08, 0.07, metal, 0, 0, -0.955, rifle);    // muzzle cap
+    mk(0.062, 0.082, 0.1, metal, 0, 0, -0.32, rifle);    // receiver band
     mk(0.07, 0.12, 0.35, wood, 0, -0.05, -0.05, rifle);  // stock
     const rifleMag = mk(0.045, 0.12, 0.08, dark, 0, -0.095, -0.2, rifle);
     this._magParts.rifle = { mesh: rifleMag, y: rifleMag.position.y };
@@ -372,6 +386,10 @@ export class Player {
 
     const smg = new THREE.Group();
     mk(0.06, 0.08, 0.5, dark, 0, 0, -0.32, smg);
+    mk(0.07, 0.09, 0.06, metal, 0, 0, -0.6, smg);        // muzzle cap
+    mk(0.072, 0.09, 0.08, metal, 0, 0, -0.25, smg);      // receiver band
+    mk(0.035, 0.13, 0.05, metal, 0, -0.08, -0.43, smg);  // foregrip
+    mk(0.04, 0.04, 0.2, metal, 0, -0.015, 0.02, smg);    // compact stock bar
     const smgMag = mk(0.05, 0.16, 0.07, dark, 0, -0.11, -0.12, smg);
     this._magParts.smg = { mesh: smgMag, y: smgMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.1, 0.05, smg);
@@ -386,12 +404,17 @@ export class Player {
     // everything else.
     const sniper = new THREE.Group();
     mk(0.045, 0.06, 1.05, dark, 0, 0, -0.55, sniper);       // long barrel
+    mk(0.065, 0.08, 0.1, metal, 0, 0, -1.125, sniper);      // muzzle brake
+    mk(0.072, 0.075, 0.12, metal, 0, 0, -0.27, sniper);     // action
+    mk(0.13, 0.025, 0.035, metal, 0.055, 0.018, -0.18, sniper); // bolt handle
     mk(0.08, 0.13, 0.4, wood, 0, -0.055, -0.02, sniper);    // stock
     const sniperMag = mk(0.05, 0.1, 0.08, dark, 0, -0.105, -0.2, sniper);
     this._magParts.sniper = { mesh: sniperMag, y: sniperMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.06, sniper);      // hand
     const scopeBody = mk(0.06, 0.06, 0.28, dark, 0, 0.09, -0.35, sniper);
     const scopeLens = mk(0.07, 0.07, 0.03, dark, 0, 0.09, -0.5, sniper);
+    const scopeRingA = mk(0.075, 0.07, 0.025, metal, 0, 0.09, -0.27, sniper);
+    const scopeRingB = mk(0.075, 0.07, 0.025, metal, 0, 0.09, -0.43, sniper);
     // Both sit right on the aim line (y=0.09 lands on-axis with the camera
     // when fully aimed, same as the iron sights) — fine off-axis at hip
     // fire, but dead center it's a solid opaque box parked directly in
@@ -402,7 +425,7 @@ export class Player {
     // frame and already knows when that is) — a real scope's own housing
     // isn't in your view when you're looking through it either.
     this.vm.sniper = sniper;
-    this._scopeParts = [scopeBody, scopeLens];
+    this._scopeParts = [scopeBody, scopeLens, scopeRingA, scopeRingB];
 
     const spade = new THREE.Group();
     mk(0.035, 0.035, 0.5, wood, 0, 0, -0.25, spade);     // handle

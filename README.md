@@ -4,7 +4,7 @@ A browser shooter where every wall can become a doorway.
 
 [Play Spadefall](https://spadefall.io/)
 
-![A rifle fight on one of Spadefall's destructible voxel maps](docs/gameplay.png)
+![A sniper ranging a target across Spadefall's destructible voxel terrain](docs/gameplay.png)
 
 Spadefall is a first-person arena shooter built around terrain that can be destroyed and rebuilt during a match. Dig through cover with a spade, blast open a route with grenades, or place blocks to close a lane behind you. The current build runs in the browser and supports solo play with bots, private rooms, and public quick match.
 

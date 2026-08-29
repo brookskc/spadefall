@@ -17,6 +17,7 @@ const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const airstrikeQa = params.has('airstrikeqa');
 const soldierQa = params.has('soldierqa');
+const mapQa = params.has('mapqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -54,7 +55,7 @@ if (params.has('scopeqa')) {
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
-if (airstrikeQa || soldierQa) $('menu').style.display = 'none';
+if (airstrikeQa || soldierQa || mapQa) $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
 // camera, excluded from fog so it keeps its glow at any distance.
@@ -899,7 +900,7 @@ addEventListener('resize', () => {
 // Headless/test hooks: ?mp=host&code=TEST&auto=1 · ?mp=join&code=TEST&auto=1
 // ?mp=quick&auto=1&ns=<namespace> · ?mp=browse&auto=1 · host cap: &cap=2
 // Pref hooks: &map=0..5&mode=ctf|tdm|koth · visual QA:
-// &scopeqa=1 / &airstrikeqa=1 / &soldierqa=1
+// &scopeqa=1 / &airstrikeqa=1 / &soldierqa=1 / &mapqa=1
 // TDM kill limit: &killcap=2
 // Auto runs can't type, so they get a callsign to satisfy the lobby gate.
 if (params.get('auto') && !rawName())

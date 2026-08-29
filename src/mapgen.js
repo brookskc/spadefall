@@ -1,4 +1,4 @@
-// mapgen.js — procedural terrain with two team bases, in four themed maps.
+// mapgen.js — procedural terrain with two team bases, in six themed maps.
 // MAPS order is the rotation order; generateMap(world, seed, mapIndex) fills
 // world.data, re-anchors BASE, and meshes everything via world.buildAll().
 import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS, setVoxelLight } from './world.js';
@@ -73,6 +73,12 @@ export const BASE = {
 const BASE_H = SEA + 7; // plateau height above the sea
 
 const at = (x, z) => (z * SX + x);
+const put = (world, x, y, z, block) => {
+  x = Math.round(x); y = Math.round(y); z = Math.round(z);
+  if (x < 0 || x >= SX || y < 0 || y >= SY || z < 0 || z >= SZ) return;
+  world.data[(y * SZ + z) * SX + x] = block;
+};
+const terrainY = (height, x, z) => Math.floor(height[at(Math.round(x), Math.round(z))]);
 
 // Deterministic, unseeded 3D noise for moss placement within the deep
 // stone layer below — same summed-low-frequency-sines style as
@@ -195,6 +201,37 @@ function genIsland(world, seed) {
   }
 
   fillColumns(world, height, (x, z, h) => h <= SEA + 1 ? BLOCK.SAND : BLOCK.GRASS);
+
+  // GREENBELT needs authored landmarks as well as good noise. Broken field
+  // walls provide a readable middle distance without becoming continuous
+  // cover, while paired stone shelves make each flank recognizable from its
+  // silhouette alone. Everything is ordinary destructible terrain geometry.
+  const wallRuns = [
+    [74, 108, SZ / 2 - 27], [SX - 109, SX - 75, SZ / 2 + 27],
+  ];
+  for (const [x0, x1, z] of wallRuns)
+    for (let x = x0; x <= x1; x++) {
+      if ((x - x0) % 13 < 3) continue; // collapsed gates and shell gaps
+      const y = terrainY(height, x, z);
+      put(world, x, y + 1, z, BLOCK.STONE);
+      if ((x + z) % 5) put(world, x, y + 2, z, BLOCK.STONE);
+    }
+
+  const outcrop = (cx, cz, flip = 1) => {
+    for (let dx = -5; dx <= 5; dx++)
+      for (let dz = -3; dz <= 3; dz++) {
+        const edge = Math.abs(dx) / 5 + Math.abs(dz) / 3;
+        if (edge > 1.25 || (dx * flip + dz) % 7 === 0) continue;
+        const x = cx + dx, z = cz + dz, y = terrainY(height, x, z);
+        put(world, x, y + 1, z, BLOCK.STONE);
+        if (edge < 0.7 && dx * flip < 3) put(world, x, y + 2, z, BLOCK.STONE);
+        if (edge < 0.35 && dx * flip < 0) put(world, x, y + 3, z, BLOCK.STONE);
+      }
+  };
+  outcrop(92, 73, 1);
+  outcrop(SX - 1 - 92, SZ - 1 - 73, -1);
+  outcrop(112, 188, -1);
+  outcrop(SX - 1 - 112, SZ - 1 - 188, 1);
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
 }
@@ -250,19 +287,32 @@ function genBeach(world, seed) {
         if (wall) for (let y = SEA + 1; y <= SEA + 2; y++)
           world.data[(y * SZ + z) * SX + x] = BLOCK.STONE;
       }
+    // Lowered three-step bow ramp: the open end now reads as landing craft,
+    // not just a roofless stone rectangle viewed from shore.
+    for (let dx = 8; dx <= 10; dx++)
+      for (let dz = -1; dz <= 1; dz++)
+        put(world, bx + dx, SEA - Math.floor((dx - 8) / 2), bz + dz, BLOCK.STONE);
+    put(world, bx + 1, SEA + 3, bz - 2, BLOCK.STONE);
+    put(world, bx + 1, SEA + 3, bz + 2, BLOCK.STONE);
   }
-  // Czech hedgehogs scattered thick across the sand — little triangles of
-  // cover. The landing team needs a lot of them: the kill zone is long.
+  // Czech hedgehogs scattered across the sand. A six-axis jack silhouette is
+  // recognizable from any approach, unlike the former three-block L that
+  // mostly read as random gray debris.
   const rnd = mulberry32(seed ^ 0xBEAC);
   for (let i = 0; i < 55; i++) {
     const x = 60 + Math.floor(rnd() * 40), z = 24 + Math.floor(rnd() * (SZ - 48));
     const y = Math.floor(height[at(x, z)]);
-    world.data[((y + 1) * SZ + z) * SX + x] = BLOCK.STONE;
-    world.data[((y + 2) * SZ + z) * SX + x] = BLOCK.STONE;
-    world.data[((y + 1) * SZ + z) * SX + x + 1] = BLOCK.STONE;
+    put(world, x, y + 1, z, BLOCK.STONE);
+    put(world, x, y + 2, z, BLOCK.STONE);
+    put(world, x, y + 3, z, BLOCK.STONE);
+    put(world, x - 1, y + 2, z, BLOCK.STONE);
+    put(world, x + 1, y + 2, z, BLOCK.STONE);
+    put(world, x, y + 2, z - 1, BLOCK.STONE);
+    put(world, x, y + 2, z + 1, BLOCK.STONE);
   }
-  // MG pillbox: 5×5 stone shell, firing slit on the `face` side (±2 in x),
-  // rear door on the opposite side.
+  // MG pillbox: recessed slit, wide rear door, corner buttresses, and a
+  // one-block roof overhang. The stronger silhouette remains a small,
+  // destructible structure rather than a detailed prop mesh.
   const pillbox = (px, pz, face) => {
     const py = Math.floor(height[at(px, pz)]);
     for (let dx = -2; dx <= 2; dx++)
@@ -270,15 +320,26 @@ function genBeach(world, seed) {
         const x = px + dx, z = pz + dz;
         const edge = Math.abs(dx) === 2 || Math.abs(dz) === 2;
         if (!edge) continue;
-        if (dx === -face && Math.abs(dz) <= 0) continue;                    // rear door
+        if (dx === -face && Math.abs(dz) <= 1) continue;                    // rear door
         for (let y = py + 1; y <= py + 3; y++) {
           if (dx === face && Math.abs(dz) <= 1 && y === py + 2) continue;   // firing slit
           world.data[(y * SZ + z) * SX + x] = BLOCK.STONE;
         }
       }
-    for (let dx = -2; dx <= 2; dx++)                                        // roof
-      for (let dz = -2; dz <= 2; dz++)
-        world.data[((py + 4) * SZ + pz + dz) * SX + px + dx] = BLOCK.STONE;
+    for (let dx = -3; dx <= 3; dx++)                                        // overhanging slab roof
+      for (let dz = -3; dz <= 3; dz++)
+        put(world, px + dx, py + 4, pz + dz, BLOCK.STONE);
+    for (const [dx, dz] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) {          // stepped buttresses
+      put(world, px + dx, py + 1, pz + dz, BLOCK.STONE);
+      put(world, px + dx, py + 2, pz + dz, BLOCK.STONE);
+    }
+    // Broken low apron on the firing side gives the bunker a front/back read
+    // even when the slit itself is too small to resolve.
+    for (let dz = -4; dz <= 4; dz++) {
+      if (Math.abs(dz) === 1 || Math.abs(dz) === 4) continue;
+      const x = px + face * 4, z = pz + dz, y = terrainY(height, x, z);
+      put(world, x, y + 1, z, BLOCK.STONE);
+    }
   };
   // Three pillboxes dug into the bluff top, guns slitted toward the beach —
   // and one green bunker at the beach head answering back, so the landing
@@ -320,8 +381,11 @@ function genForest(world, seed) {
   flattenBases(height);
   fillColumns(world, height, (x, z, h) => h < SEA ? BLOCK.DIRT : BLOCK.GRASS);
 
-  // Trees: dirt trunk, two-layer grass canopy. Pure blocks — fully
-  // destructible, and felling one drops instant cover.
+  // Four tree silhouettes instead of one cloned trunk-plus-cube. Foliage is
+  // the existing moss block (still flat-color and textureless), which keeps
+  // crowns distinct from the grass floor. Every archetype remains ordinary
+  // destructible voxels, and the total block budget stays close to the old
+  // two-layer 3x3 canopy.
   const rnd = mulberry32(seed ^ 0xf0e57);
   for (let i = 0; i < 260; i++) {
     const x = 6 + Math.floor(rnd() * (SX - 12)), z = 6 + Math.floor(rnd() * (SZ - 12));
@@ -329,13 +393,33 @@ function genForest(world, seed) {
     if (Math.hypot(x - BASE.blue.x, z - BASE.blue.z) < 26) continue;
     const y = Math.floor(height[at(x, z)]);
     if (y < SEA + 1) continue; // no trees in the creek or the sea
-    const trunk = 3 + Math.floor(rnd() * 3);
-    for (let t = 1; t <= trunk; t++) world.data[((y + t) * SZ + z) * SX + x] = BLOCK.DIRT;
-    for (let dy = 0; dy < 2; dy++)
-      for (let ox = -1; ox <= 1; ox++)
-        for (let oz = -1; oz <= 1; oz++)
-          world.data[((y + trunk + dy) * SZ + z + oz) * SX + x + ox] = BLOCK.GRASS;
-    world.data[((y + trunk + 2) * SZ + z) * SX + x] = BLOCK.GRASS;
+    const kind = Math.floor(rnd() * 4);
+    const trunk = kind === 0 ? 5 + Math.floor(rnd() * 2)
+      : kind === 1 ? 3 + Math.floor(rnd() * 2) : 4 + Math.floor(rnd() * 2);
+    for (let t = 1; t <= trunk; t++) put(world, x, y + t, z, BLOCK.DIRT);
+    const crown = (cy, radius, ox = 0, oz = 0, corners = true) => {
+      for (let dx = -radius; dx <= radius; dx++)
+        for (let dz = -radius; dz <= radius; dz++) {
+          if (!corners && Math.abs(dx) === radius && Math.abs(dz) === radius) continue;
+          put(world, x + ox + dx, y + cy, z + oz + dz, BLOCK.MOSS);
+        }
+    };
+    if (kind === 0) { // tall stepped pine
+      crown(trunk - 1, 1); crown(trunk, 2, 0, 0, false);
+      crown(trunk + 1, 1); put(world, x, y + trunk + 2, z, BLOCK.MOSS);
+    } else if (kind === 1) { // short, dense field pine
+      crown(trunk, 2, 0, 0, false); crown(trunk + 1, 1);
+      put(world, x, y + trunk + 2, z, BLOCK.MOSS);
+    } else if (kind === 2) { // wind-shaped offset crown
+      const ox = rnd() < 0.5 ? -1 : 1, oz = rnd() < 0.5 ? -1 : 1;
+      crown(trunk, 2, ox, 0, false); crown(trunk + 1, 1, ox, oz);
+      put(world, x + ox, y + trunk + 2, z + oz, BLOCK.MOSS);
+    } else { // damaged pine: exposed trunk and a deliberately broken crown
+      const side = rnd() < 0.5 ? -1 : 1;
+      crown(trunk, 1, side, 0, false);
+      put(world, x + side * 2, y + trunk, z, BLOCK.MOSS);
+      put(world, x, y + trunk + 1, z, BLOCK.MOSS);
+    }
   }
 
   buildBase(world, height, 'green');
@@ -367,6 +451,12 @@ function genDesert(world, seed) {
       // Ridged dune field marching diagonally across the map.
       const dune = Math.abs(Math.sin((fx + z) * 0.045 + noise(fx * 0.01, z * 0.01) * 3));
       let h = SEA + 6 + dune * 7 + noise(fx * 0.03, z * 0.03) * 2.5;
+      // Mirrored dry washes interrupt the otherwise continuous contour
+      // stripes. They are broad, shallow navigation landmarks—not noisy
+      // per-block scars—and preserve both teams' matching approaches.
+      const washZ = 45 + noise(fx * 0.026 + 17, 8) * 29;
+      const washD = Math.min(Math.abs(z - washZ), Math.abs(z - (SZ - 1 - washZ)));
+      if (washD < 5) h -= (1 - washD / 5) * 3.2;
       for (const [mx, mz] of mesas) {
         const d = Math.hypot(x - mx, z - mz);
         if (d < 12) { // flat top, sheer sides
@@ -426,6 +516,24 @@ function genDesert(world, seed) {
       }
     }
   }
+  // A paired broken gate gives the village a vertical read from across the
+  // dunes. The opening is real (and destructible), so it doubles as useful
+  // movement geometry rather than decorative clutter.
+  const ruinGate = (px, pz) => {
+    const y = terrainY(height, px, pz);
+    for (let wy = 1; wy <= 5; wy++) {
+      put(world, px - 2, y + wy, pz, BLOCK.STONE);
+      put(world, px + 2, y + wy, pz, BLOCK.STONE);
+    }
+    for (let dx = -2; dx <= 2; dx++) put(world, px + dx, y + 5, pz, BLOCK.STONE);
+    for (let dz = 1; dz <= 4; dz++) {
+      if (dz === 3) continue;
+      put(world, px - 2, y + 1, pz + dz, BLOCK.STONE);
+      if (dz < 3) put(world, px - 2, y + 2, pz + dz, BLOCK.STONE);
+    }
+  };
+  ruinGate(SX / 2 - 12, SZ / 2 - 14);
+  ruinGate(SX / 2 + 11, SZ / 2 - 14);
   // Cacti, mirrored like everything else.
   for (let i = 0; i < 21; i++) {
     const x = 6 + Math.floor(rnd() * (CX - 12)), z = 6 + Math.floor(rnd() * (SZ - 12));
@@ -504,6 +612,29 @@ function genCrown(world, seed) {
           if (rnd() > 0.15) world.data[(y * SZ + pz + oz) * SX + px + ox] = BLOCK.STONE;
   }
 
+  // Four matching gate-outworks punctuate the otherwise empty approaches.
+  // The three-block center opening preserves the direct route to each
+  // causeway; low broken wings provide landmark-scale cover without turning
+  // the field into another fort.
+  const outwork = (dx, dz) => {
+    const cx = Math.round(CX + dx * 46), cz = Math.round(CZ + dz * 46);
+    const tx = -dz, tz = dx, ix = -dx, iz = -dz;
+    for (let u = -5; u <= 5; u++) {
+      if (Math.abs(u) <= 1) continue;
+      const x = cx + tx * u, z = cz + tz * u, y = terrainY(height, x, z);
+      put(world, x, y + 1, z, BLOCK.STONE);
+      if (Math.abs(u) !== 3) put(world, x, y + 2, z, BLOCK.STONE);
+    }
+    for (const u of [-5, 5])
+      for (let v = 1; v <= 3; v++) {
+        const x = cx + tx * u + ix * v, z = cz + tz * u + iz * v;
+        const y = terrainY(height, x, z);
+        put(world, x, y + 1, z, BLOCK.STONE);
+        if (v < 3) put(world, x, y + 2, z, BLOCK.STONE);
+      }
+  };
+  outwork(1, 0); outwork(-1, 0); outwork(0, 1); outwork(0, -1);
+
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
 }
@@ -522,7 +653,13 @@ function genCaldera(world, seed) {
     for (let x = 0; x < SX; x++) {
       const plain = SEA + 6 + 6 * noise(x * 0.02, z * 0.02) + 3 * noise(x * 0.07, z * 0.07);
       const bowl = SEA + 3 + 1.5 * noise(x * 0.09 + 9, z * 0.09 + 9);
-      const rimH = SEA + 22 + 4 * noise(x * 0.05 + 4, z * 0.05 + 4);
+      // Angular height bands fracture the rim's formerly near-perfect ring.
+      // Folding x keeps the two base-facing halves equivalent while letting
+      // north and south develop memorable, irregular skylines.
+      const angle = Math.atan2(z - CZ, Math.abs(x - CX) + 0.001);
+      const rimBreak = 2.2 * Math.sin(angle * 7 + seed * 0.0007)
+        + 1.1 * Math.sin(angle * 13 - seed * 0.0003);
+      const rimH = SEA + 22 + 4 * noise(x * 0.05 + 4, z * 0.05 + 4) + rimBreak;
       const d = Math.hypot(x - CX, z - CZ);
       let h;
       if (d < 38) h = bowl;
@@ -547,18 +684,32 @@ function genCaldera(world, seed) {
   fillColumns(world, height,
     (x, z) => noise(x * 0.11 + 3, z * 0.11 + 3) > 0.62 ? BLOCK.STONE : BLOCK.DIRT);
 
-  // Basalt pillars scattered across the bowl — cover, and chewable.
+  // Basalt formations scattered across the bowl—single columns, paired
+  // fins, and broken clusters rather than fourteen copies of one pillar.
+  // They remain chewable cover and stay outside the central objective.
   const rnd = mulberry32(seed ^ 0xca1de);
   for (let i = 0; i < 14; i++) {
     const a = rnd() * Math.PI * 2, d = 15 + rnd() * 20;
     const px = Math.round(CX + Math.cos(a) * d), pz = Math.round(CZ + Math.sin(a) * d);
     const py = Math.floor(height[at(px, pz)]);
     const ph = 3 + Math.floor(rnd() * 4);
-    for (let y = py + 1; y <= py + ph; y++)
-      world.data[(y * SZ + pz) * SX + px] = BLOCK.STONE;
-    if (rnd() < 0.5) // some stand in pairs
-      for (let y = py + 1; y <= py + ph - 1; y++)
-        world.data[(y * SZ + pz + 1) * SX + px + 1] = BLOCK.STONE;
+    for (let y = py + 1; y <= py + ph; y++) put(world, px, y, pz, BLOCK.STONE);
+    const kind = i % 3;
+    if (kind === 0) {
+      for (let y = py + 1; y <= py + ph - 1; y++) put(world, px + 1, y, pz + 1, BLOCK.STONE);
+    } else if (kind === 1) {
+      for (let y = py + 1; y <= py + Math.max(2, ph - 2); y++) {
+        put(world, px - 1, y, pz, BLOCK.STONE);
+        put(world, px + 1, y, pz + 1, BLOCK.STONE);
+      }
+      put(world, px + 2, py + 1, pz + 1, BLOCK.STONE);
+    } else {
+      for (let s = 1; s <= 3; s++) {
+        put(world, px + s, py + 1, pz, BLOCK.STONE);
+        if (s < 3) put(world, px + s, py + 2, pz, BLOCK.STONE);
+      }
+      put(world, px, py + ph, pz + 1, BLOCK.STONE);
+    }
   }
 
   buildBase(world, height, 'green');

@@ -68,7 +68,6 @@ function saveChoice(key, value, allowed) {
 
 export const HUD_SCALES = ['80', '100', '120'];
 export const HUD_OPACITIES = ['75', '100'];
-export const FOV_LEVELS = ['75', '85', '95'];
 export const MOTION_LEVELS = ['full', 'reduced'];
 export const COLOR_MODES = ['standard', 'accessible'];
 const TEAM_PALETTES = {
@@ -82,8 +81,6 @@ export const getHudScale = () => Number(choice('hudScale', HUD_SCALES, '100')) /
 export const setHudScale = value => saveChoice('hudScale', value, HUD_SCALES);
 export const getHudOpacity = () => Number(choice('hudOpacity', HUD_OPACITIES, '100')) / 100;
 export const setHudOpacity = value => saveChoice('hudOpacity', value, HUD_OPACITIES);
-export const getBaseFov = () => Number(choice('fov', FOV_LEVELS, '75'));
-export const setBaseFov = value => saveChoice('fov', value, FOV_LEVELS);
 export const getMotionScale = () => choice('motion', MOTION_LEVELS, 'full') === 'reduced' ? 0.25 : 1;
 export const getMotionLevel = () => choice('motion', MOTION_LEVELS, 'full');
 export const setMotionLevel = value => saveChoice('motion', value, MOTION_LEVELS);

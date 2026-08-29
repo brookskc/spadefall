@@ -7,7 +7,8 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { disposeObject, footDust, makeMq9Drone, retintVoxelBoxes } from './entities.js';
+import { CROUCH_HEIGHT, STAND_HEIGHT, disposeObject, footDust,
+  makeMq9Drone, retintVoxelBoxes } from './entities.js';
 import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
@@ -15,6 +16,8 @@ import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
   teamCounts, validateMovementReport, normalizeDirection } from './multiplayer.js';
 import { validClientMessage, validServerMessage } from './protocol.js';
 import { teamHex } from './settings.js';
+import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
+  resetEnvironmentalState, stepBreath } from './environment.js';
 
 const WIN_SCORE = 3;
 // Team deathmatch: no flags, kills are points. ?killcap= lowers the bar for tests.
@@ -279,6 +282,15 @@ const hud = {
       + (p.protT > 0 ? ' · SAFE' : '');
     $('healthfill').style.background = p.health > 40
       ? 'linear-gradient(90deg,#5db85d,#8fd98f)' : 'linear-gradient(90deg,#c0392b,#e74c3c)';
+  },
+  air(breath, visible) {
+    const el = $('air');
+    if (!el) return;
+    const seconds = Math.max(0, Math.min(BREATH_MAX, breath));
+    el.classList.toggle('on', !!visible);
+    el.classList.toggle('low', seconds <= 4);
+    $('airfill').style.width = (seconds / BREATH_MAX * 100) + '%';
+    $('airnum').textContent = seconds > 0 ? `${Math.ceil(seconds)}s` : 'EMPTY';
   },
   // Round trip to the host, piggybacked on traffic that already exists (see
   // the 'ts' field on the client uplink and its echo in _broadcastSnapshot)
@@ -909,6 +921,9 @@ export class Game {
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
+    // Map generation owns the placed-block palette. Refresh the persistent
+    // first-person model from that exact source before it is shown again.
+    this.player?.syncBlockColor();
     retintVoxelBoxes(this.player?.vmRoot);
     for (const p of this.remote.values()) retintVoxelBoxes(p.avatar?.group);
     this._applyMapAtmosphere(map);
@@ -1458,22 +1473,26 @@ export class Game {
   // somewhere completely different by the time their nade goes off, so
   // "which way did this come from" has to mean the explosion, not
   // wherever they've since moved to.
-  damage(victim, amount, attacker, sourcePos) {
-    if (victim.protT > 0) return; // spawn protection: brief, breaks on fire
+  damage(victim, amount, attacker, sourcePos, options = {}) {
+    if (victim.protT > 0 && !options.ignoreProtection) return; // environmental harm is never spawn-shielded
     if (!victim.alive || this.over) return;
     // Overcharge: 1.5x damage dealt AND taken — a genuine risk/reward
     // toggle, not a pure buff. Both checks apply independently and stack
     // naturally if attacker and victim are BOTH overcharged at once
     // (2.25x total) — a real, if rare, emergent case worth letting
     // happen rather than specifically guarding against.
-    if (attacker?._overchargeT > 0) amount *= 1.5;
-    if (victim._overchargeT > 0) amount *= 1.5;
+    if (!options.environmental && attacker?._overchargeT > 0) amount *= 1.5;
+    if (!options.environmental && victim._overchargeT > 0) amount *= 1.5;
     victim.health -= amount;
     victim.alert?.(attacker); // bots whirl toward whoever shot them
     const src = sourcePos ?? attacker?.body?.pos;
     if (victim === this.player) {
       hud.damage(); sfx.hurt(); hud.health(this.player);
       if (src) hud.damageDir(this._bearingTo(src));
+    } else if (victim.isRemote && options.environmental && victim.health > 0) {
+      // Environmental harm has no direction, but the guest still needs the
+      // same flash/sound feedback the host gets locally.
+      this.net.sendTo(victim.id, { t: 'e', k: 'envdmg', cause: options.cause });
     } else if (victim.isRemote && src && victim.health > 0) {
       // Non-lethal only: a dying guest is already headed into the crumple
       // + flycam sequence over on Player#die, and there's nothing left to
@@ -1481,7 +1500,41 @@ export class Game {
       // which way to look after the fight's already over for them.
       this.net.sendTo(victim.id, { t: 'e', k: 'dmgdir', x: src.x, z: src.z });
     }
-    if (victim.health <= 0) victim.die(attacker);
+    if (victim.health <= 0) {
+      victim._deathCause = options.cause ?? null;
+      victim.die(attacker);
+      if (victim === this.player) hud.air(BREATH_MAX, false);
+    }
+  }
+
+  _updateBreathFor(entity, dt, authoritative) {
+    const submerged = entity.body.eye().y < SEA + 0.3;
+    const next = stepBreath(entity._breath, entity._drownClock, submerged, dt);
+    entity._breath = next.breath;
+    entity._drownClock = next.drownClock;
+    if (entity === this.player) hud.air(next.breath, submerged || next.breath < BREATH_MAX);
+    if (authoritative && next.damage > 0) {
+      this.damage(entity, next.damage, null, null,
+        { environmental: true, ignoreProtection: true, cause: 'drowned' });
+      if (entity === this.player && !entity.alive) hud.air(BREATH_MAX, false);
+    }
+  }
+
+  // Host/solo authority for both hazards. Local bodies and bots expose their
+  // real collision speed through Body#landedSpeed; connected guests get an
+  // equivalent event reconstructed from host-observed fall distance.
+  _updateEnvironmentalDamage(dt) {
+    for (const e of this.entities()) {
+      if (!e?.alive || !e.body) continue;
+      const impact = e.body.landedSpeed ?? 0;
+      e.body.landedSpeed = 0;
+      if (impact > 0 && !e.body.inWater) {
+        const amount = fallDamageForImpact(impact);
+        if (amount > 0) this.damage(e, amount, null, null,
+          { environmental: true, ignoreProtection: true, cause: 'fell' });
+      }
+      if (e.alive) this._updateBreathFor(e, dt, true);
+    }
   }
 
   onDeath(victim, killer) {
@@ -1494,7 +1547,11 @@ export class Game {
       this.message('FLAG DROPPED', '#ffd97a');
     }
     if (killer && killer !== victim) this.feed(`${nameSpan(killer)} ⚔ ${nameSpan(victim)}`);
+    else if (victim._deathCause === 'drowned') this.feed(`${nameSpan(victim)} drowned`);
+    else if (victim._deathCause === 'fell') this.feed(`${nameSpan(victim)} fell`);
+    else if (victim._deathCause === 'void') this.feed(`${nameSpan(victim)} fell out of the world`);
     else this.feed(`${nameSpan(victim)} blew up`);
+    victim._deathCause = null;
     // A corpse marks a fight: the fallen's teammates hunt toward it.
     if (killer && killer !== victim) this.pingIntel(victim.body.pos, killer.team);
 
@@ -2255,7 +2312,20 @@ export class Game {
         if (ny > highestLegal) { this._correctRemotePosition(p); return; }
       }
 
+      // Remote bodies are client-predicted rather than integrated here. Use
+      // accepted reports to preserve the peak of each unsupported interval,
+      // then reconstruct impact speed when support returns.
+      const oldY = p.body.pos.y;
+      if (!supported) p._fallPeakY = Math.max(p._fallPeakY ?? oldY, oldY, ny);
+      else if (!p._remoteSupported && p._fallPeakY != null) {
+        const speed = impactSpeedForFallDistance(Math.max(0, p._fallPeakY - ny));
+        p.body.landedSpeed = Math.max(p.body.landedSpeed ?? 0, speed);
+        p._fallPeakY = null;
+      }
+      p._remoteSupported = supported;
+
       p.body.pos.set(nx, ny, nz);
+      p.body.inWater = ny < SEA + 0.4;
       p._lastPosT = this.time;
       // The active belt contains exactly this life's gun plus spade/block/nade.
       // Invalid client claims never become authoritative proxy state.
@@ -2265,6 +2335,7 @@ export class Game {
       }
       p.yaw = d.yaw;
       p.crouched = !!d.c;
+      p.body.half.h = p.crouched ? CROUCH_HEIGHT : STAND_HEIGHT;
       p.avatar.push(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.yaw);
       // Echoed straight back on this connection's next snapshot (see
       // _broadcastSnapshot) so the client can read its own round trip —
@@ -3023,6 +3094,7 @@ export class Game {
         else d.kill ? sfx.kill() : sfx.hit();
         break;
       case 'dmgdir': hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
+      case 'envdmg': hud.damage(); sfx.hurt(); break;
       case 'chat':
         hud.chatMsg({ name: cleanName(d.name), team: d.team === 'blue' ? 'blue' : 'green',
                       text: String(d.text ?? '').slice(0, 120), scope: d.scope });
@@ -3073,7 +3145,9 @@ export class Game {
     this.player.health = 0;
     this.player.deadT = 0;
     this.player.crouched = false;
-    this.player.body.half.h = 1.75;
+    this.player.body.half.h = STAND_HEIGHT;
+    resetEnvironmentalState(this.player);
+    hud.air(BREATH_MAX, false);
     this.player.swing = 0;
     this.player._mkCount = 0; this.player._mkT = null;
     this.player._streak = 0;
@@ -3141,8 +3215,15 @@ export class Game {
         }
       }
     }
-    if (this.player.alive) this.player.update(dt);
-    else this.player.deathCam(dt);
+    if (this.player.alive) {
+      this.player.update(dt);
+      // The host alone applies damage; the client advances the same pure
+      // breath state only so its HUD responds immediately to local movement.
+      this._updateBreathFor(this.player, dt, false);
+    } else {
+      hud.air(BREATH_MAX, false);
+      this.player.deathCam(dt);
+    }
     for (const av of this.avatars.values()) av.update(this.time, this.world, this.effects);
     this._sendT -= dt;
     if (this._sendT <= 0 && this.net) {
@@ -3244,13 +3325,15 @@ export class Game {
     else this.player.deathCam(dt);
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
+    this._updateEnvironmentalDamage(dt);
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.
     for (const e of this.entities()) {
       if (!e.body?.voidFall) continue;
       e.body.voidFall = false;
-      if (e.alive) this.damage(e, 1000, null);
+      if (e.alive) this.damage(e, 1000, null, null,
+        { environmental: true, ignoreProtection: true, cause: 'void' });
     }
 
     // Footsteps + spawn-protection drain, from actual ground covered:
@@ -3308,7 +3391,8 @@ export class Game {
         // Crouching guests get the same hitbox as everyone else: the proxy
         // body was staying full height, so a crouched guest was drawn short
         // but shot tall. Same lerp the bots use.
-        p.body.half.h += ((p.crouched ? 1.15 : 1.75) - p.body.half.h) * Math.min(1, dt * 10);
+        p.body.half.h += ((p.crouched ? CROUCH_HEIGHT : STAND_HEIGHT) - p.body.half.h)
+          * Math.min(1, dt * 10);
         // Grenade trickle, same terms as a local player: +1 per 12s, cap 3.
         if (p.nades < 3 && (p.nadeRegen += dt) > 12) { p.nadeRegen = 0; p.nades++; }
         p.avatar.update(this.time);

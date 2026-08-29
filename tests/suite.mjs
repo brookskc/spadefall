@@ -8,13 +8,17 @@ import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapsForMode } from '../src/mapgen.js';
-import { Body, animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
+import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
+  animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
+import { placedBlockColor } from '../src/player.js';
 import { chooseTeam, normalizeDirection, parseSpawnRow, spawnRow,
   validateMovementReport } from '../src/multiplayer.js';
 import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
 import { sfx, voxelSurface } from '../src/audio.js';
+import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
+  impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -77,6 +81,14 @@ function mapgenTests() {
   ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
   ok('mapsForMode(tdm) covers every map',
     mapsForMode('tdm').length === MAPS.length, JSON.stringify(mapsForMode('tdm')));
+
+  const greenPlaced = PALETTE[BLOCK.GREEN].color, bluePlaced = PALETTE[BLOCK.BLUE].color;
+  PALETTE[BLOCK.GREEN].color = 0x123456;
+  PALETTE[BLOCK.BLUE].color = 0xabcdef;
+  ok('held green block reads the placed-block palette', placedBlockColor('green') === 0x123456);
+  ok('held blue block reads the placed-block palette', placedBlockColor('blue') === 0xabcdef);
+  PALETTE[BLOCK.GREEN].color = greenPlaced;
+  PALETTE[BLOCK.BLUE].color = bluePlaced;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +270,9 @@ function multiplayerRuleTests() {
   ok('oversized collapse events are rejected', !validServerMessage({
     t: 'e', k: 'col', cells: Array(12003).fill(0),
   }));
+  ok('bounded environmental damage feedback passes the server trust boundary',
+    validServerMessage({ t: 'e', k: 'envdmg', cause: 'drowned' })
+      && !validServerMessage({ t: 'e', k: 'envdmg', cause: 'laser' }));
   ok('room browser rejects malformed names payloads', !validPong({
     t: 'pong', humans: 1, max: 10, map: 0, mode: 'ctf', g: 0, b: 0, names: 'oops',
   }));
@@ -350,7 +365,12 @@ function soldierModelTests() {
   ok('armed gait keeps both arms pitched toward the weapon',
     p.armL.rotation.x > 0.3 && p.armR.rotation.x > 0.3);
   setCrouch(p, true);
-  ok('crouch moves the complete head assembly as one unit', p.head.position.y === 1.13);
+  ok('crouch aligns the head assembly with the gameplay eye height',
+    p.head.position.y === CROUCH_HEIGHT - EYE_INSET);
+  const crouchBounds = new THREE.Box3().setFromObject(p.group);
+  ok('crouched model stays inside the gameplay head hitbox',
+    crouchBounds.min.y >= -0.01 && crouchBounds.max.y <= CROUCH_HEIGHT - EYE_INSET + 0.34,
+    `y=${crouchBounds.min.y.toFixed(2)}..${crouchBounds.max.y.toFixed(2)}`);
   setCrouch(p, false);
   const bounds = new THREE.Box3().setFromObject(p.group);
   ok('standing model stays aligned to the gameplay body height',
@@ -399,9 +419,9 @@ function bodyTests() {
     ceiling.data[(34 * SZ + z) * SX + x] = BLOCK.STONE;
   }
   const b2 = new Body(ceiling, 50.5, 31, 50.5);
-  b2.half.h = 1.15;
+  b2.half.h = CROUCH_HEIGHT;
   for (let i = 0; i < 30; i++) b2.move(1 / 60);
-  b2.half.h = 1.75;
+  b2.half.h = STAND_HEIGHT;
   for (let i = 0; i < 30; i++) b2.move(1 / 60);
   ok('standing up under a 3-block ceiling does not wedge', b2.pos.y >= 31 - 1e-6 && b2.pos.y < 32, `y=${b2.pos.y}`);
 
@@ -456,6 +476,49 @@ function bodyTests() {
   note(`the Body raises voidFall after parking at y=${b5.pos.y.toFixed(2)}; Game converts it into a normal death`);
 
   ok('surface() of an empty column reads as ground at y=0', voidWorld.surface(10, 10) === 0);
+}
+
+// ---------------------------------------------------------------------------
+function environmentalDamageTests() {
+  group('environmental damage: falls, water entry, and breath');
+
+  ok('ordinary jumps and short drops remain safe', fallDamageForImpact(13) === 0);
+  ok('medium falls cause non-lethal damage', fallDamageForImpact(24) > 0
+    && fallDamageForImpact(24) < 100);
+  ok('a fatal-speed impact reaches full health', fallDamageForImpact(33) === 100);
+  ok('host-observed fall distance reconstructs physical impact speed',
+    Math.abs(impactSpeedForFallDistance(15) - 30) < 1e-9);
+
+  const floor = new VoxelWorld(scene());
+  const floorY = SEA + 5;
+  for (let x = 48; x <= 52; x++) for (let z = 48; z <= 52; z++)
+    floor.data[(floorY * SZ + z) * SX + x] = BLOCK.STONE;
+  const faller = new Body(floor, 50.5, floorY + 20, 50.5);
+  let impact = 0;
+  for (let i = 0; i < 240 && !faller.onGround; i++) {
+    faller.move(1 / 60);
+    impact = Math.max(impact, faller.landedSpeed);
+  }
+  ok('Body preserves downward speed on the landing frame', impact > 30,
+    `impact=${impact.toFixed(2)}`);
+
+  const sea = new VoxelWorld(scene());
+  const diver = new Body(sea, 50.5, SEA + 8, 50.5);
+  let entered = false;
+  for (let i = 0; i < 240 && !entered; i++) {
+    diver.move(1 / 60);
+    entered = diver.inWater;
+  }
+  ok('entering water breaks retained fall velocity', entered && diver.vel.y >= -6,
+    `vy=${diver.vel.y.toFixed(2)}`);
+
+  let state = stepBreath(BREATH_MAX, 1, true, BREATH_MAX);
+  ok('twelve submerged seconds consume air without premature damage',
+    state.breath === 0 && state.damage === 0);
+  state = stepBreath(state.breath, state.drownClock, true, 1);
+  ok('drowning begins one second after air empties', state.damage === DROWN_DAMAGE);
+  state = stepBreath(state.breath, state.drownClock, false, 1);
+  ok('surfacing recovers air gradually and stops damage', state.breath === 4 && state.damage === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +715,7 @@ export async function run() {
   airstrikeDroneTests();
   soldierModelTests();
   bodyTests();
+  environmentalDamageTests();
   timings();
   console.log(`\n${pass} passed, ${fail} failed`);
   console.log(fail ? '\nRegression failures remain.\n' : '\nAll green.\n');

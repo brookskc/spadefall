@@ -1,10 +1,11 @@
 // player.js — first-person controls, tools (rifle / smg / spade / block), viewmodel.
 import * as THREE from 'three';
-import { Body, faceTintedBox } from './entities.js';
+import { Body, CROUCH_HEIGHT, STAND_HEIGHT, faceTintedBox } from './entities.js';
 import { sfx } from './audio.js';
 import { stats } from './stats.js';
-import { SX, SY, SZ } from './world.js';
-import { getBaseFov, getMotionScale, teamHex } from './settings.js';
+import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
+import { getMotionScale, teamHex } from './settings.js';
+import { resetEnvironmentalState } from './environment.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -58,12 +59,20 @@ export const GUN_CLASSES = [0, 1, 5]; // rifle, smg, sniper
 const GRAVITY_DROP = 30;
 // Calibration ranges for the sniper's scope notches (units, ≈ meters).
 const NOTCH_RANGES = [40, 70, 100, 130];
+export const BASE_FOV = 75;
+
+// The held construction block must use the color the world will actually
+// mesh when that team places it. PALETTE is the source of truth after map
+// generation and accessibility-mode changes; recomputing with teamHex()
+// can get ahead of an already-generated world's placed blocks.
+export const placedBlockColor = team =>
+  PALETTE[team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN].color;
 
 export class Player {
   constructor(game, camera, dom) {
     this.game = game;
     this.camera = camera;
-    this.baseFov = getBaseFov();
+    this.baseFov = BASE_FOV;
     this.motionScale = getMotionScale();
     this.dom = dom;
     this.team = 'green';
@@ -103,6 +112,7 @@ export class Player {
     this.swing = 0; // spade chop animation
     this.crouched = false; // hold CTRL: slower, steadier aim, ledge grip
     this.carrier = false; // carrying the enemy flag?
+    resetEnvironmentalState(this);
 
     this._buildViewmodel();
     this._bind(dom);
@@ -120,7 +130,11 @@ export class Player {
   get team() { return this._team; }
   set team(t) {
     this._team = t;
-    this._blockMat?.color.setHex(teamHex(t));
+    this.syncBlockColor();
+  }
+
+  syncBlockColor() {
+    this._blockMat?.color.setHex(placedBlockColor(this.team));
   }
 
   // ---------------- input ----------------
@@ -330,7 +344,7 @@ export class Player {
     const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
     const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
-      color: teamHex(this.team), vertexColors: true });
+      color: placedBlockColor(this.team), vertexColors: true });
     this._blockMat = blockMat; // live-recolored by the team setter below
     const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
     const mk = (w, h, d, mat, x, y, z, parent) => {
@@ -501,7 +515,7 @@ export class Player {
     if (hspeed < 3) this.slideT = 0;
     this._wasCrouched = this.crouched;
     const sliding = this.slideT > 0;
-    const targetH = sliding ? 1.0 : this.crouched ? 1.15 : 1.75;
+    const targetH = sliding ? 1.0 : this.crouched ? CROUCH_HEIGHT : STAND_HEIGHT;
     b.half.h += (targetH - b.half.h) * Math.min(1, dt * 10);
     // Crouch-walking grips the rim: no falling into ravines or off parapets.
     // A slide has no such brakes — skidding off the edge is the whole point.
@@ -796,7 +810,8 @@ export class Player {
     this.health = 0;
     this.deadT = 0;
     this.crouched = false;
-    this.body.half.h = 1.75;
+    this.body.half.h = STAND_HEIGHT;
+    resetEnvironmentalState(this);
     this.swing = 0;
     this._reloadStage = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
@@ -1002,7 +1017,8 @@ export class Player {
     this.deadT = 0;
     this._flyPos = null; // fresh flycam start point next death, not wherever it last was
     this.crouched = false;
-    this.body.half.h = 1.75;
+    this.body.half.h = STAND_HEIGHT;
+    resetEnvironmentalState(this);
     // Killstreak and related perk state: die() already clears all of this
     // on a normal mid-match death, making this redundant (but harmless)
     // for that path. It's not redundant here: rebuild() (a new match

@@ -354,6 +354,14 @@
   #healthfill { height:100%; width:100%; border-radius:5px;
     background:linear-gradient(90deg,#5db85d,#8fd98f); transition:width .15s; }
   #healthnum { font-size:12px; opacity:.8; margin-top:5px; letter-spacing:1px; }
+  #air { display:none; margin-top:8px; }
+  #air.on { display:block; }
+  #airhead { display:flex; justify-content:space-between; margin-bottom:4px;
+    color:#9ed7e5; font-size:9px; letter-spacing:2px; }
+  #airbar { width:100%; height:6px; background:rgba(255,255,255,.12); }
+  #airfill { width:100%; height:100%; background:#72bfd2; }
+  #air.low #airhead { color:#ffd97a; }
+  #air.low #airfill { background:#ffd97a; }
   #tool { right:22px; bottom:22px; text-align:right; min-width:170px; }
   #toolname { font-size:15px; font-weight:700; letter-spacing:2px; }
   #ammo { font-size:26px; font-weight:800; margin-top:2px; }
@@ -508,6 +516,8 @@
     <div class="panel" id="vitals">
       <div id="healthbar"><div id="healthfill"></div></div>
       <div id="healthnum">100 HP</div>
+      <div id="air"><div id="airhead"><span>AIR</span><span id="airnum">12s</span></div>
+        <div id="airbar"><div id="airfill"></div></div></div>
     </div>
     <div class="panel" id="tool">
       <div id="toolname">RIFLE</div>
@@ -622,9 +632,6 @@
       </div></div>
       <div class="setting"><div class="lbl">hud opacity</div><div class="opts" id="hudOpacityOpts">
         <span class="opt" data-value="75">75</span><span class="opt" data-value="100">100</span>
-      </div></div>
-      <div class="setting"><div class="lbl">field of view</div><div class="opts" id="fovOpts">
-        <span class="opt" data-value="75">75</span><span class="opt" data-value="85">85</span><span class="opt" data-value="95">95</span>
       </div></div>
       <div class="setting"><div class="lbl">motion</div><div class="opts" id="motionOpts">
         <span class="opt" data-value="full">FULL</span><span class="opt" data-value="reduced">REDUCED</span>

@@ -6,11 +6,11 @@ import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
-import { GUN_CLASSES } from './player.js';
+import { BASE_FOV, GUN_CLASSES } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
 import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
-  getBaseFov, setBaseFov, getMotionScale, getMotionLevel, setMotionLevel,
+  getMotionScale, getMotionLevel, setMotionLevel,
   getColorMode, setColorMode } from './settings.js';
 
 const $ = id => document.getElementById(id);
@@ -28,7 +28,7 @@ const scene = new THREE.Scene();
 scene.background = skyGradient();
 scene.fog = new THREE.Fog(0xcfe4f7, 70, 230);
 
-const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 500);
+const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0.1, 500);
 scene.add(camera); // so the viewmodel renders
 
 // Boots as a solo game — it doubles as the menu's orbiting backdrop.
@@ -561,13 +561,6 @@ choiceRow('hudScaleOpts', () => Math.round(getHudScale() * 100), setHudScale, va
 });
 choiceRow('hudOpacityOpts', () => Math.round(getHudOpacity() * 100), setHudOpacity, value => {
   $('hud').style.setProperty('--hud-alpha', String(Number(value) / 100));
-});
-choiceRow('fovOpts', getBaseFov, setBaseFov, value => {
-  game.player.baseFov = Number(value);
-  if (!game.player.aiming) {
-    camera.fov = game.player.baseFov;
-    camera.updateProjectionMatrix();
-  }
 });
 choiceRow('motionOpts', getMotionLevel, setMotionLevel, value => {
   game.player.motionScale = getMotionScale();

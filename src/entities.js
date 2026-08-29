@@ -4,6 +4,9 @@ import { SEA, PALETTE, boxFaceTints } from './world.js';
 import { getGfxLevel } from './settings.js';
 
 const GRAVITY = -30;
+export const STAND_HEIGHT = 1.75;
+export const CROUCH_HEIGHT = 1.31;
+export const EYE_INSET = 0.18;
 
 // Shared by Game#_footDust (the local player and, on host/solo, every
 // bot/remote proxy via the entities() loop) and Avatar#update (a guest's
@@ -27,9 +30,13 @@ export class Body {
     this.world = world;
     this.pos = new THREE.Vector3(x, y, z); // feet center
     this.vel = new THREE.Vector3();
-    this.half = { x: 0.32, h: 1.75 };      // half-width, full height
+    this.half = { x: 0.32, h: STAND_HEIGHT }; // half-width, full height
     this.onGround = false;
     this.inWater = false;
+    // One-frame landing event consumed by the authoritative Game. Preserve
+    // downward velocity before collision zeroes it so fall damage can use the
+    // real impact rather than guessing from the post-collision body state.
+    this.landedSpeed = 0;
     this.guard = false; // crouch edge-guard: refuse to walk off a real drop
   }
 
@@ -54,6 +61,8 @@ export class Body {
 
   // Axis-separated integration: move one axis at a time, clamp on collision.
   move(dt) {
+    this.landedSpeed = 0;
+    const wasInWater = this.inWater;
     const g = this.inWater ? GRAVITY * 0.25 : GRAVITY;
     this.vel.y = Math.max(this.vel.y + g * dt, -40);
     this._axis('x', this.vel.x * dt);
@@ -61,6 +70,10 @@ export class Body {
     this.onGround = false;
     this._axis('y', this.vel.y * dt);
     this.inWater = this.pos.y < SEA + 0.4;
+    // Entering the sea breaks a fall. Without this, a body retained its full
+    // dry-land velocity underwater and could rocket into the seabed before
+    // swimming controls had time to respond.
+    if (!wasInWater && this.inWater && this.vel.y < 0) this.vel.y = Math.max(this.vel.y * 0.3, -6);
     // Safety net: a body that leaves the world gets parked above sea level
     // and FLAGGED. Without the flag it just falls again forever — nothing
     // else kills it, so a grenade chain that digs a shaft to bedrock used to
@@ -91,7 +104,10 @@ export class Body {
         for (let x = x0; x <= x1; x++) {
           if (!this.world.solid(x, y, z)) continue;
           if (axis === 'y') {
-            if (delta < 0) { p.y = y + 1; this.onGround = true; }
+            if (delta < 0) {
+              this.landedSpeed = Math.max(this.landedSpeed, -this.vel.y);
+              p.y = y + 1; this.onGround = true;
+            }
             else p.y = y - h.h - 0.001;
             this.vel.y = 0;
           } else {
@@ -181,7 +197,7 @@ export class Body {
     else if (this.inWater) this.vel.y = 4; // swim upward
   }
 
-  eye() { return new THREE.Vector3(this.pos.x, this.pos.y + this.half.h - 0.18, this.pos.z); }
+  eye() { return new THREE.Vector3(this.pos.x, this.pos.y + this.half.h - EYE_INSET, this.pos.z); }
 }
 
 // A blocky AoS-style soldier: legs, torso, arms, head, gun — team colored.
@@ -555,9 +571,9 @@ export function makeNametag(name, team) {
   return s;
 }
 
-// Crouch pose: legs squash, everything above the hips drops. The collision
-// body still spans the same two voxel rows, so standing back up can never
-// wedge the soldier into a ceiling.
+// Crouch pose: legs squash and everything above the hips drops. The gameplay
+// eye and head-hit sphere now meet the visible face at y=1.13, while the
+// helmet remains inside the head sphere rather than being a phantom target.
 export function setCrouch(parts, on) {
   if (!!parts.crouched === on) return;
   parts.crouched = on;
@@ -565,7 +581,7 @@ export function setCrouch(parts, on) {
   parts.legL.position.y = parts.legR.position.y = on ? 0.39 : 0.69;
   parts.torso.position.y = on ? 0.40 : 0.70;
   parts.armL.position.y = parts.armR.position.y = on ? 0.96 : 1.26;
-  parts.head.position.y = on ? 1.13 : 1.43;
+  parts.head.position.y = on ? CROUCH_HEIGHT - EYE_INSET : 1.43;
   parts.gun.position.y = on ? 0.72 : 1.02;
   parts.spade.position.y = on ? 0.72 : 1.02;
   parts.block.position.y = on ? 0.58 : 0.88;

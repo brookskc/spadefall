@@ -1,7 +1,8 @@
 // remote-player.js — the host-side lifecycle for one connected human.
 import { Avatar } from './avatar.js';
-import { Body } from './entities.js';
+import { Body, STAND_HEIGHT } from './entities.js';
 import { teamHex } from './settings.js';
+import { resetEnvironmentalState } from './environment.js';
 
 export class RemotePlayer {
   constructor(game, id, name, team) {
@@ -14,6 +15,7 @@ export class RemotePlayer {
     this.body = new Body(game.world, p.x, p.y, p.z);
     this.health = 100;
     this.alive = true;
+    resetEnvironmentalState(this);
     this.carrier = false;
     this.blocks = 50;
     this.tool = 0;
@@ -43,8 +45,9 @@ export class RemotePlayer {
     const p = at ?? this.game.spawnPoint(this.team);
     this.body.pos.set(p.x, p.y, p.z);
     this.body.vel.set(0, 0, 0);
-    this.body.half.h = 1.75;
+    this.body.half.h = STAND_HEIGHT;
     this.body.voidFall = false;
+    resetEnvironmentalState(this);
     this.health = 100;
     this.alive = true;
     this.carrier = false;

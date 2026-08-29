@@ -79,6 +79,7 @@ function validEvent(d) {
       && Number.isInteger(d.id) && d.id >= 0 && Number.isInteger(d.owner) && d.owner >= 0
       && d.remaining >= 0 && d.remaining <= 5;
     case 'overcharge': case 'died': return true;
+    case 'envdmg': return d.cause === 'fell' || d.cause === 'drowned';
     case 'col': return Array.isArray(d.cells) && d.cells.length <= 12000 && d.cells.every(finite);
     case 'shot': return finiteVector(d.f) && finiteVector(d.e) && finite(d.hex)
       && shortString(String(d.gun ?? ''), 32);

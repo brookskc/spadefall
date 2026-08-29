@@ -2,12 +2,14 @@
 // when the trail is cold, advance in lanes, group up past midfield, crouch-fire
 // at range, lob frags over cover, undermine towers, and dig through walls.
 import * as THREE from 'three';
-import { Body, makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath,
+import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
+  makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath,
   setCrouch, setSoldierTool, placeShadow } from './entities.js';
 import { SEA, SX, SZ, BLOCK } from './world.js';
 import { TOOLS, GUN_CLASSES } from './player.js';
 import { sfx } from './audio.js';
 import { teamHex } from './settings.js';
+import { resetEnvironmentalState } from './environment.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -79,6 +81,7 @@ export class Bot {
     game.scene.add(this.parts.group);
     this.health = 100;
     this.alive = true;
+    resetEnvironmentalState(this);
     this.carrier = false;
     this.heading = team === 'blue' ? -1 : 1; // general advance direction
     this.state = 'advance';
@@ -680,13 +683,13 @@ export class Bot {
     if (rangeDuck) {
       // Don't duck blind behind our own knee wall: if the crouched eye can't
       // see the foe but the standing eye can, stand and shoot over it.
-      const duckEye = new THREE.Vector3(b.pos.x, b.pos.y + 0.97, b.pos.z);
-      const standEye = new THREE.Vector3(b.pos.x, b.pos.y + 1.57, b.pos.z);
+      const duckEye = new THREE.Vector3(b.pos.x, b.pos.y + CROUCH_HEIGHT - EYE_INSET, b.pos.z);
+      const standEye = new THREE.Vector3(b.pos.x, b.pos.y + STAND_HEIGHT - EYE_INSET, b.pos.z);
       if (!g.losClear(duckEye, this.target.body.eye()) &&
           g.losClear(standEye, this.target.body.eye())) rangeDuck = false;
     }
     const ducking = this.duckT > 0 || rangeDuck;
-    b.half.h += ((ducking ? 1.15 : 1.75) - b.half.h) * Math.min(1, dt * 10);
+    b.half.h += ((ducking ? CROUCH_HEIGHT : STAND_HEIGHT) - b.half.h) * Math.min(1, dt * 10);
     this.crouched = ducking; // fireHitscan reads this for the spread bonus
     setCrouch(this.parts, ducking);
 
@@ -899,7 +902,8 @@ export class Bot {
     this.nades = 1;
     this.nadeT = 0;
     this.crouched = false;
-    this.body.half.h = 1.75;
+    this.body.half.h = STAND_HEIGHT;
+    resetEnvironmentalState(this);
     this.target = null;
     this.aimT = 0;
     this.memoryT = 0;

@@ -288,15 +288,6 @@ export function makeSoldier(teamColor) {
     return m;
   };
 
-  // Two simple back-face shells give the character a readable blocky
-  // silhouette without a full-screen post-process or one duplicate pass per
-  // limb. They are depth-tested, so they never reveal a player through cover.
-  const outlineMat = new THREE.MeshBasicMaterial({ color: 0x10141b, side: THREE.BackSide });
-  const outline = (w, h, d, x, y, z) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w + 0.065, h + 0.065, d + 0.065), outlineMat);
-    m.position.set(x, y, z); g.add(m); return m;
-  };
-
   const legL = box(0.22, 0.6, 0.24, dark,  -0.14, 0.3, 0);
   const legR = box(0.22, 0.6, 0.24, dark,   0.14, 0.3, 0);
   legL.geometry.translate(0, -0.3, 0); legL.position.y = 0.6;
@@ -307,8 +298,6 @@ export function makeSoldier(teamColor) {
   armL.geometry.translate(0, -0.26, 0);
   armR.geometry.translate(0, -0.26, 0);
   const head = box(0.34, 0.34, 0.34, skin, 0, 1.42, 0);
-  outline(0.55, 0.62, 0.32, 0, 0.92, 0);
-  outline(0.34, 0.34, 0.34, 0, 1.42, 0);
   const brim = box(0.4, 0.12, 0.4, cloth, 0, 1.62, 0); // helmet brim
   const gun = box(0.09, 0.12, 0.7, dark, 0.2, 1.1, -0.35);
   // The spade rides in the right hand too, shown only while digging.

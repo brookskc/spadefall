@@ -22,11 +22,11 @@
 // never mean seeing less of the map than someone on a higher one.
 const GFX_PRESETS = {
   low:    { pixelRatio: 1,   antialias: false, tracers: 16, flashes: 16, debris: 80,
-    textures: false, ambience: 24, foam: false, spray: 0, casings: 0 },
+    ambience: 24, foam: false, spray: 0, casings: 0 },
   medium: { pixelRatio: 1.5, antialias: true,  tracers: 32, flashes: 32, debris: 180,
-    textures: true, ambience: 72, foam: true, spray: 0, casings: 16 },
+    ambience: 72, foam: true, spray: 0, casings: 16 },
   high:   { pixelRatio: 2,   antialias: true,  tracers: 48, flashes: 48, debris: 320,
-    textures: true, ambience: 144, foam: true, spray: 32, casings: 32 },
+    ambience: 144, foam: true, spray: 32, casings: 32 },
 };
 
 export function getGfxLevel() {

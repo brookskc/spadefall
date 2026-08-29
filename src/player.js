@@ -342,36 +342,18 @@ export class Player {
     this.camera.add(root);
     this.vmRoot = root;
 
-    // Iron sights are REAL: a rear notch and a front post, on ONE sight
-    // plane. Sighted in (aimK = 1) the gun sits at (0, -0.09) under the eye,
-    // so the local y of the aim line is +0.09 — the front post tip AND the
-    // rear wing tops both live exactly there (the wings run down flush with
-    // the barrel). Line the post up with the target between the wings, fire.
-    // Old notch: post half-width 0.006, wings' inner edges at ±0.018 — a
-    // 0.012 sliver of daylight on EACH side, twice the post's own
-    // half-width. That's a genuinely loose notch: you could be off-center
-    // by a real margin and never see it, which is exactly the kind of
-    // imprecision that gets worse, not better, once holdover for bullet
-    // drop is part of aiming. Thinner post, thinner wings, and a sliver
-    // (0.0015/side) smaller than the post's own half-width — centered now
-    // means centered, not "somewhere in a loose gap." Same top-alignment
-    // invariant as before (post tip and wing tops both land on the y=0.09
-    // aim line) — only the geometry making up that line changed.
-    const sights = (g, frontZ, rearZ) => {
-      // Post height reverted to span from the barrel's own top (0.035, both
-      // rifle and smg) up to the aim line (0.09) — thinning it down last
-      // time left its bottom floating 0.015 above the barrel with nothing
-      // connecting them. Width stays thin; only height needed the fix.
-      mk(0.006, 0.055, 0.012, metal, 0, 0.0625, frontZ, g); // front post
-      // Build the rear sight around one centered parent. Besides making the
-      // invariant explicit, the centered bridge gives both tiny wings the
-      // same visual anchor; without it, face shading made the isolated SMG
-      // wings read as a single sight shifted to the right.
+    // The iron sights share a low 0.065 aim line. Keeping the post rooted in
+    // the barrel and the rear notch on the same plane preserves accurate ADS
+    // alignment while giving both guns more believable sight proportions.
+    const sightLine = 0.065;
+    const sights = (g, frontZ, rearZ, barrelTop) => {
+      const postH = sightLine - barrelTop;
+      mk(0.006, postH, 0.012, metal, 0, barrelTop + postH / 2, frontZ, g);
       const rear = new THREE.Group();
       rear.position.set(0, 0, rearZ); g.add(rear);
-      mk(0.034, 0.012, 0.032, metal, 0, 0.044, 0, rear);       // bridge
-      mk(0.008, 0.04, 0.03, metal, -0.0085, 0.07, 0, rear);   // wing L
-      mk(0.008, 0.04, 0.03, metal,  0.0085, 0.07, 0, rear);   // wing R
+      mk(0.034, 0.008, 0.032, metal, 0, 0.041, 0, rear);       // bridge
+      mk(0.008, 0.02, 0.03, metal, -0.0085, 0.055, 0, rear);  // wing L
+      mk(0.008, 0.02, 0.03, metal,  0.0085, 0.055, 0, rear);  // wing R
     };
     const rifle = new THREE.Group();
     mk(0.05, 0.07, 0.85, dark, 0, 0, -0.5, rifle);       // barrel
@@ -381,7 +363,7 @@ export class Player {
     const rifleMag = mk(0.045, 0.12, 0.08, dark, 0, -0.095, -0.2, rifle);
     this._magParts.rifle = { mesh: rifleMag, y: rifleMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.05, rifle);    // hand
-    sights(rifle, -0.85, -0.12);
+    sights(rifle, -0.85, -0.12, 0.035);
     this.vm.rifle = rifle;
 
     const smg = new THREE.Group();
@@ -393,7 +375,7 @@ export class Player {
     const smgMag = mk(0.05, 0.16, 0.07, dark, 0, -0.11, -0.12, smg);
     this._magParts.smg = { mesh: smgMag, y: smgMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.1, 0.05, smg);
-    sights(smg, -0.53, -0.1);
+    sights(smg, -0.53, -0.1, 0.04);
     this.vm.smg = smg;
 
     // Bolt-action, scoped — no iron sights; a scope box above the barrel
@@ -411,12 +393,12 @@ export class Player {
     const sniperMag = mk(0.05, 0.1, 0.08, dark, 0, -0.105, -0.2, sniper);
     this._magParts.sniper = { mesh: sniperMag, y: sniperMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.06, sniper);      // hand
-    const scopeBody = mk(0.06, 0.06, 0.28, dark, 0, 0.09, -0.35, sniper);
-    const scopeLens = mk(0.07, 0.07, 0.03, dark, 0, 0.09, -0.5, sniper);
-    const scopeRingA = mk(0.075, 0.07, 0.025, metal, 0, 0.09, -0.27, sniper);
-    const scopeRingB = mk(0.075, 0.07, 0.025, metal, 0, 0.09, -0.43, sniper);
-    // Both sit right on the aim line (y=0.09 lands on-axis with the camera
-    // when fully aimed, same as the iron sights) — fine off-axis at hip
+    const scopeBody = mk(0.055, 0.05, 0.28, dark, 0, sightLine, -0.35, sniper);
+    const scopeLens = mk(0.065, 0.06, 0.03, dark, 0, sightLine, -0.5, sniper);
+    const scopeRingA = mk(0.07, 0.055, 0.025, metal, 0, sightLine, -0.27, sniper);
+    const scopeRingB = mk(0.07, 0.055, 0.025, metal, 0, sightLine, -0.43, sniper);
+    // The scope sits on the same aim line as the iron sights. It is fine
+    // off-axis at hip
     // fire, but dead center it's a solid opaque box parked directly in
     // front of the lens, which is the whole "all black, can't see through
     // it" bug: there was never a see-through scope, just geometry that
@@ -522,7 +504,7 @@ export class Player {
     const shift = !!(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
     const sprint = !this.crouched && this.keys['ShiftLeft'] ? 1.45 : 1;
     // Iron sights: RMB with a gun trades mobility for accuracy.
-    this.aiming = !!(this.mouseDown[2] && TOOLS[this.tool].zoom !== undefined);
+    this.aiming = !!((this._scopeQa || this.mouseDown[2]) && TOOLS[this.tool].zoom !== undefined);
     const speed = (b.inWater ? 3.2 : 5.4) * sprint * (this.crouched ? 0.45 : 1)
       * (this.aiming ? 0.6 : 1);
     // Auto-step climbs one-block rises. Crouching keeps you hugging the
@@ -594,7 +576,7 @@ export class Player {
     this.swing = Math.max(0, this.swing - dt * 3.3);
     const chop = this.tool === 2 ? Math.sin(this.swing * Math.PI) : 0;
     this.vmRoot.position.x = 0.28 * (1 - this.aimK);
-    this.vmRoot.position.y = -0.26 + this.aimK * 0.17
+    this.vmRoot.position.y = -0.26 + this.aimK * 0.195
       + Math.sin(this.bob * 2) * 0.008 * (1 - this.aimK) * motion - this.recoil * 0.04 * motion
       + chop * 0.06
       - (this.reloading > 0 ? 0.18 * Math.sin(Math.PI * (1 - this.reloading / TOOLS[this.tool].reload)) : 0);
@@ -619,7 +601,7 @@ export class Player {
     if (xh) xh.style.opacity = 1 - this.aimK;
 
     // Aim zoom.
-    const aiming = this.mouseDown[2] && TOOLS[this.tool].zoom !== undefined;
+    const aiming = this.aiming;
     const targetFov = aiming ? this.baseFov / TOOLS[this.tool].zoom : this.baseFov;
     if (Math.abs(this.camera.fov - targetFov) > 0.1) {
       // Ease rate scales inversely with zoom — "a heavier, more magnified
@@ -909,6 +891,7 @@ export class Player {
   // fraction of HALF the screen height it projects to at the current zoom.
   _updateScopeNotches(aiming) {
     const el = this._notchEl ??= document.getElementById('scopeNotches');
+    const overlay = this._scopeOverlayEl ??= document.getElementById('scopeOverlay');
     if (!el) return;
     const spec = TOOLS[this.tool];
     const scoped = aiming && spec.key === 'sniper' && this.aimK > 0.85;
@@ -918,7 +901,17 @@ export class Player {
     // right when the notch overlay (the actual aiming reference at that
     // point) takes over.
     if (this._scopeParts) for (const m of this._scopeParts) m.visible = !scoped;
+    // Once the eye is fully inside the optic, the entire first-person rifle
+    // should fall below the sight picture. Keeping the stock and receiver in
+    // frame obscures the lower BDC marks and makes the magnified view feel
+    // like a camera floating behind the scope rather than an eye inside it.
+    // Hide the root rather than only the sniper group: it makes the scoped
+    // render immune to any later viewmodel resync (reload completion, tool
+    // refresh, or grenade regeneration). The alive guard preserves the
+    // existing death-camera rule, which deliberately keeps this root hidden.
+    if (this.alive) this.vmRoot.visible = !scoped;
     el.classList.toggle('on', scoped);
+    overlay?.classList.toggle('on', scoped);
     if (!scoped) return;
     if (!this._notchTicks) {
       this._notchTicks = NOTCH_RANGES.map(r => {
@@ -937,6 +930,30 @@ export class Player {
       const frac = Math.min(0.95, Math.tan(angle) / Math.tan(halfFovRad));
       tickEl.style.top = (halfH * frac) + 'px';
     }
+
+    const probe = this.game.aimRange?.(this, 130);
+    const distance = probe?.distance ?? 130;
+    const rangeEl = this._scopeRangeEl ??= document.getElementById('scopeDistance');
+    const holdEl = this._scopeHoldEl ??= document.getElementById('scopeHold');
+    const readout = this._scopeReadoutEl ??= document.getElementById('scopeReadout');
+    if (rangeEl) rangeEl.textContent = probe?.hit ? `${Math.max(1, Math.round(distance))}m` : '130m+';
+    readout?.classList.toggle('target', probe?.kind === 'target');
+
+    let hold = 'CENTER HOLD';
+    if (!probe?.hit) hold = 'BEYOND MARKS';
+    else if (distance > NOTCH_RANGES[0]) {
+      const lower = [...NOTCH_RANGES].reverse().find(r => r <= distance);
+      const upper = NOTCH_RANGES.find(r => r >= distance);
+      hold = lower && upper && lower !== upper ? `BRACKET ${lower}-${upper}m`
+        : `USE ${lower ?? upper}m MARK`;
+    }
+    if (holdEl) holdEl.textContent = hold;
+
+    const nearest = probe?.hit && distance > NOTCH_RANGES[0] / 2
+      ? this._notchTicks.reduce((best, tick) =>
+          Math.abs(tick.r - distance) < Math.abs(best.r - distance) ? tick : best)
+      : null;
+    for (const tick of this._notchTicks) tick.el.classList.toggle('active', tick === nearest);
   }
 
   respawn(at = null) {

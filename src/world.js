@@ -206,46 +206,12 @@ function mulberry32(a) {
   };
 }
 
-function makeVoxelAtlas() {
-  if (typeof document === 'undefined') return null;
-  const tile = 8, cols = 4, rows = 2;
-  const canvas = document.createElement('canvas');
-  canvas.width = tile * cols; canvas.height = tile * rows;
-  const g = canvas.getContext('2d');
-  for (let type = 1; type < PALETTE.length; type++) {
-    const tx = ((type - 1) % cols) * tile, ty = Math.floor((type - 1) / cols) * tile;
-    g.fillStyle = '#ffffff'; g.fillRect(tx, ty, tile, tile);
-    for (let y = 0; y < tile; y++) for (let x = 0; x < tile; x++) {
-      const hash = Math.abs(Math.sin((x + type * 13) * 17.17 + (y + type * 7) * 31.31));
-      let ink = false;
-      if (type === BLOCK.SAND) ink = y % 4 === 2 && (x + type) % 3 !== 0;
-      else if (type === BLOCK.STONE) ink = hash > 0.82 || (y === 5 && x > 1 && x < 6);
-      else if (type === BLOCK.GRASS) ink = hash > 0.87 || (y === 1 && x % 3 === 0);
-      else if (type === BLOCK.DIRT) ink = hash > 0.78;
-      else if (type === BLOCK.MOSS) ink = hash > 0.7;
-      else ink = (x + y) % 7 === 0; // team blocks: restrained stamped pattern
-      if (!ink) continue;
-      const shade = 205 + ((x * 11 + y * 7 + type * 5) % 25);
-      g.fillStyle = `rgb(${shade},${shade},${shade})`;
-      g.fillRect(tx + x, ty + y, 1, 1);
-    }
-  }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestMipmapNearestFilter;
-  texture.generateMipmaps = true;
-  return texture;
-}
-
 export class VoxelWorld {
   constructor(scene) {
     this.data = new Uint8Array(SX * SY * SZ);
     this.group = new THREE.Group();
     this.chunks = new Map();
-    this.textured = !!gfxPreset().textures;
-    this.atlas = this.textured ? makeVoxelAtlas() : null;
-    this.material = new THREE.MeshBasicMaterial({ vertexColors: true, map: this.atlas });
+    this.material = new THREE.MeshBasicMaterial({ vertexColors: true });
     scene.add(this.group);
 
     // Water — one translucent animated sheet.
@@ -441,7 +407,7 @@ export class VoxelWorld {
     const old = this.chunks.get(key);
     if (old) { this.group.remove(old); old.geometry.dispose(); this.chunks.delete(key); }
 
-    const pos = [], col = [], ind = [], uv = [];
+    const pos = [], col = [], ind = [];
     const c = new THREE.Color();
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
 
@@ -463,11 +429,6 @@ export class VoxelWorld {
             const face = FACES[f], d = face.dir;
             if (this.get(x + d[0], y + d[1], z + d[2])) continue;
             const tint = FACE_TINT[f];
-            const atlasIndex = v - 1, atlasCols = 4, atlasRows = 2;
-            const tileX = atlasIndex % atlasCols, tileY = Math.floor(atlasIndex / atlasCols);
-            const u0 = (tileX + 0.06) / atlasCols, u1 = (tileX + 0.94) / atlasCols;
-            const v0 = 1 - (tileY + 0.94) / atlasRows, v1 = 1 - (tileY + 0.06) / atlasRows;
-            const faceUv = [[u0, v0], [u0, v1], [u1, v0], [u1, v1]];
             // AO probes live in the air cell touching this face, one step to
             // each side of the corner plus the diagonal.
             const n = [x + d[0], y + d[1], z + d[2]];
@@ -477,7 +438,6 @@ export class VoxelWorld {
             for (let corner = 0; corner < face.corners.length; corner++) {
               const [ox, oy, oz] = face.corners[corner];
               pos.push(x + ox, y + oy, z + oz);
-              if (this.atlas) uv.push(...faceUv[corner]);
               const o = [ox, oy, oz];
               const s0 = o[t0] ? 1 : -1, s1 = o[t1] ? 1 : -1;
               const p = [n[0], n[1], n[2]];
@@ -543,7 +503,6 @@ export class VoxelWorld {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    if (this.atlas) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(ind);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.matrixAutoUpdate = false;
@@ -629,7 +588,6 @@ export class VoxelWorld {
       this.foam.removeFromParent(); this.foam.geometry.dispose(); this.foam.material.dispose();
     }
     this.material.dispose();
-    this.atlas?.dispose();
     this.clouds.removeFromParent();
     if (this.clouds.children.length) { // shared puff resources, freed once
       this.clouds.children[0].children[0].geometry.dispose();

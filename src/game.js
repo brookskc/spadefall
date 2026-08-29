@@ -1075,6 +1075,25 @@ export class Game {
     return this.losClear(eye, target);
   }
 
+  // Range the first visible surface or enemy under a shot ray. The sniper
+  // HUD uses this probe directly, and bullet-drop compensation uses the same
+  // result so the displayed distance and the ballistic solution cannot drift.
+  _rangeProbe(from, dir, shooter, maxRange = 130) {
+    const voxel = this.world.raycast(from, dir, maxRange);
+    let distance = voxel ? voxel.dist : maxRange;
+    let kind = voxel ? 'terrain' : 'far';
+    for (const e of this.foesOf(shooter.team)) {
+      if (!e.alive) continue;
+      const r = rayVsSoldier(from, dir, e.body);
+      if (r !== null && r.t < distance) { distance = r.t; kind = 'target'; }
+    }
+    return { distance, kind, hit: kind !== 'far' };
+  }
+
+  aimRange(shooter, maxRange = 130) {
+    return this._rangeProbe(shooter.body.eye(), shooter.lookDir(), shooter, maxRange);
+  }
+
   // Bullet drop: no projectile, no travel time — the shot still resolves
   // instantly like every weapon always has, this just tilts the fired
   // direction down before it does. Range is estimated with a probe against
@@ -1088,13 +1107,7 @@ export class Game {
   // the real hit landing somewhere else.
   _dropCompensate(from, dir, spec, shooter) {
     if (!spec.dropVel) return dir; // spade/block/nade: no ballistics at all
-    const voxel = this.world.raycast(from, dir, 130);
-    let range = voxel ? voxel.dist : 130;
-    for (const e of this.foesOf(shooter.team)) {
-      if (!e.alive) continue;
-      const r = rayVsSoldier(from, dir, e.body);
-      if (r !== null && r.t < range) range = r.t;
-    }
+    const range = this._rangeProbe(from, dir, shooter, 130).distance;
     const drop = GRAVITY_DROP * range * range / (2 * spec.dropVel * spec.dropVel);
     if (drop < 0.01) return dir; // negligible at this range — not worth the trig
     const point = from.clone().addScaledVector(dir, range);

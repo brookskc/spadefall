@@ -32,6 +32,22 @@ const game = new Game(scene, camera, renderer.domElement);
 window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
 game.player.vmRoot.visible = false; // hidden until first deploy
+// Browser screenshot hook: force the sniper loadout and hold ADS without
+// relying on pointer lock, which automated browsers cannot grant reliably.
+if (params.has('scopeqa')) {
+  document.documentElement.dataset.scopeqa = 'on';
+  game.player.gunClass = 5;
+  game.player._pendingClass = 5;
+  game.player.tool = 5;
+  game.player.mouseDown[2] = true;
+  game.player._scopeQa = true;
+  game.player._syncViewmodel();
+  setInterval(() => {
+    game.player._scopeQa = true;
+    game.player.aiming = true;
+    game.player.aimK = 1;
+  }, 50);
+}
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
 // camera, excluded from fog so it keeps its glow at any distance.
@@ -875,7 +891,8 @@ addEventListener('resize', () => {
 
 // Headless/test hooks: ?mp=host&code=TEST&auto=1 · ?mp=join&code=TEST&auto=1
 // ?mp=quick&auto=1&ns=<namespace> · ?mp=browse&auto=1 · host cap: &cap=2
-// Pref hooks: &map=0..3&mode=ctf|tdm · TDM kill limit: &killcap=2
+// Pref hooks: &map=0..5&mode=ctf|tdm|koth · scope preview: &scopeqa=1
+// TDM kill limit: &killcap=2
 // Auto runs can't type, so they get a callsign to satisfy the lobby gate.
 if (params.get('auto') && !rawName())
   $('nameInput').value = 'TEST' + Math.floor(Math.random() * 90 + 10);

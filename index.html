@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SPADEFALL — a voxel arena shooter</title>
+<title>SPADEFALL | Destructible voxel shooter</title>
 <style>
   :root { --green:#5db85d; --blue:#5b7fe0; }
   body[data-colors="accessible"] { --green:#e69f00; --blue:#56b4e9; }
@@ -199,17 +199,41 @@
      edge left anywhere on screen. */
   #crosshair { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
     width:4px; height:4px; background:rgba(255,255,255,.9); }
-  /* Sniper scope: a center reticle (a real "0 range" reference — the
-     regular crosshair dot already fades out fully aimed, same as the
-     rifle/smg iron sights, so without this there was NOTHING marking
-     where the camera is actually pointed) plus calibrated range marks
-     below it. No screen mask/vignette anymore — had a voxelized-circle
-     one here (a black "looking through an optic" surround), removed on
-     request. Notch positions are computed in JS each frame (they depend
-     on viewport size and the sniper's own zoom) — these rules are
-     sizing/look only. See Player#_updateScopeNotches. */
-  #scopeNotches { position:absolute; left:50%; top:50%; transform:translateX(-50%);
+  /* Sniper optic: a square, hard-edged sight picture that fits the voxel
+     language. The frame casts the dark outer mask; the calibrated BDC marks
+     remain separate because their positions are computed from ballistics. */
+  #scopeOverlay { --scope-size:min(78vw,78vh); position:fixed; inset:0;
     display:none; pointer-events:none; }
+  #scopeOverlay.on { display:block; }
+  #scopeFrame { position:absolute; left:50%; top:50%; width:var(--scope-size);
+    height:var(--scope-size); transform:translate(-50%,-50%);
+    border:4px solid rgba(214,224,232,.72);
+    box-shadow:0 0 0 100vmax rgba(3,5,8,.88), inset 0 0 0 2px rgba(5,8,12,.8); }
+  #scopeFrame .corner { position:absolute; width:11%; height:11%;
+    background:rgba(3,5,8,.9); }
+  #scopeFrame .tl { left:0; top:0; clip-path:polygon(0 0,100% 0,0 100%); }
+  #scopeFrame .tr { right:0; top:0; clip-path:polygon(0 0,100% 0,100% 100%); }
+  #scopeFrame .bl { left:0; bottom:0; clip-path:polygon(0 0,0 100%,100% 100%); }
+  #scopeFrame .br { right:0; bottom:0; clip-path:polygon(100% 0,0 100%,100% 100%); }
+  #scopeFrame .hair { position:absolute; background:rgba(228,235,240,.72); }
+  #scopeFrame .h-left { right:calc(50% + 8px); top:50%; width:calc(50% - 8px); height:1px; }
+  #scopeFrame .h-right { left:calc(50% + 8px); top:50%; width:calc(50% - 8px); height:1px; }
+  #scopeFrame .v-top { left:50%; bottom:calc(50% + 8px); width:1px; height:calc(50% - 8px); }
+  #scopeFrame .v-bottom { left:50%; top:calc(50% + 8px); width:1px; height:calc(50% - 8px); }
+  #scopeReadout { position:absolute; right:20px; top:20px; min-width:128px;
+    padding:9px 11px; background:rgba(5,8,12,.68); border-left:3px solid #ffd97a;
+    text-align:left; text-transform:uppercase; font:10px/1.25 ui-monospace,Consolas,monospace;
+    letter-spacing:1.5px; color:rgba(232,236,242,.65); }
+  #scopeDistance { display:block; margin-top:2px; color:#fff; font-size:21px;
+    line-height:1; letter-spacing:1px; }
+  #scopeHold { display:block; margin-top:6px; color:#ffd97a; font-size:9px;
+    letter-spacing:1px; }
+  #scopeReadout.target #scopeDistance { color:#ffd97a; }
+  #scopeLegend { position:absolute; left:20px; bottom:18px;
+    font:9px/1 ui-monospace,Consolas,monospace; letter-spacing:1.2px;
+    color:rgba(232,236,242,.48); text-transform:uppercase; }
+  #scopeNotches { position:absolute; left:50%; top:50%; transform:translateX(-50%);
+    z-index:1; display:none; pointer-events:none; }
   #scopeNotches.on { display:block; }
   #scopeNotches .center { position:absolute; left:50%; top:0;
     transform:translate(-50%,-50%); width:6px; height:6px;
@@ -230,6 +254,8 @@
   #scopeNotches .tick::after { content:attr(data-r); position:absolute;
     left:26px; top:50%; transform:translateY(-50%); font-size:10px;
     letter-spacing:1px; color:rgba(255,255,255,.6); white-space:nowrap; }
+  #scopeNotches .tick.active,#scopeNotches .tick.active::before { background:#ffd97a; }
+  #scopeNotches .tick.active::after { color:#ffd97a; }
   #hitmark { position:absolute; left:50%; top:50%; width:22px; height:22px;
     transform:translate(-50%,-50%) rotate(45deg); opacity:0; }
   #hitmark::before,#hitmark::after { content:""; position:absolute; background:#ffd97a; }
@@ -463,6 +489,16 @@
     <div id="airstrikeReady">airstrike ready — [F]</div>
     <div id="overchargeActive"></div>
     <div id="objective"><span class="arrow">▲</span><span class="label"></span></div>
+    <div id="scopeOverlay">
+      <div id="scopeFrame">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <span class="hair h-left"></span><span class="hair h-right"></span>
+        <span class="hair v-top"></span><span class="hair v-bottom"></span>
+        <div id="scopeReadout"><span>range</span><b id="scopeDistance">---</b><small id="scopeHold">center hold</small></div>
+        <div id="scopeLegend">BDC · 40 / 70 / 100 / 130m</div>
+      </div>
+    </div>
     <div id="scopeNotches"><div class="center"></div></div>
     <div class="panel" id="roomcode">ROOM <b>····</b></div>
     <div id="ping"></div>
@@ -503,7 +539,7 @@
 
   <div class="screen" id="menu">
     <div class="title"><span class="spade">SPADE</span><span class="fall">FALL</span></div>
-    <div class="subtitle">a voxel arena shooter made with three.js</div>
+    <div class="subtitle">destructible voxel combat in your browser</div>
     <input id="nameInput" class="home-only" maxlength="12" placeholder="ENTER CALLSIGN">
     <div id="pausedTitle" class="only-paused">— PAUSED —</div>
     <div class="play" id="playBtn">DEPLOY</div>
@@ -618,6 +654,6 @@
     <div id="endNote">rotating to the next map…</div>
   </div>
 
-  <script type="module" src="./src/main.js"></script>
+  <script type="module" src="./src/main.js?v=4"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 // Signaling rides the free PeerJS cloud; gameplay is pure browser-to-browser.
 // ?ns=name scopes all peer ids — tests and events get their own universe.
 import { isRecord } from './multiplayer.js';
-import { validPong } from './protocol.js';
+import { validPong, validServerMessage } from './protocol.js';
 const ns = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
   .get('ns')?.replace(/[^\w-]/g, '').slice(0, 16); // guarded for headless import
 const PREFIX = 'spadefall-' + (ns ? ns + '-' : '');
@@ -15,6 +15,36 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const PUBLIC_SLOTS = 8;   // slots per scan page
 export const PUBLIC_PAGES = 2;   // 16 slots = 128 concurrent quick-matchers
 export const slotCode = i => 'PUB' + i;
+export const STATE_BUFFER_LIMIT = 64 * 1024;
+export const INBOUND_RATE = 120;
+export const INBOUND_BURST = 180;
+
+// Position reports are superseded by the next one. Once a reliable WebRTC
+// channel is congested, queuing more of them only makes the eventual state
+// older and delays important actions behind stale movement. Other messages
+// remain reliable and are never dropped by this policy.
+export function shouldSend(conn, obj, limit = STATE_BUFFER_LIMIT) {
+  if (!conn?.open) return false;
+  if (obj?.t !== 's') return true;
+  return (conn.dataChannel?.bufferedAmount ?? 0) <= limit;
+}
+
+// Host-side packet budget. An honest client normally sends 30 movement
+// reports/sec plus a handful of actions; this budget tolerates four times
+// that sustained rate and a large burst while preventing a patched peer from
+// driving unbounded validation/gameplay work. The channel remains connected
+// and naturally recovers as tokens refill, avoiding false-positive kicks.
+export function allowInbound(conn, now = performance.now(), rate = INBOUND_RATE,
+  burst = INBOUND_BURST) {
+  if (!conn || !Number.isFinite(now) || rate <= 0 || burst <= 0) return false;
+  const bucket = conn._inboundBucket ??= { tokens: burst, at: now };
+  const elapsed = Math.max(0, Math.min(5, (now - bucket.at) / 1000));
+  bucket.tokens = Math.min(burst, bucket.tokens + elapsed * rate);
+  bucket.at = now;
+  if (bucket.tokens < 1) return false;
+  bucket.tokens--;
+  return true;
+}
 
 export function makeCode() {
   return Array.from({ length: 4 }, () =>
@@ -56,6 +86,7 @@ export class Net {
         net.conns.set(conn.peer, conn);
       });
       conn.on('data', d => {
+        if (!allowInbound(conn)) return;
         // A claimed room exists before its handlers do: _claim builds the Net
         // with {} and adoption attaches onData a beat later. A survivor whose
         // 'hi' lands in that window used to be answered with silence, and it
@@ -133,7 +164,10 @@ export class Net {
       conn.on('open', () => conn.send({ t: 'hi', name, team }));
       conn.on('data', d => {
         if (!isRecord(d)) return;
-        if (d.t === 'w') done({ kind: 'join', conn, welcome: d });
+        // Do not adopt a channel on a merely welcome-shaped packet. A stale
+        // or incompatible host used to make matchmaking report success, then
+        // Game rejected the packet and left the player in a frozen limbo.
+        if (d.t === 'w' && validServerMessage(d)) done({ kind: 'join', conn, welcome: d });
         else if (d.t === 'full') done({ kind: 'full' });
       });
       conn.on('close', () => done({ kind: 'dead' }));
@@ -328,7 +362,7 @@ export class Net {
     if (c?.open) c.send(obj);
   }
   send(obj) { // client -> host
-    if (this.conn?.open) this.conn.send(obj);
+    if (shouldSend(this.conn, obj)) this.conn.send(obj);
   }
   destroy() { this.peer?.destroy(); }
 }

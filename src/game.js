@@ -13,7 +13,8 @@ import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
 import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
-  teamCounts, validateMovementReport, normalizeDirection } from './multiplayer.js';
+  teamCounts, validateMovementReport, normalizeDirection,
+  migrationSurvivors, combatDamageAllowed, protectedBuildReason } from './multiplayer.js';
 import { validClientMessage, validServerMessage } from './protocol.js';
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
@@ -750,6 +751,10 @@ export class Game {
     this.over = false;
     this.mode = opts.mode ?? 'solo';       // solo | host | client
     this.net = opts.net ?? null;
+    // Public/default rooms protect teammates. Kept as an instance policy so
+    // private-room friendly fire can be added later without rewriting every
+    // damage source; no UI exposes it yet.
+    this.friendlyFire = opts.friendlyFire === true;
     this.seed = opts.seed ?? 1979;
     this.editLog = [];                     // host: every world change, for late joiners
     this.blockHits = new Map();            // host/solo: 'x,y,z' -> remaining gunfire HP
@@ -1023,8 +1028,10 @@ export class Game {
     const humans = { green: 0, blue: 0 };
     humans[this.player.team] = (humans[this.player.team] ?? 0) + 1;
     for (const p of this.remote.values()) humans[p.team] = (humans[p.team] ?? 0) + 1;
-    for (let i = 0; i < 5 - humans.green; i++) this.bots.push(new Bot(this, 'green'));
-    for (let i = 0; i < 5 - humans.blue; i++) this.bots.push(new Bot(this, 'blue'));
+    const bots = { green: 0, blue: 0 };
+    for (const b of this.bots) bots[b.team] = (bots[b.team] ?? 0) + 1;
+    for (let i = bots.green; i < 5 - humans.green; i++) this.bots.push(new Bot(this, 'green'));
+    for (let i = bots.blue; i < 5 - humans.blue; i++) this.bots.push(new Bot(this, 'blue'));
   }
 
   enemyOf(team) { return team === 'blue' ? 'green' : 'blue'; }
@@ -1219,10 +1226,10 @@ export class Game {
       // 3rd hit up close, which the slow interval makes genuinely costly).
       const closeMul = spec.key === 'sniper' ? Math.min(1, 0.5 + 0.5 * (hitT / 15)) : 1;
       const dmg = spec.damage * (head ? (spec.headMult ?? 1.5) : 1) * closeMul;
-      this.damage(hit, dmg, shooter);
+      const damaged = this.damage(hit, dmg, shooter);
       // hit was drawn from alive-only foes above, so !hit.alive here means
       // THIS shot is what did it — not just "they happen to be dead."
-      this._hitFeedback(shooter, !hit.alive);
+      if (damaged) this._hitFeedback(shooter, !hit.alive);
     }
 
     // Gunfire chips blocks: the voxel that stopped the bullet accumulates
@@ -1474,8 +1481,14 @@ export class Game {
   // "which way did this come from" has to mean the explosion, not
   // wherever they've since moved to.
   damage(victim, amount, attacker, sourcePos, options = {}) {
-    if (victim.protT > 0 && !options.ignoreProtection) return; // environmental harm is never spawn-shielded
-    if (!victim.alive || this.over) return;
+    if (victim.protT > 0 && !options.ignoreProtection) return false; // environmental harm is never spawn-shielded
+    if (!victim.alive || this.over) return false;
+    // Central friendly-damage boundary. Gunfire and melee already search only
+    // foes, but explosions and structural collapses iterate every entity.
+    // Terrain destruction still happened before this call; only teammate HP
+    // is protected. Self-damage remains valid.
+    if (!options.environmental && !combatDamageAllowed(victim.team, attacker?.team,
+        victim === attacker, this.friendlyFire)) return false;
     // Overcharge: 1.5x damage dealt AND taken — a genuine risk/reward
     // toggle, not a pure buff. Both checks apply independently and stack
     // naturally if attacker and victim are BOTH overcharged at once
@@ -1505,6 +1518,7 @@ export class Game {
       victim.die(attacker);
       if (victim === this.player) hud.air(BREATH_MAX, false);
     }
+    return true;
   }
 
   _updateBreathFor(entity, dt, authoritative) {
@@ -1706,8 +1720,8 @@ export class Game {
         this.effects.burst(e.body.eye(), 10, 0xc0392b, 4);
         if (p === this.player) sfx.spadeHit();
         else sfx.at('spadeHit', e.body.eye());
-        this.damage(e, 45, p);
-        this._hitFeedback(p, !e.alive); // e was drawn from the alive-only loop above
+        if (this.damage(e, 45, p))
+          this._hitFeedback(p, !e.alive); // e was drawn from the alive-only loop above
         return;
       }
     }
@@ -1729,6 +1743,19 @@ export class Game {
   // gets entombed, the builder's team color is used, inventory decremented.
   tryBuild(p, x, y, z) {
     if (p.blocks <= 0 || this.world.get(x, y, z)) return false;
+    const protectedReason = this._protectedBuildReason(x, y, z);
+    if (protectedReason) {
+      // Rate-limited feedback: holding place against a protected edge should
+      // explain itself, not turn into a center-screen message machine.
+      if ((p === this.player || p.isRemote) && this.time - (p._buildDenyT ?? -9) > 0.8) {
+        p._buildDenyT = this.time;
+        const label = protectedReason === 'flag' ? 'FLAG STAND MUST STAY CLEAR'
+          : protectedReason === 'hill' ? 'HILL CENTER MUST STAY CLEAR'
+          : 'SPAWN PAD MUST STAY CLEAR';
+        this.messageTo(p, label, '#ffd97a');
+      }
+      return false;
+    }
     for (const e of this.entities()) {
       if (!e.alive) continue;
       const b = e.body;
@@ -1739,6 +1766,25 @@ export class Game {
     this.applyEdit(x, y, z, p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN);
     p.blocks--;
     return true;
+  }
+
+  _protectedBuildReason(x, y, z) {
+    const flags = this.flags ? ['green', 'blue'].map(team => {
+      const p = this.flags[team].home;
+      return { x: p.x, y: p.y, z: p.z, r: 2.25, below: 1, above: 4 };
+    }) : [];
+    // spawnPoint's deterministic fallback is the one position that must stay
+    // usable even after every randomized candidate has been cratered or built
+    // over. Protect only that compact pad, not the broader base approaches.
+    const spawns = ['green', 'blue'].map(team => {
+      const b = BASE[team], dir = team === 'green' ? 1 : -1;
+      const sx = b.x + dir * 12, sz = b.z;
+      return { x: sx, y: this.world.surface(Math.floor(sx), Math.floor(sz)) + 1,
+        z: sz, r: 3.5, below: 1, above: 4 };
+    });
+    const hill = this.hill && { x: this.hill.pos.x, y: this.hill.pos.y,
+      z: this.hill.pos.z, r: 2.5, below: 2, above: 4 };
+    return protectedBuildReason(x, y, z, { flags, spawns, hill });
   }
 
   // ---------------- grenades ----------------
@@ -1808,12 +1854,13 @@ export class Game {
       // Cover has to mean something: without this, a blast behind a wall
       // it never breached still dealt damage through solid stone.
       if (d > noCoverR && !this.losClear(pos, center)) continue;
-      this.damage(e, Math.max(minDamage, baseDamage * (1 - d / dmgRadius)), owner, pos);
+      const damaged = this.damage(e,
+        Math.max(minDamage, baseDamage * (1 - d / dmgRadius)), owner, pos);
       // Grenades can catch their own thrower (this loop is entities(), no
       // team filter, unlike gunfire/melee which only ever loop foesOf) —
       // self-damage still applies, it just shouldn't ring a "kill
       // confirmed" chime for blowing yourself up.
-      if (e !== owner) this._hitFeedback(owner, !e.alive);
+      if (damaged && e !== owner) this._hitFeedback(owner, !e.alive);
     }
   }
 
@@ -2251,8 +2298,8 @@ export class Game {
       return;
     }
     if (d.t === 'hi') {
-      const migIdx = this._migRoster?.get(id);
-      if (migIdx != null) {
+      const mig = this._migRoster?.get(id);
+      if (mig) {
         // A survivor finding the new room. Their proxy was already restored
         // at promotion under this very peer id — what they need is a
         // welcome, not a respawn. Seed/map ride along so a stale replica
@@ -2260,9 +2307,15 @@ export class Game {
         this._migRoster.delete(id);
         const p = this.remote.get(id);
         if (!p) return; // lapsed entry — fall through would double-spawn
+        const reset = !!p._migrationRespawn;
+        if (reset) {
+          p.respawn(null, false);
+          delete p._migrationRespawn;
+        }
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
-          spawn: spawnRow(p.body, p.yaw + Math.PI / 2), r: this._rosterMsg() });
+          spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
+          r: this._rosterMsg() });
         this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
         return;
       }
@@ -2538,13 +2591,25 @@ export class Game {
     // with unchanged-row omission the wire hasn't carried a complete
     // snapshot in a long time. This is the one place that must not read
     // raw d.p/d.b.
-    this._migRoster = new Map();
+    // The roster is the authoritative membership list. The reconstructed
+    // snapshot contains only entities this client could perceive, so using
+    // it as membership silently lost out-of-sight survivors during a baton
+    // pass. Give every roster member a seat; restore an exact row where one
+    // is available and create a dormant, safe-respawn placeholder otherwise.
+    this._migRoster = migrationSurvivors(this._rosterP, oldIdx, this._fullP);
     let maxIdx = oldIdx;
-    for (const [idx, row] of this._fullP) {
-      const meta = this._rosterP?.get(idx);
-      if (!meta || meta.pid === 'HOST' || idx === oldIdx) continue;
-      this._migRoster.set(meta.pid, idx);
-      this._restoreProxy(meta.pid, meta.name, idx, meta.team, row);
+    for (const [id, survivor] of this._migRoster) {
+      const { idx, name, team, row } = survivor;
+      if (row) this._restoreProxy(id, name, idx, team, row);
+      else {
+        const proxy = new RemotePlayer(this, id, name, team);
+        proxy.ridx = idx;
+        proxy.alive = false;
+        proxy.avatar.setAlive(false);
+        proxy._migrationRespawn = true;
+        this.remote.set(id, proxy);
+      }
+      this._kdRow(this.remote.get(id));
       if (idx > maxIdx) maxIdx = idx;
     }
     this._nextPIdx = maxIdx + 1;
@@ -2567,6 +2632,9 @@ export class Game {
       }
       this.bots.push(bot);
     }
+    // Interest management can hide bots too. Refill only the missing seats;
+    // _spawnBots now accounts for the visible bots restored just above.
+    this._spawnBots();
     // Airstrike rows are unconditional full state, so a strike already in
     // flight survives the baton pass too. Damage attribution is retained
     // when its caller survived; if the departed host called it, the blast
@@ -2884,6 +2952,18 @@ export class Game {
           this.player.body.vel.set(0, 0, 0);
           this.player.yaw = spawn.yaw;
           this.player.pitch = 0;
+        }
+        // The promoted host could not know an out-of-sight survivor's exact
+        // state without defeating interest management. In that case it marks
+        // the welcome as a controlled redeploy and both sides converge on the
+        // supplied spawn immediately instead of fighting correction packets.
+        if (d.reset) {
+          const spawn = parseSpawnRow(d.spawn);
+          if (spawn) {
+            this.player.respawn({ x: spawn.x, y: spawn.y, z: spawn.z });
+            this.player.yaw = spawn.yaw;
+            this.player.pitch = 0;
+          }
         }
         this._replayEdits(d.log);
         this._applyRoster(d.r);

@@ -55,6 +55,58 @@ export function parseSpawnRow(row) {
   return { x: row[0], y: row[1], z: row[2], yaw: row[3] };
 }
 
+// Build host-migration state from the identity roster, not from the client's
+// position replica. Interest management deliberately removes out-of-sight
+// rows from that replica; those soldiers still belong to the room and must be
+// given a migration seat even though the new host cannot restore their exact
+// (and intentionally hidden) position. `row: null` tells the promoted host to
+// redeploy that survivor safely when their connection arrives.
+export function migrationSurvivors(roster, ownIdx, replicated) {
+  const survivors = new Map();
+  if (!(roster instanceof Map)) return survivors;
+  for (const [idx, meta] of roster) {
+    if (!Number.isInteger(idx) || idx === ownIdx || !isRecord(meta)
+        || meta.pid === 'HOST' || typeof meta.pid !== 'string' || !meta.pid
+        || typeof meta.name !== 'string'
+        || (meta.team !== 'green' && meta.team !== 'blue')) continue;
+    survivors.set(meta.pid, {
+      idx, name: meta.name, team: meta.team,
+      row: replicated instanceof Map ? (replicated.get(idx) ?? null) : null,
+    });
+  }
+  return survivors;
+}
+
+// Public-room combat policy: enemy damage and self-damage are valid, but a
+// player cannot hurt a teammate. A future private-room friendly-fire toggle
+// can opt in without teaching every weapon/explosion/collapse path its own
+// slightly different version of the rule.
+export function combatDamageAllowed(victimTeam, attackerTeam, self = false,
+  friendlyFire = false) {
+  if (self || attackerTeam == null || victimTeam == null) return true;
+  return friendlyFire || victimTeam !== attackerTeam;
+}
+
+const inCylinder = (x, y, z, area) => {
+  if (!area || ![x, y, z, area.x, area.y, area.z, area.r].every(Number.isFinite)) return false;
+  const below = Number.isFinite(area.below) ? area.below : 1;
+  const above = Number.isFinite(area.above) ? area.above : 4;
+  return Math.hypot(x + 0.5 - area.x, z + 0.5 - area.z) <= area.r
+    && y + 1 > area.y - below && y < area.y + above;
+};
+
+// Keep the small pieces of geometry a match cannot function without clear.
+// The surrounding bunker, hill rim, and approaches remain fully buildable;
+// only the flag pedestal, reliable fallback spawn pads, and hill center are
+// protected. Returns a stable reason so Game can provide useful feedback.
+export function protectedBuildReason(x, y, z, areas = {}) {
+  if (![x, y, z].every(Number.isFinite)) return 'invalid';
+  if ((areas.flags ?? []).some(a => inCylinder(x, y, z, a))) return 'flag';
+  if ((areas.spawns ?? []).some(a => inCylinder(x, y, z, a))) return 'spawn';
+  if (inCylinder(x, y, z, areas.hill)) return 'hill';
+  return null;
+}
+
 // Validate displacement only. Terrain overlap and ballistic/ground-support
 // checks remain Game responsibilities because they need the live VoxelWorld.
 export function validateMovementReport(previous, report, elapsed, limits = MOVEMENT) {

@@ -13,12 +13,14 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
 import { placedBlockColor } from '../src/player.js';
-import { chooseTeam, normalizeDirection, parseSpawnRow, spawnRow,
-  validateMovementReport } from '../src/multiplayer.js';
+import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
+  parseSpawnRow, protectedBuildReason, spawnRow, validateMovementReport } from '../src/multiplayer.js';
 import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
+import { allowInbound, shouldSend } from '../src/net.js';
 import { sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
+import { botSeparation, botTargetScore, hillPost } from '../src/bot-rules.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -252,6 +254,52 @@ function multiplayerRuleTests() {
     spawn?.x === 12 && spawn?.y === 30 && spawn?.z === 42 && spawn?.yaw === Math.PI);
   ok('malformed welcome spawn rows are rejected', parseSpawnRow([1, 2, NaN, 0]) === null);
 
+  const roster = new Map([
+    [0, { name: 'Old host', team: 'green', pid: 'HOST' }],
+    [2, { name: 'Visible', team: 'blue', pid: 'peer-visible' }],
+    [7, { name: 'Hidden', team: 'green', pid: 'peer-hidden' }],
+    [9, { name: 'Us', team: 'blue', pid: 'peer-us' }],
+  ]);
+  const replicated = new Map([[2, [1, 2, 3]], [9, [4, 5, 6]]]);
+  const survivors = migrationSurvivors(roster, 9, replicated);
+  ok('host migration keeps out-of-sight roster members eligible to rejoin',
+    survivors.size === 2 && survivors.get('peer-hidden')?.row === null);
+  ok('host migration retains exact state for visible survivors',
+    survivors.get('peer-visible')?.row === replicated.get(2));
+
+  const open = bufferedAmount => ({ open: true, dataChannel: { bufferedAmount } });
+  ok('uplink backpressure drops only superseded state reports',
+    !shouldSend(open(70000), { t: 's' }) && shouldSend(open(70000), { t: 'a', k: 'shoot' }));
+  ok('state reports resume when the reliable channel drains', shouldSend(open(1000), { t: 's' }));
+  const floodConn = {};
+  let allowed = 0;
+  for (let i = 0; i < 200; i++) if (allowInbound(floodConn, 1000, 120, 180)) allowed++;
+  ok('host packet budget bounds a same-instant client flood', allowed === 180, `${allowed} accepted`);
+  ok('host packet budget refills after legitimate elapsed time',
+    allowInbound(floodConn, 2000, 120, 180));
+
+  ok('public combat blocks teammate damage but preserves self-damage',
+    !combatDamageAllowed('green', 'green', false)
+      && combatDamageAllowed('green', 'green', true));
+  ok('enemy, unattributed, and private-room friendly-fire damage remain available',
+    combatDamageAllowed('green', 'blue') && combatDamageAllowed('green', null)
+      && combatDamageAllowed('green', 'green', false, true));
+
+  const protectedAreas = {
+    flags: [{ x: 36.5, y: 20, z: 128.5, r: 2.25, below: 1, above: 4 }],
+    spawns: [{ x: 48, y: 20, z: 128, r: 3.5, below: 1, above: 4 }],
+    hill: { x: 128.5, y: 18, z: 128.5, r: 2.5, below: 2, above: 4 },
+  };
+  ok('flag stands, fallback spawn pads, and the hill core reject building',
+    protectedBuildReason(36, 20, 128, protectedAreas) === 'flag'
+      && protectedBuildReason(48, 20, 128, protectedAreas) === 'spawn'
+      && protectedBuildReason(128, 18, 128, protectedAreas) === 'hill');
+  ok('objective protection leaves surrounding tactical construction available',
+    protectedBuildReason(40, 20, 128, protectedAreas) === null
+      && protectedBuildReason(132, 18, 128, protectedAreas) === null);
+  ok('objective protection is height-bounded so tunnels remain buildable',
+    protectedBuildReason(128, 10, 128, protectedAreas) === null);
+
   const prev = { x: 10, y: 20, z: 10 };
   ok('ordinary movement passes host displacement rules',
     validateMovementReport(prev, { x: 10.2, y: 20.2, z: 10.1, yaw: 0 }, 1 / 30).ok);
@@ -273,9 +321,44 @@ function multiplayerRuleTests() {
   ok('bounded environmental damage feedback passes the server trust boundary',
     validServerMessage({ t: 'e', k: 'envdmg', cause: 'drowned' })
       && !validServerMessage({ t: 'e', k: 'envdmg', cause: 'laser' }));
+  const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0,
+    me: 2, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
+    r: { p: [], b: [] } };
+  ok('migration reset welcomes require a valid authoritative spawn',
+    validServerMessage(migratedWelcome)
+      && !validServerMessage({ ...migratedWelcome, spawn: [10, NaN, 30, 0] }));
   ok('room browser rejects malformed names payloads', !validPong({
     t: 'pong', humans: 1, max: 10, map: 0, mode: 'ctf', g: 0, b: 0, names: 'oops',
   }));
+}
+
+// ---------------------------------------------------------------------------
+function botRuleTests() {
+  group('bot tactics: objectives, targeting, and squad spacing');
+  const hill = { x: 128.5, z: 128.5, r: 8 };
+  const greenPosts = Array.from({ length: 5 }, (_, id) => hillPost(hill, id, 'green'));
+  ok('KOTH bots occupy five stable posts inside the capture radius',
+    new Set(greenPosts.map(p => `${p.x.toFixed(3)},${p.z.toFixed(3)}`)).size === 5
+      && greenPosts.every(p => Math.hypot(p.x - hill.x, p.z - hill.z) < hill.r));
+  const bluePost = hillPost(hill, 0, 'blue');
+  ok('opposing KOTH formations are interleaved instead of stacked',
+    Math.hypot(bluePost.x - greenPosts[0].x, bluePost.z - greenPosts[0].z) > 1);
+
+  ok('current-target hysteresis prevents trivial target churn',
+    botTargetScore(20, 100, false, true) < botTargetScore(18, 100, false, false));
+  ok('an enemy flag carrier can still override target stickiness',
+    botTargetScore(28, 100, true, false) < botTargetScore(20, 100, false, true));
+
+  const sep = botSeparation({ x: 10, z: 10 }, [
+    { id: 2, x: 11, z: 10, alive: true },
+    { id: 3, x: 20, z: 10, alive: true },
+  ], 1);
+  ok('nearby squadmates produce a normalized separation steer',
+    sep.x < -0.99 && Math.abs(sep.z) < 1e-9);
+  ok('distant or dead squadmates do not perturb movement',
+    botSeparation({ x: 10, z: 10 }, [
+      { id: 2, x: 20, z: 10, alive: true }, { id: 3, x: 10.2, z: 10, alive: false },
+    ], 1).x === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +794,7 @@ export async function run() {
   meshingTests();
   hostileInputTests();
   multiplayerRuleTests();
+  botRuleTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

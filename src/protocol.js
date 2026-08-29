@@ -108,7 +108,9 @@ export function validServerMessage(d) {
   if (d.t === 'w') return shortString(String(d.id ?? ''), 128) && team(d.team)
     && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
-    && (d.migrated || parseSpawnRow(d.spawn));
+    && (d.reset === undefined || d.reset === 0 || d.reset === 1)
+    && (d.migrated || parseSpawnRow(d.spawn))
+    && (!d.reset || parseSpawnRow(d.spawn));
   if (d.t === 's') return validSnapshot(d);
   if (d.t === 'e') return validEvent(d);
   return false;

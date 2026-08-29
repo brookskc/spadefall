@@ -262,6 +262,7 @@ export class Player {
     if (GUN_CLASSES.includes(i) && i !== this.gunClass) { sfx.click(); return; }
     this.tool = i;
     this.reloading = 0;
+    this._reloadStage = 0;
     sfx.click();
     this._syncViewmodel();
     this.game.hud.refreshTool(this);
@@ -279,8 +280,10 @@ export class Player {
 
   _reload() {
     if (this.reloading > 0) return;
-    this.reloading = TOOLS[this.tool].reload;
-    sfx.click();
+    const spec = TOOLS[this.tool];
+    this.reloading = spec.reload;
+    this._reloadStage = 1;
+    sfx.reloadStart(spec.key);
     this.game.hud.refreshTool(this);
   }
 
@@ -491,7 +494,9 @@ export class Player {
       this.slideT = 0.7; this.slideCd = 1.4;
       const boost = 9 / Math.max(hspeed, 0.01);
       b.vel.x *= boost; b.vel.z *= boost;
-      sfx.slide();
+      const surface = this.game.world.get(Math.floor(b.pos.x), Math.floor(b.pos.y) - 1,
+        Math.floor(b.pos.z));
+      sfx.slide(surface);
     }
     if (hspeed < 3) this.slideT = 0;
     this._wasCrouched = this.crouched;
@@ -627,9 +632,21 @@ export class Player {
     // Tool usage.
     this.cooldown -= dt;
     if (this.reloading > 0) {
+      const spec = TOOLS[this.tool];
       this.reloading -= dt;
+      const progress = 1 - Math.max(0, this.reloading) / spec.reload;
+      if (this._reloadStage === 1 && progress >= 0.24) {
+        this._reloadStage = 2; sfx.reloadEject(spec.key);
+      }
+      if (this._reloadStage === 2 && progress >= 0.62) {
+        this._reloadStage = 3; sfx.reloadInsert(spec.key);
+      }
+      if (this._reloadStage === 3 && progress >= 0.86) {
+        this._reloadStage = 4; sfx.reloadChamber(spec.key);
+      }
       if (this.reloading <= 0) {
         this.ammo[this.tool] = TOOLS[this.tool].mag;
+        this._reloadStage = 0;
         this.game.hud.refreshTool(this);
       }
     // The lock gate: a click that lands while the pointer is unlocked (the
@@ -679,7 +696,10 @@ export class Player {
     // this is a one-shot commit.
     const firing = !!this.mouseDown[0];
     if (firing && !this._pilotFireWas) {
-      this.game.requestAirstrike(this, p.x, p.z);
+      // Capture the direction the soldier was facing when the strike was
+      // committed. The camera is already straight down here, so camera yaw
+      // cannot supply a meaningful aircraft approach vector.
+      this.game.requestAirstrike(this, p.x, p.z, this.yaw);
       this._piloting = false;
       // Camera doesn't snap straight back to first-person — it follows
       // the missile down for the same delay the host actually uses
@@ -778,6 +798,7 @@ export class Player {
     this.crouched = false;
     this.body.half.h = 1.75;
     this.swing = 0;
+    this._reloadStage = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
     this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
     this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
@@ -977,6 +998,7 @@ export class Player {
     this.blocks = 50;
     this.cooldown = 0;
     this.reloading = 0;
+    this._reloadStage = 0;
     this.deadT = 0;
     this._flyPos = null; // fresh flycam start point next death, not wherever it last was
     this.crouched = false;

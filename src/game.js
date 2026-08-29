@@ -7,7 +7,7 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { disposeObject, footDust, retintVoxelBoxes } from './entities.js';
+import { disposeObject, footDust, makeMq9Drone, retintVoxelBoxes } from './entities.js';
 import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
@@ -92,6 +92,9 @@ const AIRSTRIKE_TELEGRAPH_T = 3;
 // for the local, unvalidated visual — same circular-import reason as
 // AIRSTRIKE_TELEGRAPH_T. This copy is what the host actually enforces.
 const AIRSTRIKE_STEER_SPEED = 12;
+const AIRSTRIKE_DRONE_ALTITUDE = 23;
+const AIRSTRIKE_DRONE_START = -78;
+const AIRSTRIKE_DRONE_END = 10;
 // Bullet drop gravity — see Game#_dropCompensate. Matches the world's own
 // GRAVITY magnitude (entities.js) for internal consistency; each weapon's
 // dropVel is what actually tunes how much a given gun drops, same way the
@@ -119,6 +122,29 @@ export function relativeBearing(yaw, fromX, fromZ, toX, toZ) {
   const rx = -fz, rz = fx;
   const dx = toX - fromX, dz = toZ - fromZ;
   return Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+}
+
+// Pure flight-path helper kept exported for regression tests. Local +X is
+// forward for the MQ-9 model and for player yaw: yaw 0 flies east, yaw PI/2
+// flies north (-Z). The drone crosses directly over the live target about
+// a third of a second before impact, then is still visibly departing when
+// the blast lands instead of vanishing at the exact center point.
+export function airstrikeDronePose(x, y, z, yaw, remaining,
+  duration = AIRSTRIKE_TELEGRAPH_T) {
+  const safeDuration = Math.max(0.001, Number.isFinite(duration) ? duration : AIRSTRIKE_TELEGRAPH_T);
+  const safeRemaining = Math.max(0, Math.min(safeDuration,
+    Number.isFinite(remaining) ? remaining : safeDuration));
+  const safeYaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw)) : 0;
+  const progress = 1 - safeRemaining / safeDuration;
+  const along = AIRSTRIKE_DRONE_START
+    + (AIRSTRIKE_DRONE_END - AIRSTRIKE_DRONE_START) * progress;
+  return {
+    x: x + Math.cos(safeYaw) * along,
+    y: y + AIRSTRIKE_DRONE_ALTITUDE,
+    z: z - Math.sin(safeYaw) * along,
+    yaw: safeYaw,
+    progress,
+  };
 }
 const dx = v => v / 256, dy = v => v / 512;
 const da = v => { const a = v / 65536 * 2 * Math.PI; return a > Math.PI ? a - 2 * Math.PI : a; };
@@ -730,6 +756,10 @@ export class Game {
     this._lastHealth = 100;
     this._respawnT = 0;                  // client: cosmetic redeploy countdown
     this._chatCd = 0;                    // chat send cooldown (wall clock)
+    this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
+    this._pendingStrikes = [];           // host/solo authoritative impact timers
+    this._airstrikeDrones = new Map();   // every mode: local visual replicas by strike id
+    this._lastStrikeRows = [];           // client: latest full strike state for migration
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
     // resets every rebuild(), so this tracks "what was my own row's k/d the
     // last time I checked" to diff against, not a running lifetime total.
@@ -866,6 +896,9 @@ export class Game {
   }
 
   rebuild(seed, map = this.mapIndex) {
+    this._clearAirstrikeDrones();
+    this._pendingStrikes = [];
+    this._lastStrikeRows = [];
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
     for (const av of this.avatars.values()) av.dispose();
@@ -1241,16 +1274,16 @@ export class Game {
     this.net.send({ t: 'a', k: 'shoot', o: arr(from), d: arr(dir), tool: p.tool });
   }
 
-  // No local preview needed the way shooting has one — a confirmed target
-  // isn't rendered as anything until the host's telegraph message comes
-  // back and _telegraph() draws the marker, so this is just: tell the
-  // authority, wait to hear back. p is the caller's OWN player object in
+  // No speculative client preview: the host validates the streak, then its
+  // one-shot telegraph event creates the drone on every machine. This is
+  // just: send target + captured facing, wait for confirmation. p is the
+  // caller's OWN player object in
   // both branches — solo/host validates and spends the streak against it
   // directly; a guest never touches its own _streak here at all, since
   // the host's copy (the RemotePlayer) is the only one that counts.
-  requestAirstrike(p, x, z) {
-    if (this.mode !== 'client') return this._confirmAirstrike(p, x, z);
-    this.net.send({ t: 'a', k: 'strike', x, z });
+  requestAirstrike(p, x, z, yaw = p.yaw) {
+    if (this.mode !== 'client') return this._confirmAirstrike(p, x, z, yaw);
+    this.net.send({ t: 'a', k: 'strike', x, z, yaw });
   }
   // No payload needed at all — "turn it on for me," nothing to target or
   // aim. Same authority split as every other request* method: solo/host
@@ -1595,12 +1628,12 @@ export class Game {
     this.effects.blockBurst([{ x, y, z, v }]);
     if (who === this.player) {
       this.player.blocks = Math.min(99, this.player.blocks + 1);
-      sfx.dig();
+      sfx.dig(v);
       hud.refreshTool(this.player);
     } else {
       // Someone else's shovel: audible where it happens — tunneling is a
       // stealth tradeoff, not free silence.
-      sfx.at('dig', { x, y, z });
+      sfx.at('dig', { x, y, z }, v);
       if (who.isRemote) who.blocks = Math.min(99, who.blocks + 1);
     }
   }
@@ -1614,13 +1647,15 @@ export class Game {
     for (const e of this.foesOf(p.team)) {
       if (e.alive && e.body.eye().distanceTo(origin) < 3.2) {
         this.effects.burst(e.body.eye(), 10, 0xc0392b, 4);
+        if (p === this.player) sfx.spadeHit();
+        else sfx.at('spadeHit', e.body.eye());
         this.damage(e, 45, p);
         this._hitFeedback(p, !e.alive); // e was drawn from the alive-only loop above
         return;
       }
     }
     if (hit) this.digVoxel(p, hit.x, hit.y, hit.z);
-    else if (p === this.player) sfx.dig();
+    else if (p === this.player) sfx.swing();
   }
 
   playerPlace(p, origin = null, dir = null) {
@@ -1732,14 +1767,143 @@ export class Game {
   // every other player-originated network message gets in this codebase.
   // Spends the streak HERE, not when piloting mode was entered — cancel
   // out of targeting with no shot fired and nothing was ever charged.
-  _confirmAirstrike(attacker, x, z) {
+  _confirmAirstrike(attacker, x, z, yaw) {
     if ((attacker._streak ?? 0) < 10) return;
     x = Math.max(0, Math.min(SX, x)); z = Math.max(0, Math.min(SZ, z));
+    // The action packet captures the caller's first-person yaw at commit
+    // time. Normalize it once here so arbitrarily large but finite angles
+    // cannot leak into transforms or the quantized snapshot representation.
+    yaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw))
+      : attacker === this.player ? attacker.yaw : attacker.yaw + Math.PI / 2;
     attacker._streak = 0;
     const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
-    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph', x, y, z });
+    const id = this._nextStrikeId++;
+    const owner = attacker === this.player ? this._hostIdx : attacker.ridx;
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph',
+      id, x, y, z, yaw, remaining: AIRSTRIKE_TELEGRAPH_T, owner });
     this._telegraph(x, y, z);
-    (this._pendingStrikes ??= []).push({ pos: new THREE.Vector3(x, y, z), owner: attacker, t: AIRSTRIKE_TELEGRAPH_T });
+    this._pendingStrikes.push({ id, pos: new THREE.Vector3(x, y, z), owner,
+      attacker, yaw, t: AIRSTRIKE_TELEGRAPH_T });
+    this._syncAirstrikeDrone(id, x, y, z, yaw, AIRSTRIKE_TELEGRAPH_T, owner);
+  }
+
+  // Create or update one local visual replica. Target coordinates are kept
+  // separate from displayTarget so 15Hz steering snapshots remain smooth at
+  // render rate. Updating an existing entry also derives a small bank from
+  // lateral target movement; no physics or authority lives in this object.
+  _syncAirstrikeDrone(id, x, y, z, yaw, remaining, owner) {
+    if (!Number.isInteger(id) || id < 0) return;
+    yaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw)) : 0;
+    remaining = THREE.MathUtils.clamp(Number.isFinite(remaining) ? remaining : 0,
+      0, AIRSTRIKE_TELEGRAPH_T);
+    let flight = this._airstrikeDrones.get(id);
+    if (!flight) {
+      const parts = makeMq9Drone();
+      const target = new THREE.Vector3(x, y, z);
+      flight = { id, ...parts, target, displayTarget: target.clone(), yaw,
+        remaining, owner, bank: 0, bankGoal: 0, expired: 0,
+        droneSfxT: 0, missileSfxT: 0, soundPos: target.clone() };
+      parts.group.rotation.order = 'YXZ';
+      this.scene.add(parts.group);
+      this._airstrikeDrones.set(id, flight);
+      sfx.at('missileLaunch', target);
+    } else {
+      const dxTarget = x - flight.target.x, dzTarget = z - flight.target.z;
+      // Right vector for forward=(cos(yaw), -sin(yaw)). Only side-to-side
+      // steering banks the aircraft; moving the target along its flight line
+      // should not make it roll.
+      const lateral = dxTarget * Math.sin(flight.yaw) + dzTarget * Math.cos(flight.yaw);
+      flight.bankGoal = THREE.MathUtils.clamp(-lateral * 0.055, -0.25, 0.25);
+      flight.target.set(x, y, z);
+      flight.yaw = yaw;
+      flight.remaining = remaining;
+      flight.owner = owner;
+      flight.expired = 0;
+    }
+    return flight;
+  }
+
+  _removeAirstrikeDrone(id) {
+    const flight = this._airstrikeDrones.get(id);
+    if (!flight) return;
+    disposeObject(flight.group);
+    this._airstrikeDrones.delete(id);
+  }
+
+  _clearAirstrikeDrones() {
+    if (!this._airstrikeDrones) return;
+    for (const flight of this._airstrikeDrones.values()) disposeObject(flight.group);
+    this._airstrikeDrones.clear();
+  }
+
+  // Render-rate motion for every mode. Clients locally lead their own
+  // steerable target with _pilotPos to avoid adding a round trip to the drone
+  // they are actively guiding; authoritative snapshots still correct it.
+  _updateAirstrikeDrones(dt) {
+    for (const [id, flight] of this._airstrikeDrones) {
+      if (this.mode === 'client') {
+        if (flight.owner === this.myIdx && this.player._fallingT > 0) {
+          const p = this.player._pilotPos;
+          const y = this.world.surface(Math.floor(p.x), Math.floor(p.z)) + 1;
+          this._syncAirstrikeDrone(id, p.x, y, p.z, flight.yaw,
+            this.player._fallingT, flight.owner);
+        } else {
+          flight.remaining = Math.max(0, flight.remaining - dt);
+        }
+      }
+      const smoothing = 1 - Math.exp(-dt * 12);
+      flight.displayTarget.lerp(flight.target, smoothing);
+      flight.bank += (flight.bankGoal - flight.bank) * (1 - Math.exp(-dt * 7));
+      flight.bankGoal *= Math.exp(-dt * 5);
+      const pose = airstrikeDronePose(flight.displayTarget.x, flight.displayTarget.y,
+        flight.displayTarget.z, flight.yaw, flight.remaining);
+      flight.group.position.set(pose.x, pose.y, pose.z);
+      flight.group.rotation.y = pose.yaw;
+      flight.group.rotation.x = flight.bank;
+      flight.propeller.rotation.x += dt * 24;
+      const progress = 1 - flight.remaining / AIRSTRIKE_TELEGRAPH_T;
+      flight.droneSfxT -= dt;
+      if (flight.droneSfxT <= 0) {
+        flight.droneSfxT += 0.13;
+        sfx.at('drone', flight.group.position, progress);
+      }
+      // The falling cell starts just after release, rises in pitch/level as
+      // it approaches, and follows the guided target rather than the plane.
+      flight.missileSfxT -= dt;
+      if (progress > 0.08 && flight.missileSfxT <= 0) {
+        flight.missileSfxT += 0.19;
+        flight.soundPos.set(flight.displayTarget.x,
+          flight.displayTarget.y + (1 - progress) * AIRSTRIKE_DRONE_ALTITUDE,
+          flight.displayTarget.z);
+        sfx.at('missile', flight.soundPos, progress);
+      }
+      if (flight.remaining <= 0) {
+        flight.expired += dt;
+        // Normally the boom event or next empty snapshot removes it first.
+        // This grace is only a lost-message safety net.
+        if (flight.expired > 1) this._removeAirstrikeDrone(id);
+      }
+    }
+  }
+
+  // Active strikes are an unconditional snapshot channel, like grenades.
+  // Reconcile the whole small list rather than inventing removal messages;
+  // this also gives a late joiner the current flyover immediately.
+  _syncAirstrikeRows(rows) {
+    if (!Array.isArray(rows)) return;
+    this._lastStrikeRows = rows.map(row => row.slice());
+    const want = new Set();
+    for (const row of rows) {
+      const [id, xq, yq, zq, yawq, millis, owner] = row;
+      want.add(id);
+      const x = THREE.MathUtils.clamp(dx(xq), 0, SX);
+      const y = THREE.MathUtils.clamp(dy(yq), 0, SY);
+      const z = THREE.MathUtils.clamp(dx(zq), 0, SZ);
+      this._syncAirstrikeDrone(id, x, y, z, da(yawq),
+        Math.max(0, millis) / 1000, owner);
+    }
+    for (const id of [...this._airstrikeDrones.keys()])
+      if (!want.has(id)) this._removeAirstrikeDrone(id);
   }
 
   // Host/solo-authoritative, re-validated here for the same reason as
@@ -1766,26 +1930,11 @@ export class Game {
     else if (p.isRemote) this.net.sendTo(p.id, { t: 'e', k: 'overcharge' });
   }
 
-  // Runs identically on host, solo, and every client that receives the
-  // broadcast above — each machine independently draws its own copy of
-  // the same marker at the same coordinates, the same way explodeAt's
-  // visual/terrain side already works on both ends of the connection.
-  // Grenades give zero warning; this is the one explosion in the game
-  // that's supposed to, so the whole point of the marker (and the delay
-  // in _confirmAirstrike above) is giving the target team a real chance
-  // to see it coming and get clear — not free, unavoidable damage.
-  // Sound + feed message only — the visual pillar this used to also
-  // create/reposition here is gone. It was built to be seen from the
-  // ground by bystanders, but the guided-fall camera shares its exact
-  // XZ position and dives straight through it, and no ordering fix
-  // reliably kept it out of that camera's view: hiding it required
-  // running strictly after every possible _telegraph() call in a given
-  // frame, but host/solo's own steering sync and a guest's incoming
-  // broadcast handling both call this function from places that run
-  // AFTER any hide check placed earlier in the frame, undoing it the
-  // instant a key was held — a flashing show/hide every single frame
-  // steering was active, not an occasional glitch. Simplest fix that's
-  // actually correct: no visual, nothing to be in the way of.
+  // The warning itself stays one-shot. Flight visuals are created separately
+  // and their moving target is carried by snapshots, so steering never
+  // retriggers three beeps or floods the feed the way a repeated telegraph
+  // would. The aircraft replaces the old vertical pillar, which occupied the
+  // guided camera's exact XZ column and could block the caller's view.
   _telegraph(x, y, z) {
     sfx.telegraph();
     this.feed('AIRSTRIKE INBOUND');
@@ -1795,12 +1944,14 @@ export class Game {
   // meant to read as a different scale of munition entirely, matching a
   // 10-kill streak's worth of buildup. Same explodeAt + editLog/'boom'
   // sync pattern as a grenade, just larger numbers throughout.
-  _airstrikeImpact(pos, owner) {
+  _airstrikeImpact(pos, owner, strikeId) {
     const R = 4.5; // visual crater radius — unchanged
-    this.explodeAt(pos.x, pos.y, pos.z, R, owner);
+    this.explodeAt(pos.x, pos.y, pos.z, R, owner, 'airstrikeImpact');
+    this._removeAirstrikeDrone(strikeId);
     if (this.mode === 'host') {
       this.editLog.push(['b', pos.x, pos.y, pos.z, R]);
-      this.net.broadcast({ t: 'e', k: 'boom', x: pos.x, y: pos.y, z: pos.z, r: R });
+      this.net.broadcast({ t: 'e', k: 'boom', x: pos.x, y: pos.y, z: pos.z,
+        r: R, strikeId });
     }
     // The gap that made "hit in/around the target should kill them" not
     // quite true: anywhere the raw damage falloff below is already
@@ -1824,10 +1975,10 @@ export class Game {
   }
 
   // Visual + terrain side of an explosion — identical on host and clients.
-  explodeAt(x, y, z, r, owner = null) {
+  explodeAt(x, y, z, r, owner = null, sound = 'explosion') {
     const pos = new THREE.Vector3(x, y, z);
     this.effects.explode(pos);
-    sfx.explosion();
+    sfx.at(sound, pos);
     const removed = this.world.carve(Math.floor(x), Math.floor(y), Math.floor(z), r);
     this.effects.blockBurst(removed);
     this.effects.addShake(Math.max(0, 0.5 - pos.distanceTo(this.player.body.pos) * 0.012));
@@ -2127,7 +2278,7 @@ export class Game {
       // applies if this player actually has a strike in flight — an
       // unrelated or stale field is silently ignored, not trusted at all.
       if (d.strike && Number.isFinite(d.strike.x) && Number.isFinite(d.strike.z) && this._pendingStrikes) {
-        const s = this._pendingStrikes.find(s => s.owner === p);
+        const s = this._pendingStrikes.find(s => s.attacker === p);
         if (s) {
           const sx = Math.max(0, Math.min(SX, d.strike.x)), sz = Math.max(0, Math.min(SZ, d.strike.z));
           const sElapsed = Math.max(1 / 30, this.time - (s._lastSteerT ?? this.time));
@@ -2157,7 +2308,8 @@ export class Game {
       // request, plus this message never carries an o/d origin+direction
       // pair the way shoot/dig/place/nade do.
       if (d.k === 'strike') {
-        if (Number.isFinite(d.x) && Number.isFinite(d.z)) this._confirmAirstrike(p, d.x, d.z);
+        if ([d.x, d.z, d.yaw].every(Number.isFinite))
+          this._confirmAirstrike(p, d.x, d.z, d.yaw);
         return;
       }
       // Overcharge carries no payload at all — "turn it on," nothing to
@@ -2344,6 +2496,24 @@ export class Game {
       }
       this.bots.push(bot);
     }
+    // Airstrike rows are unconditional full state, so a strike already in
+    // flight survives the baton pass too. Damage attribution is retained
+    // when its caller survived; if the departed host called it, the blast
+    // still lands but has no living attacker object to credit.
+    this._pendingStrikes = [];
+    let maxStrikeId = 0;
+    for (const row of this._lastStrikeRows) {
+      const [id, xq, yq, zq, yawq, millis, owner] = row;
+      const attacker = owner === oldIdx ? this.player
+        : [...this.remote.values()].find(p => p.ridx === owner) ?? null;
+      const pos = new THREE.Vector3(dx(xq), dy(yq), dx(zq));
+      const yaw = da(yawq), t = Math.max(0, millis) / 1000;
+      if (t <= 0) continue;
+      this._pendingStrikes.push({ id, pos, owner, attacker, yaw, t });
+      this._syncAirstrikeDrone(id, pos.x, pos.y, pos.z, yaw, t, owner);
+      maxStrikeId = Math.max(maxStrikeId, id);
+    }
+    this._nextStrikeId = Math.max(this._nextStrikeId, maxStrikeId + 1);
     this._fullP.clear();
     this._fullB.clear();
     // Snapshots record that a flag is carried, not by whom — reattach it to
@@ -2491,6 +2661,11 @@ export class Game {
         this.hill.contested ? 1 : 0, this.hill.capTeam],
       c: [Math.round(this.captures.green * 10) / 10, Math.round(this.captures.blue * 10) / 10],
       g: this.grenades.map(g => pos(g.pos)),
+      // Small unconditional channel: [id, target xyz, approach yaw,
+      // remaining milliseconds, caller roster index]. Unlike player rows it
+      // must not be interest-culled — the warning aircraft is gameplay intel.
+      a: this._pendingStrikes.map(s => [s.id, ...pos(s.pos), qa(s.yaw),
+        Math.max(0, Math.round(s.t * 1000)), s.owner]),
       o: this.over ? 1 : 0,
     };
   }
@@ -2535,7 +2710,8 @@ export class Game {
       if (!conn.open) continue;
       if (conn.dataChannel?.bufferedAmount > 64 * 1024) continue;
       const sent = conn._sentRows ??= { p: new Map(), b: new Map() };
-      const out = { t: 's', f: snap.f, h: snap.h, c: snap.c, g: snap.g, o: snap.o };
+      const out = { t: 's', f: snap.f, h: snap.h, c: snap.c, g: snap.g,
+        a: snap.a, o: snap.o };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
       const viewer = this.remote.get(id);
@@ -2659,6 +2835,7 @@ export class Game {
     // maps — iterated whole below — are the real picture. If the host drops,
     // promoteToHost rebuilds the match from exactly these.
     mergeSnapshot(this._fullP, this._fullB, d);
+    this._syncAirstrikeRows(d.a ?? []);
     const want = new Set();
     for (const [idx, r] of this._fullP) {
       const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades] = r;
@@ -2776,8 +2953,10 @@ export class Game {
         // still tiny relative to the 256x256 map, so the original intent
         // (can't crater the whole map) still holds.
         const r = Math.min(Math.max(d.r ?? 0, 0), 6);
-        this.explodeAt(d.x, d.y, d.z, r);
+        this.explodeAt(d.x, d.y, d.z, r, null,
+          d.strikeId !== undefined ? 'airstrikeImpact' : 'explosion');
         this.editLog.push(['b', d.x, d.y, d.z, r]);
+        if (d.strikeId !== undefined) this._removeAirstrikeDrone(d.strikeId);
         break;
       }
       case 'telegraph': {
@@ -2787,6 +2966,7 @@ export class Game {
         const y = Math.max(0, Math.min(SY, d.y ?? 0));
         const z = Math.max(0, Math.min(SZ, d.z ?? 0));
         this._telegraph(x, y, z);
+        this._syncAirstrikeDrone(d.id, x, y, z, d.yaw, d.remaining, d.owner);
         break;
       }
       case 'overcharge':
@@ -2953,7 +3133,12 @@ export class Game {
       }
       if (p.alive && b.onGround) {
         p._stepAcc = (p._stepAcc ?? 0) + moved;
-        if (p._stepAcc >= 2.2) { p._stepAcc = 0; sfx.step(0.25); this._footDust(b); }
+        if (p._stepAcc >= 2.2) {
+          p._stepAcc = 0;
+          const surface = this.world.get(Math.floor(b.pos.x), Math.floor(b.pos.y) - 1,
+            Math.floor(b.pos.z));
+          sfx.step(0.25, surface); this._footDust(b);
+        }
       }
     }
     if (this.player.alive) this.player.update(dt);
@@ -2970,9 +3155,9 @@ export class Game {
       // than a new send loop: while a called-in airstrike is falling,
       // this also reports where it's CURRENTLY being steered to, so the
       // host can update the real, authoritative impact point and
-      // re-telegraph it for everyone else watching — the marker has to
-      // actually track where the missile is heading, or the telegraph
-      // stops meaning anything the moment steering is added.
+      // publish it in the next authoritative snapshot. The drone flight line
+      // shifts with this live target, so its pass remains useful warning intel
+      // instead of pointing at the original click after steering begins.
       if (p._fallingT > 0) out.strike = { x: p._pilotPos.x, z: p._pilotPos.z };
       this.net.send(out);
     }
@@ -2982,6 +3167,7 @@ export class Game {
       m.visible = !!g;
       if (g) m.position.set(dx(g[0]), dy(g[1]), dx(g[2]));
     }
+    this._updateAirstrikeDrones(dt);
     this._shakeCamera();
     this.effects.update(dt);
   }
@@ -3022,24 +3208,25 @@ export class Game {
       for (let i = this._pendingStrikes.length - 1; i >= 0; i--) {
         const s = this._pendingStrikes[i];
         // The host/solo's OWN steering never crosses the wire at all —
-        // The host/solo's OWN steering never crosses the wire at all —
         // there's no message for it to arrive on, unlike a guest's
         // (handled entirely in the 't:s' uplink case above). Synced
         // directly from the trusted local player here instead, no
         // validation needed since it was never untrusted input in the
-        // first place. No throttle needed either now: this used to also
-        // re-telegraph (broadcast + re-trigger the warning sound and
-        // feed message) on every change, which is why it was change-
-        // gated and rate-limited in the first place. With the marker
-        // gone and nothing left to re-telegraph, this is just a cheap
-        // position sync — safe to run every frame unconditionally.
-        if (s.owner === this.player && this.player._fallingT > 0) {
+        // first place. The ordinary 15Hz snapshot cadence handles observer
+        // replication, while this trusted local copy can update each frame.
+        if (s.attacker === this.player && this.player._fallingT > 0) {
           const np = this.player._pilotPos;
           s.pos.x = np.x; s.pos.z = np.z;
           s.pos.y = this.world.surface(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
         }
         s.t -= dt;
-        if (s.t <= 0) { this._airstrikeImpact(s.pos, s.owner); this._pendingStrikes.splice(i, 1); }
+        if (s.t <= 0) {
+          this._airstrikeImpact(s.pos, s.attacker, s.id);
+          this._pendingStrikes.splice(i, 1);
+        } else {
+          this._syncAirstrikeDrone(s.id, s.pos.x, s.pos.y, s.pos.z,
+            s.yaw, s.t, s.owner);
+        }
       }
     }
     // RemotePlayer has no update(dt) of its own the way Player does — its
@@ -3056,6 +3243,7 @@ export class Game {
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
     for (const b of this.bots) b.update(dt);
+    this._updateAirstrikeDrones(dt);
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.
@@ -3083,8 +3271,10 @@ export class Game {
       e._stepAcc += moved;
       if (e._stepAcc >= 2.2) {
         e._stepAcc = 0;
-        if (e === this.player) sfx.step(0.25);     // your own feet: centered, quieter than everyone else's
-        else sfx.at('step', b.pos);              // everyone else: placed
+        const surface = this.world.get(Math.floor(b.pos.x), Math.floor(b.pos.y) - 1,
+          Math.floor(b.pos.z));
+        if (e === this.player) sfx.step(0.25, surface); // your own feet: centered, quieter
+        else sfx.at('step', b.pos, 1, surface);         // everyone else: placed
         this._footDust(b);
       }
     }

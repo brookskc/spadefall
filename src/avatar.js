@@ -103,7 +103,8 @@ export class Avatar {
       this._stepAcc = (this._stepAcc ?? 0) + Math.hypot(nx - this._px, nz - this._pz);
       if (this._stepAcc >= 2.2) {
         this._stepAcc = 0;
-        sfx.at('step', this.pos);
+        const surface = world?.get(Math.floor(nx), Math.floor(ny) - 1, Math.floor(nz)) ?? 1;
+        sfx.at('step', this.pos, 1, surface);
         // Closes the one real gap in muzzle-flash/footstep-dust coverage:
         // a guest's own view of everyone ELSE stepping renders through
         // here, not through either of the two sites in game.js — those

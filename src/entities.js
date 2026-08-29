@@ -1,6 +1,7 @@
 // entities.js — voxel AABB physics and the little blocky soldiers.
 import * as THREE from 'three';
 import { SEA, PALETTE, boxFaceTints } from './world.js';
+import { getGfxLevel } from './settings.js';
 
 const GRAVITY = -30;
 
@@ -276,11 +277,93 @@ export function retintVoxelBoxes(root) {
   });
 }
 
+// Block-built MQ-9 silhouette used by the airstrike flyover. The aircraft
+// points along local +X, which matches the player's world-space forward
+// vector after Game rotates the group by player yaw. Keeping every visible
+// part as a face-tinted box makes it belong to the same untextured voxel
+// language as the terrain, soldiers, and weapons; the stepped wing sweep and
+// tail geometry carry the detail instead of a painted texture.
+export function makeMq9Drone() {
+  const group = new THREE.Group();
+  group.name = 'MQ-9 Reaper';
+  const light = new THREE.MeshBasicMaterial({ color: 0xb8bdba, vertexColors: true });
+  const mid = new THREE.MeshBasicMaterial({ color: 0x7b817f, vertexColors: true });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x292d2e, vertexColors: true });
+  const glass = new THREE.MeshBasicMaterial({ color: 0x31454c, vertexColors: true });
+  const olive = new THREE.MeshBasicMaterial({ color: 0x4b5142, vertexColors: true });
+  const box = (w, h, d, mat, x, y, z, parent = group) => {
+    const mesh = new THREE.Mesh(faceTintedBox(w, h, d), mat);
+    mesh.position.set(x, y, z);
+    parent.add(mesh);
+    return mesh;
+  };
+
+  // Long, stepped fuselage and chin-mounted sensor ball.
+  box(4.6, 0.72, 0.78, light, 0.15, 0, 0);
+  box(2.0, 0.54, 0.58, light, 3.25, -0.03, 0);
+  box(1.05, 0.36, 0.42, mid, 4.65, -0.06, 0);
+  box(0.58, 0.52, 0.58, mid, 3.25, -0.58, 0);
+  box(0.32, 0.28, 0.32, glass, 3.48, -0.69, 0);
+  box(2.6, 0.5, 0.62, light, -3.35, 0.02, 0);
+  box(0.95, 0.38, 0.5, mid, -5.02, 0.02, 0);
+
+  // High-aspect-ratio wings, swept backward in chunky stages.
+  box(2.25, 0.18, 5.4, light, -0.25, 0.12, 0);
+  box(1.72, 0.16, 4.2, light, -0.68, 0.1, 4.75);
+  box(1.72, 0.16, 4.2, light, -0.68, 0.1, -4.75);
+  box(1.2, 0.14, 3.25, mid, -1.1, 0.08, 8.45);
+  box(1.2, 0.14, 3.25, mid, -1.1, 0.08, -8.45);
+  box(0.52, 0.2, 0.62, dark, -1.1, 0.07, 10.35);
+  box(0.52, 0.2, 0.62, dark, -1.1, 0.07, -10.35);
+
+  // V-tail slabs. Rotating long Z boxes around the fuselage axis produces
+  // the Reaper's unmistakable downward-canted tail without smooth geometry.
+  const tailL = box(1.5, 0.16, 3.0, light, -4.25, 0.28, 1.25);
+  const tailR = box(1.5, 0.16, 3.0, light, -4.25, 0.28, -1.25);
+  tailL.rotation.x = -0.48;
+  tailR.rotation.x = 0.48;
+
+  // Two under-wing munitions on each side add silhouette detail that still
+  // reads when the aircraft is mostly seen from below.
+  for (const z of [-5.6, -3.45, 3.45, 5.6]) {
+    box(1.6, 0.22, 0.25, olive, 0.25, -0.42, z);
+    box(0.32, 0.34, 0.42, dark, -0.62, -0.42, z);
+  }
+
+  // Rear pusher propeller. This is the only animated subassembly; the rest
+  // remains a cheap rigid group regardless of graphics preset.
+  box(0.45, 0.42, 0.42, dark, -5.65, 0.03, 0);
+  const propeller = new THREE.Group();
+  propeller.position.set(-5.93, 0.03, 0);
+  for (let i = 0; i < 3; i++) {
+    const blade = box(0.12, 0.18, 2.3, dark, 0, 0, 0, propeller);
+    blade.rotation.x = i * Math.PI / 3;
+  }
+  group.add(propeller);
+
+  // Tiny navigation lights: colored blocks, not emissive sprites, so they
+  // keep the restrained voxel look and cost no per-frame light sources.
+  const red = new THREE.MeshBasicMaterial({ color: 0xb33a32, vertexColors: true });
+  const green = new THREE.MeshBasicMaterial({ color: 0x3f9b58, vertexColors: true });
+  box(0.3, 0.2, 0.34, red, -1.1, 0.13, 10.68);
+  box(0.3, 0.2, 0.34, green, -1.1, 0.13, -10.68);
+
+  return { group, propeller };
+}
+
 export function makeSoldier(teamColor) {
   const g = new THREE.Group();
+  const gfx = getGfxLevel();
+  const detail = gfx !== 'low';
+  const fineDetail = gfx === 'high';
   const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
   const cloth = new THREE.MeshBasicMaterial({ color: teamColor, vertexColors: true });
-  const dark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
+  const armor = new THREE.MeshBasicMaterial({ color: 0x4b504d, vertexColors: true });
+  const armorDark = new THREE.MeshBasicMaterial({ color: 0x303533, vertexColors: true });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x202426, vertexColors: true });
+  const metal = new THREE.MeshBasicMaterial({ color: 0x666d6b, vertexColors: true });
+  const lens = new THREE.MeshBasicMaterial({ color: 0x263b42, vertexColors: true });
+  const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
   const box = (w, h, d, mat, x, y, z, parent = g) => {
     const m = new THREE.Mesh(faceTintedBox(w, h, d), mat);
     m.position.set(x, y, z);
@@ -288,42 +371,169 @@ export function makeSoldier(teamColor) {
     return m;
   };
 
-  const legL = box(0.22, 0.6, 0.24, dark,  -0.14, 0.3, 0);
-  const legR = box(0.22, 0.6, 0.24, dark,   0.14, 0.3, 0);
-  legL.geometry.translate(0, -0.3, 0); legL.position.y = 0.6;
-  legR.geometry.translate(0, -0.3, 0); legR.position.y = 0.6;
-  const torso = box(0.55, 0.62, 0.32, cloth, 0, 0.92, 0);
-  const armL = box(0.16, 0.55, 0.18, cloth, -0.36, 1.18, 0);
-  const armR = box(0.16, 0.55, 0.18, cloth,  0.36, 1.18, 0);
-  armL.geometry.translate(0, -0.26, 0);
-  armR.geometry.translate(0, -0.26, 0);
-  const head = box(0.34, 0.34, 0.34, skin, 0, 1.42, 0);
-  const brim = box(0.4, 0.12, 0.4, cloth, 0, 1.62, 0); // helmet brim
-  const gun = box(0.09, 0.12, 0.7, dark, 0.2, 1.1, -0.35);
-  // The spade rides in the right hand too, shown only while digging.
-  const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
+  // Legs pivot at the hips. Splitting boot, trouser, and knee pad gives the
+  // walk cycle readable joints without adding bones or changing the hitbox.
+  const leg = x => {
+    const root = new THREE.Group();
+    root.position.set(x, 0.69, 0);
+    box(0.25, 0.34, 0.27, cloth, 0, -0.17, 0, root);
+    box(0.23, 0.28, 0.24, cloth, 0, -0.47, 0, root);
+    box(0.25, 0.14, 0.36, dark, 0, -0.62, -0.055, root);
+    if (detail) box(0.24, 0.12, 0.08, armorDark, 0, -0.36, -0.145, root);
+    g.add(root);
+    return root;
+  };
+  const legL = leg(-0.16), legR = leg(0.16);
+
+  // The torso is a layered uniform + plate carrier rather than one team-
+  // colored cube. Keep the neutral plate narrower than the uniform and use a
+  // broad team-color panel on its face: at combat distance the old dark belt,
+  // twin pouches, gloves, and gun merged into one black mass.
+  const torso = new THREE.Group();
+  torso.position.y = 0.70;
+  box(0.52, 0.25, 0.31, cloth, 0, 0.12, 0, torso);
+  box(0.62, 0.38, 0.35, cloth, 0, 0.42, 0, torso);
+  box(0.49, 0.31, 0.38, armor, 0, 0.39, -0.035, torso);
+  box(0.34, 0.17, 0.026, cloth, 0, 0.42, -0.232, torso); // readable team panel
+  box(0.58, 0.10, 0.37, armorDark, 0, 0.03, 0, torso); // belt
+
+  // Class identity remains attached to the torso even while the soldier has
+  // a spade, block, or grenade out. The weapon is still the primary read;
+  // these restrained rear/side shapes make the silhouette survive occlusion
+  // without painting class information onto the uniform.
+  const rifleKit = new THREE.Group();
+  box(0.36, 0.38, 0.18, armor, 0, 0.36, 0.25, rifleKit);
+  if (detail) {
+    box(0.28, 0.09, 0.21, armorDark, 0, 0.58, 0.21, rifleKit);
+    box(0.05, 0.34, 0.035, armorDark, -0.11, 0.36, 0.35, rifleKit);
+    box(0.05, 0.34, 0.035, armorDark, 0.11, 0.36, 0.35, rifleKit);
+  }
+
+  const smgKit = new THREE.Group();
+  box(0.27, 0.24, 0.14, armor, 0, 0.34, 0.23, smgKit); // compact assault pack
+  box(0.10, 0.15, 0.12, armorDark, -0.27, 0.09, 0.18, smgKit);
+  box(0.10, 0.15, 0.12, armorDark, 0.27, 0.09, 0.18, smgKit);
+  if (detail) {
+    for (const x of [-0.11, 0, 0.11])
+      box(0.055, 0.14, 0.035, metal, x, 0.34, -0.238, smgKit);
+  }
+
+  const sniperKit = new THREE.Group();
+  box(0.25, 0.50, 0.14, armor, 0, 0.38, 0.24, sniperKit); // tall, narrow pack
+  box(0.36, 0.11, 0.17, armorDark, 0, 0.10, 0.24, sniperKit); // bedroll
+  if (detail) {
+    const strap = box(0.05, 0.46, 0.026, armorDark, 0.09, 0.40, -0.239, sniperKit);
+    strap.rotation.z = -0.38;
+  }
+  if (fineDetail)
+    box(0.032, 0.38, 0.032, metal, 0.14, 0.74, 0.27, sniperKit); // radio antenna
+  torso.add(rifleKit, smgKit, sniperKit);
+  g.add(torso);
+
+  // Articulated arms: sleeves, armored forearms, and gloves share one
+  // shoulder pivot apiece, so they still work with the old walk animation.
+  const arm = x => {
+    const root = new THREE.Group();
+    root.position.set(x, 1.26, 0);
+    box(0.18, 0.30, 0.21, cloth, 0, -0.15, 0, root);
+    box(0.17, 0.25, 0.19, armor, 0, -0.42, 0, root);
+    box(0.18, 0.14, 0.20, dark, 0, -0.61, 0, root);
+    if (detail) box(0.08, 0.13, 0.05, cloth, x < 0 ? -0.11 : 0.11, -0.12, -0.12, root);
+    g.add(root);
+    return root;
+  };
+  const armL = arm(-0.39), armR = arm(0.39);
+  armL.rotation.z = 0.25;
+  armR.rotation.z = -0.25;
+
+  // Keep the face as one clean voxel plane. The earlier eyes/nose/chin line
+  // read as a smiley face at gameplay distance and fought the deliberately
+  // simple, anonymous soldier style. Helmet parts remain in this articulated
+  // assembly so they still move together during crouch/death.
+  const head = new THREE.Group();
+  head.position.y = 1.43;
+  box(0.37, 0.35, 0.35, skin, 0, 0, 0, head);
+  box(0.39, 0.18, 0.37, armor, 0, 0.24, 0.01, head);
+  const brim = box(0.45, 0.07, 0.43, armorDark, 0, 0.15, -0.02, head);
+  box(0.40, 0.06, 0.39, cloth, 0, 0.20, 0, head); // team helmet band
+  g.add(head);
+
+  // World-model guns are compact voxel builds in the same family as the
+  // first-person redesign. Only one child assembly is visible at a time, so
+  // hidden alternatives cost no draw calls.
+  const gun = new THREE.Group();
+  gun.position.set(0.10, 1.02, -0.28);
+  const rifle = new THREE.Group(), smg = new THREE.Group(), sniper = new THREE.Group();
+  gun.add(rifle, smg, sniper);
+  const wp = (parent, w, h, d, mat, x, y, z) => box(w, h, d, mat, x, y, z, parent);
+  // Rifle: full stock, receiver, magazine, barrel, and low sights.
+  wp(rifle, 0.19, 0.18, 0.44, dark, 0, 0, -0.10);
+  wp(rifle, 0.21, 0.20, 0.30, armorDark, 0, 0.01, 0.27);
+  wp(rifle, 0.07, 0.07, 0.50, metal, 0, 0.02, -0.56);
+  wp(rifle, 0.11, 0.10, 0.13, dark, 0, 0.02, -0.86);
+  wp(rifle, 0.14, 0.25, 0.16, armorDark, 0, -0.18, -0.10);
+  if (detail) wp(rifle, 0.08, 0.09, 0.08, metal, 0, 0.14, -0.20);
+  // SMG: short barrel, tall box magazine, compact folding stock.
+  wp(smg, 0.22, 0.22, 0.38, dark, 0, 0, -0.08);
+  wp(smg, 0.10, 0.10, 0.24, metal, 0, 0.01, -0.38);
+  wp(smg, 0.14, 0.28, 0.15, armorDark, 0, -0.20, -0.08);
+  wp(smg, 0.08, 0.08, 0.34, armorDark, 0, 0.03, 0.28);
+  wp(smg, 0.20, 0.08, 0.10, armorDark, 0, 0.03, 0.48);
+  wp(smg, 0.09, 0.09, 0.08, metal, 0, 0.16, -0.10);
+  // Sniper: long floated barrel, stock, bipod block, and raised scope.
+  wp(sniper, 0.19, 0.17, 0.48, dark, 0, 0, -0.08);
+  wp(sniper, 0.24, 0.22, 0.38, armorDark, 0, 0.01, 0.34);
+  wp(sniper, 0.06, 0.06, 0.78, metal, 0, 0.02, -0.69);
+  wp(sniper, 0.11, 0.10, 0.18, dark, 0, 0.02, -1.17);
+  wp(sniper, 0.15, 0.15, 0.45, lens, 0, 0.20, -0.13);
+  wp(sniper, 0.20, 0.19, 0.08, dark, 0, 0.20, -0.34);
+  wp(sniper, 0.20, 0.19, 0.08, dark, 0, 0.20, 0.06);
+  wp(sniper, 0.16, 0.22, 0.16, armorDark, 0, -0.17, -0.05);
+  g.add(gun);
+
+  // The spade and carried utility items occupy the same right-hand zone.
   const spade = new THREE.Group();
-  box(0.05, 0.05, 0.55, wood, 0, 0, -0.18, spade);   // handle
-  box(0.17, 0.22, 0.04, dark, 0, 0, -0.48, spade);   // blade
-  spade.position.set(0.2, 1.1, -0.2);
+  box(0.06, 0.06, 0.62, wood, 0, 0, -0.22, spade);
+  box(0.24, 0.27, 0.06, metal, 0, -0.03, -0.58, spade);
+  box(0.22, 0.06, 0.07, dark, 0, 0, 0.12, spade);
+  spade.position.set(0.20, 1.02, -0.18);
   spade.visible = false;
   g.add(spade);
+  const block = new THREE.Group();
+  box(0.34, 0.34, 0.34, cloth, 0, 0, 0, block);
+  box(0.22, 0.06, 0.36, armorDark, 0, 0.08, 0, block);
+  block.position.set(0.20, 0.88, -0.38); block.visible = false; g.add(block);
+  const grenade = new THREE.Group();
+  box(0.22, 0.28, 0.22, armorDark, 0, 0, 0, grenade);
+  box(0.12, 0.08, 0.12, metal, 0, 0.18, 0, grenade);
+  box(0.06, 0.12, 0.14, dark, 0.08, 0.22, 0, grenade);
+  grenade.position.set(0.22, 0.86, -0.35); grenade.visible = false; g.add(grenade);
+
   const blob = blobShadow();
   g.add(blob);
 
-  return { group: g, legL, legR, armL, armR, head, torso, gun, spade, blob, brim };
+  const parts = { group: g, legL, legR, armL, armR, head, torso, gun,
+    rifle, smg, sniper, rifleKit, smgKit, sniperKit,
+    spade, block, grenade, blob, brim };
+  setSoldierTool(parts, 0);
+  return parts;
 }
 
 export function setSoldierTool(parts, tool) {
   const gun = parts?.gun, spade = parts?.spade;
   if (!gun || !spade) return;
   spade.visible = tool === 2;
+  parts.block.visible = tool === 3;
+  parts.grenade.visible = tool === 4;
   gun.visible = tool === 0 || tool === 1 || tool === 5;
-  if (!gun.visible) return;
-  const length = tool === 1 ? 0.72 : tool === 5 ? 1.34 : 1;
-  gun.scale.z = length;
-  gun.position.z = -0.35 - (length - 1) * 0.22;
-  gun.scale.y = tool === 5 ? 0.82 : tool === 1 ? 1.12 : 1;
+  parts.rifle.visible = tool === 0;
+  parts.smg.visible = tool === 1;
+  parts.sniper.visible = tool === 5;
+  if (tool === 0 || tool === 1 || tool === 5) parts.gunClass = tool;
+  const gunClass = parts.gunClass ?? 0;
+  parts.rifleKit.visible = gunClass === 0;
+  parts.smgKit.visible = gunClass === 1;
+  parts.sniperKit.visible = gunClass === 5;
 }
 
 // A floating callsign: crisp canvas sprite riding above the helmet. It's an
@@ -351,13 +561,15 @@ export function makeNametag(name, team) {
 export function setCrouch(parts, on) {
   if (!!parts.crouched === on) return;
   parts.crouched = on;
-  parts.legL.scale.y = parts.legR.scale.y = on ? 0.5 : 1;
-  parts.legL.position.y = parts.legR.position.y = on ? 0.3 : 0.6;
-  parts.torso.position.y = on ? 0.62 : 0.92;
-  parts.armL.position.y = parts.armR.position.y = on ? 0.88 : 1.18;
-  parts.head.position.y = on ? 1.12 : 1.42;
-  parts.brim.position.y = on ? 1.32 : 1.62;
-  parts.gun.position.y = on ? 0.8 : 1.1;
+  parts.legL.scale.y = parts.legR.scale.y = on ? 0.56 : 1;
+  parts.legL.position.y = parts.legR.position.y = on ? 0.39 : 0.69;
+  parts.torso.position.y = on ? 0.40 : 0.70;
+  parts.armL.position.y = parts.armR.position.y = on ? 0.96 : 1.26;
+  parts.head.position.y = on ? 1.13 : 1.43;
+  parts.gun.position.y = on ? 0.72 : 1.02;
+  parts.spade.position.y = on ? 0.72 : 1.02;
+  parts.block.position.y = on ? 0.58 : 0.88;
+  parts.grenade.position.y = on ? 0.56 : 0.86;
 }
 
 // Shared walk-cycle animation for player-less bodies.
@@ -366,8 +578,15 @@ export function animateSoldier(parts, speed, t) {
   const s = Math.sin(t * 9) * swing;
   parts.legL.rotation.x = s;
   parts.legR.rotation.x = -s;
-  parts.armL.rotation.x = -s * 0.8;
-  parts.armR.rotation.x = s * 0.8;
+  // Armed soldiers keep both hands pitched toward the weapon; an exposed
+  // spade/utility item relaxes back into the stronger opposing-arm walk.
+  if (parts.gun.visible) {
+    parts.armL.rotation.x = 0.52 - s * 0.16;
+    parts.armR.rotation.x = 0.62 + s * 0.16;
+  } else {
+    parts.armL.rotation.x = -s * 0.8;
+    parts.armR.rotation.x = s * 0.8;
+  }
 }
 
 // Death tumble, t seconds since the killing blow: keel over backward around

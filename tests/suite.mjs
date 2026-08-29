@@ -8,11 +8,13 @@ import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapsForMode } from '../src/mapgen.js';
-import { Body } from '../src/entities.js';
-import { mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
+import { Body, animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
+  setCrouch, setSoldierTool } from '../src/entities.js';
+import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
 import { chooseTeam, normalizeDirection, parseSpawnRow, spawnRow,
   validateMovementReport } from '../src/multiplayer.js';
 import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
+import { sfx, voxelSurface } from '../src/audio.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -207,6 +209,21 @@ function hostileInputTests() {
 }
 
 // ---------------------------------------------------------------------------
+function audioPaletteTests() {
+  group('audio: voxel palette and gameplay coverage');
+  const required = ['rifle', 'smg', 'sniper', 'reloadStart', 'reloadEject',
+    'reloadInsert', 'reloadChamber', 'swing', 'dig', 'spadeHit', 'step',
+    'drone', 'missileLaunch', 'missile', 'explosion', 'airstrikeImpact'];
+  ok('every gameplay sound entry is callable', required.every(k => typeof sfx[k] === 'function'));
+  ok('terrain IDs resolve to distinct soft/earth/sand/stone/built voices',
+    JSON.stringify([1, 2, 3, 4, 5, 6, 7].map(voxelSurface)) ===
+      '["soft","earth","sand","stone","built","built","soft"]');
+  ok('air swings and voxel impacts are separate cues', sfx.swing !== sfx.dig);
+  ok('grenades and predator missiles have separate impact cues',
+    sfx.explosion !== sfx.airstrikeImpact);
+}
+
+// ---------------------------------------------------------------------------
 function multiplayerRuleTests() {
   group('multiplayer authority rules');
   ok('preferred team is honored while it has capacity',
@@ -259,6 +276,103 @@ function damageDirectionTests() {
     close(Math.abs(relativeBearing(0, 10, 10, 0, 10)), Math.PI));
   ok('bearing follows a rotated player view',
     close(relativeBearing(Math.PI / 2, 10, 10, 10, 0), 0));
+}
+
+// ---------------------------------------------------------------------------
+function airstrikeDroneTests() {
+  group('airstrike MQ-9: model and flight path');
+  const startEast = airstrikeDronePose(100, 20, 120, 0, 3);
+  const endEast = airstrikeDronePose(100, 20, 120, 0, 0);
+  ok('yaw 0 approaches from west and exits east',
+    startEast.x === 22 && startEast.z === 120 && endEast.x === 110 && endEast.z === 120);
+  const startNorth = airstrikeDronePose(100, 20, 120, Math.PI / 2, 3);
+  const endNorth = airstrikeDronePose(100, 20, 120, Math.PI / 2, 0);
+  ok('yaw PI/2 follows player north along -Z',
+    Math.abs(startNorth.z - 198) < 1e-9 && Math.abs(endNorth.z - 110) < 1e-9);
+  ok('aircraft holds a terrain-relative overhead altitude', startEast.y === 43);
+  const overTarget = airstrikeDronePose(100, 20, 120, 0, 3 * (1 - 78 / 88));
+  ok('aircraft crosses the live target shortly before impact', Math.abs(overTarget.x - 100) < 1e-9);
+
+  const mq9 = makeMq9Drone();
+  let meshes = 0;
+  mq9.group.traverse(o => { if (o.isMesh) meshes++; });
+  ok('MQ-9 is a detailed voxel assembly', meshes >= 25, `${meshes} box meshes`);
+  ok('MQ-9 exposes its animated pusher propeller', mq9.propeller.parent === mq9.group);
+  disposeObject(mq9.group);
+
+  ok('strike requests require a finite captured yaw',
+    validClientMessage({ t: 'a', k: 'strike', x: 100, z: 120, yaw: 0 })
+      && !validClientMessage({ t: 'a', k: 'strike', x: 100, z: 120 }));
+  ok('airstrike telegraph metadata passes the server trust boundary', validServerMessage({
+    t: 'e', k: 'telegraph', id: 7, x: 100, y: 20, z: 120,
+    yaw: 0, remaining: 3, owner: 2,
+  }));
+  const strikeSnapshot = { t: 's', p: [], b: [], c: [0, 0], g: [],
+    a: [[7, qx(100), qy(20), qx(120), qa(0), 2500, 2]] };
+  ok('active-strike snapshot rows pass validation', validServerMessage(strikeSnapshot));
+  ok('invalid active-strike timers are rejected', !validServerMessage({
+    ...strikeSnapshot, a: [[7, qx(100), qy(20), qx(120), qa(0), 9000, 2]],
+  }));
+}
+
+// ---------------------------------------------------------------------------
+function soldierModelTests() {
+  group('voxel soldier: articulated model and class silhouettes');
+  const p = makeSoldier(0x4e8b57);
+  let meshes = 0, visibleMeshes = 0;
+  p.group.traverse(o => {
+    if (!o.isMesh) return;
+    meshes++;
+    if (o.visible && o.parent?.visible !== false) visibleMeshes++;
+  });
+  ok('soldier is a detailed articulated assembly', meshes >= 55, `${meshes} box meshes`);
+  ok('rifle is the default world-model weapon and equipment kit', p.gun.visible && p.rifle.visible
+    && !p.smg.visible && !p.sniper.visible && p.rifleKit.visible
+    && !p.smgKit.visible && !p.sniperKit.visible);
+  setSoldierTool(p, 1);
+  ok('SMG swaps to its own compact model', p.gun.visible && p.smg.visible
+    && !p.rifle.visible && !p.sniper.visible && p.smgKit.visible
+    && !p.rifleKit.visible && !p.sniperKit.visible);
+  setSoldierTool(p, 5);
+  ok('sniper swaps to its own long model', p.gun.visible && p.sniper.visible
+    && !p.rifle.visible && !p.smg.visible && p.sniperKit.visible
+    && !p.rifleKit.visible && !p.smgKit.visible);
+  setSoldierTool(p, 3);
+  ok('block tool replaces the firearm in-hand', !p.gun.visible && p.block.visible
+    && !p.grenade.visible && !p.spade.visible);
+  ok('class equipment remains while a utility tool is held', p.sniperKit.visible
+    && !p.rifleKit.visible && !p.smgKit.visible);
+  setSoldierTool(p, 4);
+  ok('grenade tool has a dedicated carried model', !p.gun.visible && p.grenade.visible
+    && !p.block.visible);
+  setSoldierTool(p, 0);
+  animateSoldier(p, 5, 0.7);
+  ok('armed gait keeps both arms pitched toward the weapon',
+    p.armL.rotation.x > 0.3 && p.armR.rotation.x > 0.3);
+  setCrouch(p, true);
+  ok('crouch moves the complete head assembly as one unit', p.head.position.y === 1.13);
+  setCrouch(p, false);
+  const bounds = new THREE.Box3().setFromObject(p.group);
+  ok('standing model stays aligned to the gameplay body height',
+    bounds.min.y >= -0.01 && bounds.max.y <= 1.8,
+    `y=${bounds.min.y.toFixed(2)}..${bounds.max.y.toFixed(2)}`);
+  ok('default visible complexity remains bounded', visibleMeshes < 45,
+    `${visibleMeshes} visible box meshes`);
+  disposeObject(p.group);
+
+  const hadStorage = 'localStorage' in globalThis;
+  const priorStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: key => key === 'tos.gfx' ? 'low' : null };
+  const low = makeSoldier(0x4e8b57);
+  let lowVisible = 0;
+  low.group.traverse(o => {
+    if (o.isMesh && o.visible && o.parent?.visible !== false) lowVisible++;
+  });
+  ok('low graphics removes only nonessential soldier detail',
+    lowVisible <= visibleMeshes - 8, `${visibleMeshes} -> ${lowVisible} visible meshes`);
+  disposeObject(low.group);
+  if (hadStorage) globalThis.localStorage = priorStorage;
+  else delete globalThis.localStorage;
 }
 
 // ---------------------------------------------------------------------------
@@ -528,12 +642,15 @@ function wireTests() {
 export async function run() {
   collapseTests();
   wireTests();
+  audioPaletteTests();
   mapgenTests();
   raycastTests();
   meshingTests();
   hostileInputTests();
   multiplayerRuleTests();
   damageDirectionTests();
+  airstrikeDroneTests();
+  soldierModelTests();
   bodyTests();
   timings();
   console.log(`\n${pass} passed, ${fail} failed`);

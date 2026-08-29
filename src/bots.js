@@ -6,6 +6,7 @@ import { Body, makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeat
   setCrouch, setSoldierTool, placeShadow } from './entities.js';
 import { SEA, SX, SZ, BLOCK } from './world.js';
 import { TOOLS, GUN_CLASSES } from './player.js';
+import { sfx } from './audio.js';
 import { teamHex } from './settings.js';
 
 const NAMES = {
@@ -88,6 +89,7 @@ export class Bot {
     setSoldierTool(this.parts, this.gunClass);
     this.ammo = TOOLS[this.gunClass].mag;
     this.reloading = 0;
+    this.reloadStage = 0;
     this.stuck = 0;            // consecutive motionless samples
     this.sampleT = 0.4;        // displacement sampling timer
     this.lastPos = this.body.pos.clone();
@@ -703,10 +705,25 @@ export class Bot {
     // --- shooting ---
     this.cooldown -= dt;
     if (this.reloading > 0) {
+      const spec = TOOLS[this.gunClass];
       this.reloading -= dt;
-      if (this.reloading <= 0) this.ammo = TOOLS[this.gunClass].mag;
+      const progress = 1 - Math.max(0, this.reloading) / spec.reload;
+      if (this.reloadStage === 1 && progress >= 0.24) {
+        this.reloadStage = 2; sfx.at('reloadEject', b.pos, spec.key);
+      }
+      if (this.reloadStage === 2 && progress >= 0.62) {
+        this.reloadStage = 3; sfx.at('reloadInsert', b.pos, spec.key);
+      }
+      if (this.reloadStage === 3 && progress >= 0.86) {
+        this.reloadStage = 4; sfx.at('reloadChamber', b.pos, spec.key);
+      }
+      if (this.reloading <= 0) { this.ammo = spec.mag; this.reloadStage = 0; }
     } else if (this.target && this.aimT > reactT && this.cooldown <= 0) {
-      if (this.ammo <= 0) { this.reloading = TOOLS[this.gunClass].reload; }
+      if (this.ammo <= 0) {
+        const spec = TOOLS[this.gunClass];
+        this.reloading = spec.reload; this.reloadStage = 1;
+        sfx.at('reloadStart', b.pos, spec.key);
+      }
       else {
         const from = b.eye();
         const toFoe = new THREE.Vector3().subVectors(this.target.body.pos, b.pos).setY(0).normalize();
@@ -863,6 +880,8 @@ export class Bot {
     this.gunClass = randomClass(); // rerolled each life, same as a human choosing
     setSoldierTool(this.parts, this.gunClass);
     this.ammo = TOOLS[this.gunClass].mag;
+    this.reloading = 0;
+    this.reloadStage = 0;
     this.stuck = 0;
     this.sampleT = 0.4;
     this.digT = 0;

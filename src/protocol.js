@@ -43,7 +43,7 @@ export function validClientMessage(d) {
   if (d.k === 'chat') return shortString(String(d.text ?? ''), 512)
     && (d.scope === 'all' || d.scope === 'team');
   if (d.k === 'class') return Number.isInteger(d.cls);
-  if (d.k === 'strike') return finite(d.x) && finite(d.z);
+  if (d.k === 'strike') return finite(d.x) && finite(d.z) && finite(d.yaw);
   if (d.k === 'overcharge') return true;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)
     && finiteVector(d.d) && (d.o === undefined || finiteVector(d.o));
@@ -53,6 +53,10 @@ function validSnapshot(d) {
   if (!rows(d.p, 12, 10) || !rows(d.b, 9, 10)) return false;
   if (!finiteArray(d.c, 2)) return false;
   if (!Array.isArray(d.g) || d.g.length > 16 || !d.g.every(v => finiteArray(v, 3))) return false;
+  if (d.a !== undefined && (!Array.isArray(d.a) || d.a.length > 10
+      || !d.a.every(v => finiteArray(v, 7) && Number.isInteger(v[0]) && v[0] >= 0
+        && Number.isInteger(v[5]) && v[5] >= 0 && v[5] <= 5000
+        && Number.isInteger(v[6]) && v[6] >= 0))) return false;
   if (d.f !== null && d.f !== undefined && (!isRecord(d.f)
       || !finiteArray(d.f.g, 5) || !finiteArray(d.f.b, 5))) return false;
   if (d.h !== null && d.h !== undefined && (!Array.isArray(d.h) || d.h.length < 4
@@ -69,8 +73,11 @@ function validEvent(d) {
   if (!shortString(d.k, 20)) return false;
   switch (d.k) {
     case 'edit': return [d.x, d.y, d.z, d.v].every(finite);
-    case 'boom': return [d.x, d.y, d.z, d.r].every(finite);
-    case 'telegraph': return [d.x, d.y, d.z].every(finite);
+    case 'boom': return [d.x, d.y, d.z, d.r].every(finite)
+      && (d.strikeId === undefined || (Number.isInteger(d.strikeId) && d.strikeId >= 0));
+    case 'telegraph': return [d.x, d.y, d.z, d.yaw, d.remaining, d.owner].every(finite)
+      && Number.isInteger(d.id) && d.id >= 0 && Number.isInteger(d.owner) && d.owner >= 0
+      && d.remaining >= 0 && d.remaining <= 5;
     case 'overcharge': case 'died': return true;
     case 'col': return Array.isArray(d.cells) && d.cells.length <= 12000 && d.cells.every(finite);
     case 'shot': return finiteVector(d.f) && finiteVector(d.e) && finite(d.hex)

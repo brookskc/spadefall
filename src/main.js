@@ -7,6 +7,7 @@ import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { GUN_CLASSES } from './player.js';
+import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
 import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
   getBaseFov, setBaseFov, getMotionScale, getMotionLevel, setMotionLevel,
@@ -14,6 +15,8 @@ import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const airstrikeQa = params.has('airstrikeqa');
+const soldierQa = params.has('soldierqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -48,6 +51,10 @@ if (params.has('scopeqa')) {
     game.player.aimK = 1;
   }, 50);
 }
+// Browser-only composition hook for inspecting the flyover without needing
+// pointer lock or a ten-kill setup. It uses the real model, pose helper, and
+// render updater; only the fixed camera and frozen countdown are test aids.
+if (airstrikeQa || soldierQa) $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
 // camera, excluded from fog so it keeps its glow at any distance.
@@ -891,7 +898,8 @@ addEventListener('resize', () => {
 
 // Headless/test hooks: ?mp=host&code=TEST&auto=1 · ?mp=join&code=TEST&auto=1
 // ?mp=quick&auto=1&ns=<namespace> · ?mp=browse&auto=1 · host cap: &cap=2
-// Pref hooks: &map=0..5&mode=ctf|tdm|koth · scope preview: &scopeqa=1
+// Pref hooks: &map=0..5&mode=ctf|tdm|koth · visual QA:
+// &scopeqa=1 / &airstrikeqa=1 / &soldierqa=1
 // TDM kill limit: &killcap=2
 // Auto runs can't type, so they get a callsign to satisfy the lobby gate.
 if (params.get('auto') && !rawName())
@@ -1025,12 +1033,46 @@ function frame() {
         $('mapname').innerHTML = `now showing — <b>${MAPS[next].name}</b>`;
       }
     }
-    camera.position.set(
-      SX / 2 + Math.cos(menuT) * 95,
-      58,
-      SZ / 2 + Math.sin(menuT) * 95
-    );
-    camera.lookAt(SX / 2, 24, SZ / 2);
+    if (airstrikeQa) {
+      const x = SX / 2, z = SZ / 2;
+      const y = game.world.surface(Math.floor(x), Math.floor(z)) + 1;
+      const remaining = Math.max(0, Math.min(3,
+        Number.parseFloat(params.get('airstriket') ?? '0.34')));
+      game._syncAirstrikeDrone(999999, x, y, z, 0, remaining, 0);
+      game._updateAirstrikeDrones(dt);
+      if (params.get('airstrikeview') === 'top') {
+        camera.position.set(x, y + 62, z + 8);
+        camera.lookAt(x, y + 16, z);
+      } else {
+        camera.position.set(x - 32, y + 7, z + 26);
+        camera.lookAt(x, y + 18, z);
+      }
+    } else if (soldierQa) {
+      const x = SX / 2, z = SZ / 2;
+      const green = game.bots.filter(b => b.team === 'green');
+      const blue = game.bots.filter(b => b.team === 'blue');
+      const lineup = [green[0], blue[0], green[1]].filter(Boolean);
+      const py = game.world.surface(Math.floor(x), Math.floor(z)) + 1;
+      for (let i = 0; i < lineup.length; i++) {
+        const b = lineup[i], px = x + (i - 1) * 1.35;
+        b.parts.group.position.set(px, py, z);
+        b.parts.group.rotation.set(0, (i - 1) * -0.18, 0);
+        b.parts.group.visible = true;
+        setSoldierTool(b.parts, [0, 1, 5][i]);
+        setCrouch(b.parts, params.get('soldierpose') === 'crouch' && i === 1);
+        animateSoldier(b.parts, params.get('soldierpose') === 'walk' ? 5 : 0, game.time);
+      }
+      camera.position.set(x, py + 1.15,
+        z + (params.get('soldierview') === 'back' ? 4.6 : -4.6));
+      camera.lookAt(x, py + 0.95, z);
+    } else {
+      camera.position.set(
+        SX / 2 + Math.cos(menuT) * 95,
+        58,
+        SZ / 2 + Math.sin(menuT) * 95
+      );
+      camera.lookAt(SX / 2, 24, SZ / 2);
+    }
     game.world.animateSky(game.time += dt);
     if (game.flags) for (const f of ['green', 'blue']) game.flags[f].clientUpdate(game.time);
     game.effects.update(dt);

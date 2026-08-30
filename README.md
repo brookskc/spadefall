@@ -12,6 +12,8 @@ Spadefall is a first-person arena shooter built around terrain that can be destr
 
 Rooms support up to ten human players, split into teams of five. Bots occupy open positions, so a match can start immediately and fill with people as they join.
 
+Bots use line of sight, nearby sound, and fading last-known positions rather than hidden player coordinates. Their team jobs change with the mode: they escort and recover flags, anchor or flank rotating hills, and spread pressure across deathmatch lanes. Team pings made with `G` send the nearest available bots to the mark without pulling flag carriers or emergency recovery teams away from their jobs.
+
 | Mode | Win condition | Maps |
 | --- | --- | --- |
 | Capture the Flag | First to three captures | Greenbelt, Beachhead, Pinefall |
@@ -119,6 +121,8 @@ Run the test suite with:
 ```sh
 node tests/run.mjs
 ```
+
+For bot tuning, append `?botq=easy`, `?botq=normal`, or `?botq=hard` to the local URL. Difficulty changes reaction time, aim error, memory, hearing, and decision cadence; it does not change bot health or weapon damage. In a solo or hosted match, `/botstats` in chat reports average decision time, stuck recoveries, and objective participation.
 
 ## License
 

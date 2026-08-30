@@ -21,7 +21,9 @@ import { allowInbound, shouldSend } from '../src/net.js';
 import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
-import { botSeparation, botTargetScore, hillPost } from '../src/bot-rules.js';
+import { BOT_DIFFICULTY, assignBotRoles, botDifficulty, botSeparation,
+  botsForSquadOrder, botTargetScore, botTelemetrySummary, chooseLocalRoute,
+  hillPost, rememberedEnemyPosition, scheduleBotBrains } from '../src/bot-rules.js';
 import { modeMatchSeconds, regulationDecision, respawnWaveDelay,
   tacticalSpawnScore } from '../src/pacing.js';
 import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
@@ -397,6 +399,87 @@ function botRuleTests() {
     botSeparation({ x: 10, z: 10 }, [
       { id: 2, x: 20, z: 10, alive: true }, { id: 3, x: 10.2, z: 10, alive: false },
     ], 1).x === 0);
+
+  ok('difficulty scales cognition rather than health or damage',
+    BOT_DIFFICULTY.easy.reaction > BOT_DIFFICULTY.normal.reaction
+      && BOT_DIFFICULTY.hard.reaction < BOT_DIFFICULTY.normal.reaction
+      && BOT_DIFFICULTY.easy.aimError > BOT_DIFFICULTY.hard.aimError
+      && !Object.values(BOT_DIFFICULTY).some(d => 'health' in d || 'damage' in d || 'vision' in d));
+  ok('unknown bot difficulty safely resolves to normal',
+    botDifficulty('nightmare') === BOT_DIFFICULTY.normal);
+
+  const sighting = { x: 40, y: 20, z: 50, t: 10 };
+  const remembered = rememberedEnemyPosition(sighting, 11, 3, 7);
+  ok('lost targets use a deterministic uncertain last-known position',
+    remembered && remembered.confidence > 0 && remembered.confidence < 1
+      && rememberedEnemyPosition(sighting, 11, 3, 7).x === remembered.x);
+  ok('target memory expires instead of tracking a live entity indefinitely',
+    rememberedEnemyPosition(sighting, 14, 3, 7) === null);
+
+  const squad = Array.from({ length: 5 }, (_, id) => ({
+    id, x: 20 + id * 10, z: 40 + id, alive: true, carrier: false,
+  }));
+  const ctfRoles = assignBotRoles('ctf', squad, {
+    ownFlagEmergency: true, ownFlag: { x: 70, z: 45 },
+    friendlyCarrier: { x: 32, z: 40 }, ownStand: { x: 10, z: 40 },
+    midfield: { x: 128, z: 128 },
+  });
+  ok('CTF director reserves recovery, escort, and defense jobs',
+    Object.values(ctfRoles).filter(r => r === 'recover').length === 2
+      && Object.values(ctfRoles).includes('escort')
+      && Object.values(ctfRoles).includes('defend'));
+  const kothRoles = assignBotRoles('koth', squad, { hill: { x: 60, z: 45 } });
+  ok('KOTH director creates an anchor, contesters, and flanking pressure',
+    Object.values(kothRoles).filter(r => r === 'anchor').length === 1
+      && Object.values(kothRoles).filter(r => r === 'contest').length === 2
+      && Object.values(kothRoles).some(r => r.startsWith('flank-')));
+  const tdmRoles = assignBotRoles('tdm', squad);
+  ok('TDM director keeps support, pressure, and flank roles distinct',
+    Object.values(tdmRoles).includes('support')
+      && Object.values(tdmRoles).some(r => r === 'pressure')
+      && Object.values(tdmRoles).some(r => r.startsWith('flank-')));
+
+  const orderSquad = squad.map((b, i) => ({ ...b,
+    role: i === 0 ? 'recover' : i === 1 ? 'escort' : 'attack', carrier: i === 2 }));
+  const responders = botsForSquadOrder(orderSquad, { x: 50, z: 44 }, 2);
+  ok('squad pings peel off bounded responders without overriding critical jobs',
+    responders.length === 2 && responders.every(id => id >= 3));
+
+  const due = squad.map(b => ({ ...b, nextThink: 0 }));
+  const scheduledA = scheduleBotBrains(due, 1, 0, 3);
+  const scheduledB = scheduleBotBrains(due, 1, scheduledA.cursor, 3);
+  ok('brain scheduler enforces its per-frame CPU budget',
+    scheduledA.ids.length === 3 && scheduledB.ids.length <= 3);
+  ok('round-robin brain scheduling reaches every due bot',
+    new Set([...scheduledA.ids, ...scheduledB.ids]).size === due.length);
+
+  const route = chooseLocalRoute([
+    { angle: 0, x: 1, z: 0, clear: 1, progress: 1, maxStep: 0, maxDrop: 0 },
+    { angle: Math.PI / 6, x: 0.86, z: 0.5, clear: 4, progress: 3.46, maxStep: 1, maxDrop: 0 },
+    { angle: -Math.PI / 3, x: 0.5, z: -0.86, clear: 4, progress: 2, maxStep: 0, maxDrop: 3 },
+  ]);
+  ok('local route scoring walks around walls but rejects dangerous drops',
+    route?.angle === Math.PI / 6);
+
+  const telemetry = botTelemetrySummary([
+    { thinkMs: 0.4, stuckRecoveries: 2, objectiveSeconds: 8 },
+    { thinkMs: 0.8, stuckRecoveries: 1, objectiveSeconds: 12 },
+  ]);
+  ok('bot telemetry aggregates decision cost, recovery, and objective time',
+    telemetry.samples === 2 && Math.abs(telemetry.averageThinkMs - 0.6) < 1e-9
+      && telemetry.maxThinkMs === 0.8 && telemetry.stuckRecoveries === 3
+      && telemetry.objectiveSeconds === 20);
+
+  let scenarioRolesValid = true;
+  for (let map = 0; map < MAPS.length; map++) for (const mode of ['ctf', 'tdm', 'koth']) {
+    const spot = MAPS[map].hills?.[0] ?? { x: SX / 2, z: SZ / 2 };
+    const roles = assignBotRoles(mode, squad, {
+      ownStand: { x: 16, z: SZ / 2 }, midfield: { x: SX / 2, z: SZ / 2 }, hill: spot,
+    });
+    scenarioRolesValid &&= Object.keys(roles).length === squad.length
+      && Object.values(roles).every(Boolean);
+  }
+  ok('deterministic role harness covers every map and game mode', scenarioRolesValid);
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,8 @@ import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
 import { buildMatchReport } from './match-report.js';
 import { rematchVotesNeeded, TEAM_PING_COOLDOWN, TEAM_PING_LIMIT,
   TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
+import { assignBotRoles, botsForSquadOrder, botTelemetrySummary,
+  scheduleBotBrains } from './bot-rules.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -945,6 +947,11 @@ export class Game {
     this._chatCd = 0;                    // chat send cooldown (wall clock)
     this.teamPings = [];                 // short-lived, team-only tactical marks
     this._nextTeamPingId = 1;
+    this.botOrders = { green: null, blue: null };
+    this.navRevision = 0;                // invalidates bot route snapshots after edits
+    this._botDirectorT = 0;
+    this._botBrainCursor = 0;
+    this._botThinkSet = null;
     this._rematchVotes = new Set();
     this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
     this._pendingStrikes = [];           // host/solo authoritative impact timers
@@ -1103,6 +1110,10 @@ export class Game {
     this._lastStrikeRows = [];
     this._lastAbilityRows = [];
     this._lastStationRows = [];
+    this.botOrders = { green: null, blue: null };
+    this.navRevision = 0;
+    this._botDirectorT = 0;
+    this._botBrainCursor = 0;
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
     for (const av of this.avatars.values()) av.dispose();
@@ -1356,16 +1367,29 @@ export class Game {
 
   // --- bot intel ---
   // Bots only run host/solo-side, so clients never bother recording.
-  pingIntel(pos, team) {
+  pingIntel(pos, team, kind = 'sound') {
     if (this.mode === 'client' || !team) return;
-    this.intel.push({ x: pos.x, z: pos.z, team, t: this.time });
+    this.intel.push({ x: pos.x, z: pos.z, team, t: this.time,
+      kind: ['sight', 'combat'].includes(kind) ? kind : 'sound' });
     if (this.intel.length > 48) this.intel.splice(0, this.intel.length - 48);
   }
-  // Freshest enemy sign a hunter can walk toward; stale pings don't count.
-  huntSpot(team) {
+  // Freshest fair enemy sign. Sightings are shared over the squad radio;
+  // ordinary weapon/explosion sounds must be within the listener's hearing
+  // range. Older sound reports grow less precise instead of revealing an
+  // exact live coordinate to every bot on the map.
+  huntSpot(team, listener = null, hearing = 38) {
     for (let i = this.intel.length - 1; i >= 0; i--) {
       const p = this.intel[i];
-      if (this.time - p.t <= 25 && p.team !== team) return p;
+      const age = this.time - p.t;
+      if (age > 25 || p.team === team) continue;
+      if (p.kind === 'sound' && listener
+          && Math.hypot(p.x - listener.x, p.z - listener.z) > hearing) continue;
+      const uncertainty = p.kind === 'sight' ? Math.min(5, age * 0.28)
+        : Math.min(12, 2 + age * 0.7);
+      const angle = (p.t * 1.71 + (team === 'blue' ? 2.4 : 0.8)) % (Math.PI * 2);
+      return { ...p,
+        x: Math.max(1, Math.min(SX - 1, p.x + Math.cos(angle) * uncertainty)),
+        z: Math.max(1, Math.min(SZ - 1, p.z + Math.sin(angle) * uncertainty)) };
     }
     return null;
   }
@@ -1699,6 +1723,70 @@ export class Game {
     this.net.send({ t: 'a', k: 'nade', o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
 
+  // ---------------- bot team director ----------------
+  activeBotOrder(team) {
+    const order = this.botOrders?.[team];
+    if (!order || order.expires <= this.time) {
+      if (this.botOrders) this.botOrders[team] = null;
+      return null;
+    }
+    return order;
+  }
+
+  _updateBotDirector(dt) {
+    this._botDirectorT -= dt;
+    if (this._botDirectorT <= 0) {
+      this._botDirectorT = 0.5;
+      for (const team of ['green', 'blue']) {
+        const teamBots = this.bots.filter(b => b.team === team).map(b => ({
+          id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
+          carrier: b.carrier, role: b.tacticalRole,
+        }));
+        const ownFlag = this.flags?.[team];
+        const friendlyCarrier = this.entities().find(e => e.alive && e.team === team && e.carrier);
+        const flagPoint = ownFlag?.state === 'carried'
+          ? this.standOf(team).clone().lerp(this.standOf(this.enemyOf(team)), 0.5)
+          : ownFlag?.state === 'dropped' ? ownFlag.pos : ownFlag?.home;
+        const roles = assignBotRoles(this.gameMode, teamBots, {
+          ownFlagEmergency: ownFlag && ownFlag.state !== 'home',
+          ownFlag: flagPoint,
+          friendlyCarrier: friendlyCarrier?.body?.pos,
+          ownStand: this.flags?.[team]?.home ?? this.standOf(team),
+          midfield: { x: SX / 2, z: SZ / 2 },
+          hill: this.hill?.pos,
+        });
+        for (const b of this.bots) if (b.team === team && roles[b.id]) {
+          b.tacticalRole = roles[b.id];
+          b.role = roles[b.id];
+        }
+
+        const order = this.activeBotOrder(team);
+        if (order) {
+          const fresh = this.bots.filter(b => b.team === team).map(b => ({
+            id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
+            carrier: b.carrier, role: b.tacticalRole,
+          }));
+          const limit = ['ATTACK', 'HILL'].includes(order.kind) ? 3 : 2;
+          order.responders = botsForSquadOrder(fresh, order, limit);
+        }
+      }
+    }
+
+    const scheduled = scheduleBotBrains(this.bots, this.time,
+      this._botBrainCursor, 3);
+    this._botBrainCursor = scheduled.cursor;
+    this._botThinkSet = new Set(scheduled.ids);
+  }
+
+  botTelemetry() {
+    return botTelemetrySummary(this.bots.map(b => ({
+      thinkMs: b.telemetry.thinkSamples
+        ? b.telemetry.thinkMs / b.telemetry.thinkSamples : 0,
+      stuckRecoveries: b.telemetry.stuckRecoveries,
+      objectiveSeconds: b.telemetry.objectiveSeconds,
+    })));
+  }
+
   // ---------------- squad pings ----------------
   requestTeamPing(e = this.player) {
     if (!e?.alive || this.over) return;
@@ -1742,6 +1830,13 @@ export class Game {
     pos.z = Math.min(SZ, Math.max(0, pos.z));
     const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: cleanName(e.name),
       team: e.team, x: pos.x, y: pos.y, z: pos.z, kind: this._teamPingKind(pos, e.team) };
+    const candidates = this.bots.filter(b => b.team === e.team).map(b => ({
+      id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
+      carrier: b.carrier, role: b.tacticalRole,
+    }));
+    const limit = ['ATTACK', 'HILL'].includes(msg.kind) ? 3 : 2;
+    this.botOrders[e.team] = { ...msg, expires: this.time + TEAM_PING_TTL,
+      responders: botsForSquadOrder(candidates, msg, limit) };
     if (this.player.team === e.team) this._receiveTeamPing(msg);
     if (this.mode === 'host') for (const p of this.remote.values())
       if (p.team === e.team) this.net.sendTo(p.id, msg);
@@ -1777,6 +1872,7 @@ export class Game {
   _clearTeamPings() {
     for (const mark of [...(this.teamPings ?? [])]) this._removeTeamPing(mark);
     this.teamPings = [];
+    this.botOrders = { green: null, blue: null };
   }
 
   _updateTeamPings(dt) {
@@ -1843,6 +1939,13 @@ export class Game {
       this.player._fallingT = 0;
       this.player._lingerT = 0;
       hud.feed('DEV: streak/perk state cleared');
+      return true;
+    }
+    if (t === '/botstats') {
+      const s = this.botTelemetry();
+      hud.feed(`BOTS: ${s.samples} active · ${s.averageThinkMs.toFixed(2)}ms avg · `
+        + `${s.maxThinkMs.toFixed(2)}ms max · ${s.stuckRecoveries} recoveries · `
+        + `${Math.round(s.objectiveSeconds)}s objective`);
       return true;
     }
     return false;
@@ -2030,7 +2133,7 @@ export class Game {
     else this.feed(`${nameSpan(victim)} blew up`);
     victim._deathCause = null;
     // A corpse marks a fight: the fallen's teammates hunt toward it.
-    if (killer && killer !== victim) this.pingIntel(victim.body.pos, killer.team);
+    if (killer && killer !== victim) this.pingIntel(victim.body.pos, killer.team, 'combat');
 
     // Scoreboard: a death for the fallen, a kill for the killer — suicides
     // and terrain score a death only, same as TDM team scoring below.
@@ -2087,6 +2190,7 @@ export class Game {
   applyEdit(x, y, z, v, who = null) {
     this.blockHits.delete(x + ',' + y + ',' + z);  // fresh block / cleared cell: full HP
     this.world.set(x, y, z, v);
+    this.navRevision++;
     if (this.mode === 'host') {
       this.editLog.push([x, y, z, v]);
       this.net.broadcast({ t: 'e', k: 'edit', x, y, z, v });
@@ -4155,6 +4259,7 @@ export class Game {
 
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
+    this._updateBotDirector(dt);
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);

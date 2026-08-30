@@ -10,7 +10,8 @@ import { TOOLS, GUN_CLASSES } from './player.js';
 import { sfx } from './audio.js';
 import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
-import { botSeparation, botTargetScore, hillPost } from './bot-rules.js';
+import { botDifficulty, botSeparation, botTargetScore, chooseLocalRoute,
+  hillPost, rememberedEnemyPosition } from './bot-rules.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -53,11 +54,10 @@ const CLASS_PROFILE = {
   5: { hold: 30, strafe: 8, retreatHealth: 45, closeRetreat: 14, speedMul: 0.92, groupRange: 8, vision: 90 },
 };
 
-// Difficulty tiers scale reaction time, aim error and target memory.
-// ?botq=easy|hard skews the whole room; every bot still gets its own jitter.
+// Difficulty affects perception and decision quality only. Damage, health,
+// movement, weapon stats and line-of-sight rules remain identical.
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
-const BOTQ = { easy: 0.65, normal: 1.0, hard: 1.35 };
-const BOT_SKILL = BOTQ[QUERY.get('botq')] ?? 1.0;
+const BOTQ = botDifficulty(QUERY.get('botq'));
 
 let n = 0;        // name rotation
 let nextId = 0;   // stable identity for network snapshots
@@ -111,11 +111,22 @@ export class Bot {
     this.bridgeT = 0;          // plank-laying cooldown
     this.lastBridge = -9;      // last plank placed, game time
     this.face = new THREE.Vector3(this.heading, 0, 0); // where the head points
-    this.memoryT = 0;          // keeps tracking a target just out of sight
+    this.memoryT = 0;          // confidence clock for the last visible position
+    this.memoryPos = new THREE.Vector3();
+    this.memorySeenAt = -Infinity;
+    this.targetVisible = false;
     this.responding = false;   // rushing to recover our dropped flag?
     this.deadT = -1;           // corpse tumble timer, while dead
-    this.skill = BOT_SKILL * (0.85 + Math.random() * 0.3); // individual jitter
+    this.difficulty = BOTQ;
+    this.skill = 0.9 + Math.random() * 0.2; // mild individual variation only
     this._reactJitter = 0.8 + Math.random() * 0.5; // re-rolled per engagement (see update()); initialized here too so reactT is never NaN before the first target acquisition
+    this.nextThink = game.time + (this.id % 5) * BOTQ.thinkInterval / 5;
+    this.cachedGoal = null;
+    this.navRevision = game.navRevision ?? 0;
+    this.tacticalRole = 'attack';
+    this.orderId = null;
+    this.telemetry = { thinkMs: 0, thinkSamples: 0, stuckRecoveries: 0,
+      objectiveSeconds: 0, decisions: 0 };
     this.lane = ((this.id % 3) - 1) * 18; // advance on a front, not a file
     this.role = 'attack';      // ctf only: defend | mid | attack (recomputed)
     this.patrol = null;        // current roam waypoint when there's no intel
@@ -164,13 +175,17 @@ export class Bot {
   // (gunfire, kills, sightings — the game's intel feed). No intel? Roam.
   _huntGoal() {
     const g = this.game, b = this.body;
-    const spot = g.huntSpot(this.team);
+    const spot = g.huntSpot(this.team, b.pos, this.difficulty.hearing);
     if (spot) {
       const d = Math.hypot(spot.x - b.pos.x, spot.z - b.pos.z);
       // Stood on the spot and nobody's here — the trail is cold. Scratch it
       // off for the whole team so nobody else camps an empty corner.
       if (d < 9 && !this.target) { g.consumeIntel(this.team, spot, 16); return this._patrolGoal(); }
-      return this._laned(new THREE.Vector3(spot.x, g.world.surface(spot.x | 0, spot.z | 0), spot.z));
+      const hunt = new THREE.Vector3(spot.x, g.world.surface(spot.x | 0, spot.z | 0), spot.z);
+      if (this.tacticalRole === 'flank-left') hunt.z -= 12;
+      if (this.tacticalRole === 'flank-right') hunt.z += 12;
+      hunt.z = Math.max(2, Math.min(SZ - 2, hunt.z));
+      return this._laned(hunt);
     }
     return this._patrolGoal();
   }
@@ -207,10 +222,37 @@ export class Bot {
     return false;
   }
 
+  _orderGoal() {
+    const order = this.game.activeBotOrder?.(this.team);
+    if (!order || !order.responders?.includes(this.id)
+        || this.carrier || ['recover', 'escort'].includes(this.tacticalRole)) {
+      this.orderId = null;
+      return null;
+    }
+    this.orderId = order.id;
+    return new THREE.Vector3(order.x,
+      this.game.world.surface(Math.floor(order.x), Math.floor(order.z)), order.z);
+  }
+
   goal() {
     const g = this.game;
     this.responding = false;
     if (this.carrier) return g.standOf(this.team);                   // run it home
+    const own = g.flags?.[this.team];
+    // Flag recovery outranks a voluntary squad order. The director assigns
+    // only the closest pair, so the rest of the squad can still obey humans.
+    if (own?.state === 'carried' || own?.state === 'dropped') {
+      const emergency = own.state === 'dropped' ? own.pos
+        : g.huntSpot(this.team, this.body.pos, this.difficulty.hearing)
+          ?? g.standOf(this.team).clone().lerp(g.standOf(g.enemyOf(this.team)), 0.5);
+      if (this.tacticalRole === 'recover' && emergency) {
+        this.responding = true;
+        return new THREE.Vector3(emergency.x,
+          g.world.surface(Math.floor(emergency.x), Math.floor(emergency.z)), emergency.z);
+      }
+    }
+    const ordered = this._orderGoal();
+    if (ordered) return ordered;
     const supply = g.botFieldStationGoal?.(this);
     if (supply) return supply;                                      // one low-stock bot detours
     if (g.hill) {
@@ -219,48 +261,40 @@ export class Bot {
       // look like a squad holding ground rather than one tangled voxel stack.
       const post = hillPost({ x: g.hill.pos.x, z: g.hill.pos.z, r: g.hill.r },
         this.id, this.team);
-      if (post) return new THREE.Vector3(post.x,
-        g.world.surface(Math.floor(post.x), Math.floor(post.z)), post.z);
+      if (post) {
+        // Flankers enter on opposite shoulders before converging; anchors and
+        // contesters remain physically inside the scoring radius.
+        if (this.tacticalRole === 'flank-left') post.z -= Math.min(4, g.hill.r * 0.35);
+        if (this.tacticalRole === 'flank-right') post.z += Math.min(4, g.hill.r * 0.35);
+        return new THREE.Vector3(post.x,
+          g.world.surface(Math.floor(post.x), Math.floor(post.z)), post.z);
+      }
       return g.hill.pos;
     }
-    const own = g.flags?.[this.team];
     if (!own) { this.role = 'attack'; return this._huntGoal(); }     // deathmatch: hunt
-    // Flag defense: the two closest free bots drop everything — converge on
-    // the flag while it's on the ground, and while it's carried... no psychic
-    // tracking. The thief is only as found as our intel: chase the freshest
-    // sighting of him (he pinged us by firing, killing, or being spotted);
-    // with no sightings, cut off the obvious run home across midfield.
-    if (own.state === 'carried' && own.carrier) {
-      const spot = g.huntSpot(this.team);
-      const cut = spot
-        ? new THREE.Vector3(spot.x, g.world.surface(spot.x | 0, spot.z | 0), spot.z)
-        : g.standOf(this.team).clone().lerp(g.standOf(g.enemyOf(this.team)), 0.5);
-      this.responding = this._isResponder(cut);
-      if (this.responding) return cut;
-    }
-    if (own.state === 'dropped') {
-      this.responding = this._isResponder(own.pos);
-      if (this.responding) return own.pos;
-    }
-    // Roles by stable rank: one guards the stand, one holds midfield, the
-    // rest attack. A team that all charges leaves its flag naked.
+    // The host-side director assigns stable, mode-aware roles. The rank-based
+    // fallback keeps old migrated bot rows safe until the first director tick.
     const rank = this._rank();
-    this.role = rank === 0 ? 'defend' : rank === 1 ? 'mid' : 'attack';
+    this.role = this.tacticalRole
+      ?? (rank === 0 ? 'defend' : rank === 1 ? 'mid' : 'attack');
+    if (this.role === 'escort') {
+      const carrier = g.entities().find(e => e !== this && e.alive
+        && e.team === this.team && e.carrier);
+      if (carrier) {
+        const home = g.standOf(this.team);
+        const toward = home.clone().sub(carrier.body.pos).setY(0);
+        if (toward.lengthSq() > 0.01) toward.normalize();
+        const side = new THREE.Vector3(-toward.z, 0, toward.x)
+          .multiplyScalar(this.id % 2 ? 2.5 : -2.5);
+        return carrier.body.pos.clone().addScaledVector(toward, 4).add(side);
+      }
+    }
     if (this.role === 'defend') return this._laned(g.standOf(this.team));
     if (this.role === 'mid')
       return this._laned(new THREE.Vector3(SX / 2, g.world.surface(SX / 2, SZ / 2), SZ / 2));
     const enemyFlag = g.flags[g.enemyOf(this.team)];
     if (enemyFlag.state === 'dropped') return enemyFlag.pos;         // grab the loose flag
     return this._laned(g.standOf(g.enemyOf(this.team)));             // storm their base
-  }
-
-  // Am I one of the two closest living, non-carrying teammates to the spot?
-  _isResponder(pos) {
-    const mates = this.game.bots
-      .filter(b => b.alive && b.team === this.team && !b.carrier)
-      .sort((a, b) => a.body.pos.distanceTo(pos) - b.body.pos.distanceTo(pos));
-    const i = mates.indexOf(this);
-    return i >= 0 && i < 2;
   }
 
   update(dt) {
@@ -273,25 +307,43 @@ export class Bot {
     }
     const g = this.game, b = this.body;
     const profile = CLASS_PROFILE[this.gunClass];
+    const onObjective = g.hill
+      ? b.pos.distanceToSquared(g.hill.pos) <= (g.hill.r + 2) ** 2
+      : g.flags && (this.carrier || ['defend', 'recover', 'escort'].includes(this.tacticalRole));
+    if (onObjective) this.telemetry.objectiveSeconds += dt;
 
-    // --- pick something to shoot (it has to actually see it first) ---
-    const seen = this._acquire(profile);
-    if (seen !== this.target) {
-      this.aimT = 0;    // fresh eyes: reaction time
-      // Re-rolled on every fresh engagement, not just fixed per-bot at
-      // spawn: real reflexes vary encounter to encounter, not only
-      // person to person. Without this, the same bot reacted at exactly
-      // the same speed every single time it spotted you, which reads as
-      // mechanically consistent — the "aimbot" tell — even once the
-      // reaction delay itself was long enough on paper.
-      this._reactJitter = 0.8 + Math.random() * 0.5;
+    // Expensive perception, role goals, and route decisions run on a staggered
+    // host budget. Physics, weapon timers, and animation still update every
+    // frame, so the budget cannot make movement choppy.
+    const thinks = !g._botThinkSet || g._botThinkSet.has(this.id);
+    if (thinks) {
+      const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const seen = this._acquire(profile);
+      if (seen !== this.target || (seen && !this.targetVisible)) {
+        this.aimT = 0;    // fresh eyes: reaction time
+        this._reactJitter = 0.8 + Math.random() * 0.5;
+      }
+      if (seen) {
+        // New eyes on an enemy: report it. Teammates investigate this sighting,
+        // but a bot that loses LOS retains only this frozen position.
+        if (seen !== this.target) g.pingIntel(seen.body.pos, seen.team, 'sight');
+        this.target = seen;
+        this.targetVisible = true;
+        this.memoryPos.copy(seen.body.pos);
+        this.memorySeenAt = g.time;
+        this.memoryT = this.difficulty.memory * this.skill;
+      } else this.targetVisible = false;
+      this.cachedGoal = this.goal().clone();
+      const cadenceJitter = 0.9 + (this.id % 3) * 0.1;
+      this.nextThink = g.time + this.difficulty.thinkInterval * cadenceJitter;
+      const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - started;
+      this.telemetry.thinkMs += elapsed;
+      this.telemetry.thinkSamples++;
+      this.telemetry.decisions++;
+      this.telemetry.lastThinkMs = elapsed;
     }
-    if (seen) {
-      // New eyes on an enemy: report it. Teammates hunt from these sightings.
-      if (seen !== this.target) g.pingIntel(seen.body.pos, seen.team);
-      this.target = seen; this.memoryT = 1.2 * this.skill;
-    }
-    else if ((this.memoryT -= dt) <= 0) this.target = null;
+    if (this.target && !this.target.alive) { this.target = null; this.targetVisible = false; }
+    if (!this.targetVisible && this.target && (this.memoryT -= dt) <= 0) this.target = null;
     if (this.target) this.aimT += dt;
     // Base raised from 0.35 -> 0.55: 0.35s (300-410ms at normal skill) is
     // at the very fast edge of human visual reaction time even before
@@ -300,10 +352,21 @@ export class Bot {
     // Combined with the per-engagement jitter above, normal difficulty
     // now spans roughly 0.38-0.84s bot to bot and encounter to encounter,
     // instead of a near-fixed ~0.3-0.4s every single time.
-    const reactT = (0.55 * this._reactJitter) / this.skill; // better bots shoulder faster
+    const reactT = 0.55 * this._reactJitter * this.difficulty.reaction / this.skill;
+
+    const recalled = this.target && !this.targetVisible
+      ? rememberedEnemyPosition({ x: this.memoryPos.x, y: this.memoryPos.y,
+          z: this.memoryPos.z, t: this.memorySeenAt }, g.time,
+        this.difficulty.memory * this.skill, this.id)
+      : null;
+    const targetPoint = this.target
+      ? (this.targetVisible ? this.target.body.pos : recalled) : null;
+    const targetEye = targetPoint && this.target
+      ? new THREE.Vector3(targetPoint.x,
+        targetPoint.y + this.target.body.half.h - EYE_INSET, targetPoint.z) : null;
 
     // --- movement ---
-    const goal = this.goal();
+    const goal = this.cachedGoal ?? this.goal();
     this.wanderT -= dt;
     this.patrolT -= dt; // patrol waypoints go stale even if never reached
     if (this.wanderT <= 0) {
@@ -387,18 +450,18 @@ export class Bot {
     // at range — but never in water, where the sideways mix orbits the bot
     // off its committed exit wall.
     let toFoe = null, foeD = Infinity, undermining = false;
-    if (this.target && !b.inWater) {
-      foeD = b.pos.distanceTo(this.target.body.pos);
+    if (this.target && targetPoint && !b.inWater) {
+      foeD = b.pos.distanceTo(targetPoint);
       // Undermine: a foe we merely REMEMBER (memoryT keeps the trail) is up
       // a tower we can't see through — walk to the column and let the shovel
       // and gravity argue with his footing. No aim required: the head never
       // settles on a target it can't see, so gating on aimT would forbid this.
-      if (!this.carrier && !g.losClear(b.eye(), this.target.body.eye()) &&
-          this.target.body.pos.y > b.pos.y + 3 && foeD < 14) {
+      if (!this.carrier && !g.losClear(b.eye(), targetEye) &&
+          targetPoint.y > b.pos.y + 3 && foeD < 14) {
         undermining = true;
-        dir.subVectors(this.target.body.pos, b.pos).setY(0).normalize();
+        dir.subVectors(targetPoint, b.pos).setY(0).normalize();
       } else if (this.aimT > 0.3) {
-        toFoe = new THREE.Vector3().subVectors(this.target.body.pos, b.pos).setY(0).normalize();
+        toFoe = new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize();
         // A flag carrier's movement vector belongs to the run home. They can
         // return fire, but must not orbit an incidental target and carry the
         // objective sideways away from the stand.
@@ -504,56 +567,19 @@ export class Bot {
     this.routeT = Math.max(0, this.routeT - dt);
     const routeEligible = !beeline && !this.target && !b.inWater && this.wetT <= 0
       && !undermining && dir.lengthSq() > 0.01;
+    const navChanged = this.navRevision !== (g.navRevision ?? 0);
+    if (navChanged) {
+      this.navRevision = g.navRevision ?? 0;
+      this.routeT = 0; // a new crater, wall, or tunnel invalidates cached space
+    }
     if (routeEligible && this.routeT > 0) dir.copy(this.route);
-    if (routeEligible) {
-      const blocked = w.solid(Math.floor(b.pos.x + dir.x * 1.2), fy, Math.floor(b.pos.z + dir.z * 1.2))
-        || w.solid(Math.floor(b.pos.x + dir.x * 1.2), fy + 1, Math.floor(b.pos.z + dir.z * 1.2));
-      let routed = false;
-      // Alternate the preferred side by stable bot id so a whole squad does
-      // not choose the same shoulder of every wall.
-      const side = this.id % 2 ? -1 : 1;
-      if (blocked) for (const deg of [30 * side, -30 * side, 60 * side, -60 * side]) {
-        const rad = deg * Math.PI / 180;
-        const rx = dir.x * Math.cos(rad) - dir.z * Math.sin(rad);
-        const rz = dir.x * Math.sin(rad) + dir.z * Math.cos(rad);
-        const px = Math.floor(b.pos.x + rx * 1.4), pz = Math.floor(b.pos.z + rz * 1.4);
-        if (!w.solid(px, fy, pz) && !w.solid(px, fy + 1, pz)) {
-          dir.set(rx, 0, rz).normalize(); routed = true;
-          this.route.copy(dir); this.routeT = 1.1;
-          break;
-        }
-      }
-      // Nothing clear immediately to either side — before ever reaching
-      // for the shovel, check a bit further along the wall for somewhere
-      // it's already open: a gate, a tunnel a bot or player already dug,
-      // any existing gap. No memory of who dug what or when — this reads
-      // the world exactly as it stands right now, so it finds a genuinely
-      // fresh hole exactly as readily as a made one from ten minutes ago,
-      // which is the actual point: prefer whatever's already open over
-      // making something new, not specifically "remember the old ones."
-      // Checked at two distances along the same heading, both required
-      // clear, so a lone gap glimpsed only at the far point (something
-      // else in the way closer in) doesn't get treated as reachable. Same
-      // four diagonal angles as the short-range pass, not +-90: a purely
-      // sideways probe never actually advances into the wall's own plane
-      // at all (its forward component is zero), so it would read as
-      // "clear" whether or not a real opening exists a few blocks over —
-      // trivially true, not a genuine check.
-      if (blocked && !routed) for (const deg of [30 * side, -30 * side, 60 * side, -60 * side]) {
-        const rad = deg * Math.PI / 180;
-        const rx = dir.x * Math.cos(rad) - dir.z * Math.sin(rad);
-        const rz = dir.x * Math.sin(rad) + dir.z * Math.cos(rad);
-        const mx = Math.floor(b.pos.x + rx * 2.5), mz = Math.floor(b.pos.z + rz * 2.5);
-        const px = Math.floor(b.pos.x + rx * 5), pz = Math.floor(b.pos.z + rz * 5);
-        const midOpen = !w.solid(mx, fy, mz) && !w.solid(mx, fy + 1, mz);
-        const farOpen = !w.solid(px, fy, pz) && !w.solid(px, fy + 1, pz);
-        if (midOpen && farOpen) {
-          dir.set(rx, 0, rz).normalize();
-          this.route.copy(dir); this.routeT = 1.5;
-          break;
-        }
-      }
-      if (!blocked && this.routeT <= 0) this.route.set(0, 0, 0);
+    if (routeEligible && (thinks || navChanged || this.routeT <= 0)) {
+      const planned = this._planLocalRoute(dir, fy);
+      if (planned) {
+        dir.copy(planned);
+        this.route.copy(planned);
+        this.routeT = 0.8;
+      } else this.route.set(0, 0, 0);
     }
     // Probe the contact column first, then a step beyond: a bot pressed
     // against the face is closer than shovel reach, and both columns block.
@@ -714,6 +740,8 @@ export class Bot {
       this.wanderT = 2;
       this.stuck = 0;
       this.exit = null;      // abandon the exit pick that led us here
+      this.telemetry.stuckRecoveries++;
+      this.routeT = 0;
     }
 
     b.move(dt);
@@ -730,8 +758,8 @@ export class Bot {
       // see the foe but the standing eye can, stand and shoot over it.
       const duckEye = new THREE.Vector3(b.pos.x, b.pos.y + CROUCH_HEIGHT - EYE_INSET, b.pos.z);
       const standEye = new THREE.Vector3(b.pos.x, b.pos.y + STAND_HEIGHT - EYE_INSET, b.pos.z);
-      if (!g.losClear(duckEye, this.target.body.eye()) &&
-          g.losClear(standEye, this.target.body.eye())) rangeDuck = false;
+      if (!g.losClear(duckEye, targetEye) &&
+          g.losClear(standEye, targetEye)) rangeDuck = false;
     }
     const ducking = this.duckT > 0 || rangeDuck;
     b.half.h += ((ducking ? CROUCH_HEIGHT : STAND_HEIGHT) - b.half.h) * Math.min(1, dt * 10);
@@ -741,10 +769,10 @@ export class Bot {
     // --- grenades: one frag per life, lobbed over the knee walls foes
     // duck behind. Arc up a touch so it clears cover and lands at feet. ---
     this.nadeT -= dt;
-    if (this.target && this.nades > 0 && this.nadeT <= 0 && !b.inWater &&
+    if (this.target && targetPoint && this.nades > 0 && this.nadeT <= 0 && !b.inWater &&
         foeD > 10 && foeD < 28 && Math.random() < dt * 0.25 &&
-        g.losClear(b.eye(), this.target.body.eye())) {
-      const lob = new THREE.Vector3().subVectors(this.target.body.pos, b.pos).normalize();
+        g.losClear(b.eye(), targetEye)) {
+      const lob = new THREE.Vector3().subVectors(targetPoint, b.pos).normalize();
       lob.y += 0.45; lob.normalize();
       this.nades--; this.nadeT = 7;
       g.throwGrenade(this, b.eye(), lob, 11 + foeD * 0.15);
@@ -766,7 +794,13 @@ export class Bot {
         this.reloadStage = 4; sfx.at('reloadChamber', b.pos, spec.key);
       }
       if (this.reloading <= 0) { this.ammo = spec.mag; this.reloadStage = 0; }
-    } else if (this.target && this.aimT > reactT && this.cooldown <= 0) {
+    } else if (!this.target && this.ammo < TOOLS[this.gunClass].mag * 0.55) {
+      // Top off during a lull instead of discovering an almost-empty magazine
+      // on the first shot of the next fight.
+      const spec = TOOLS[this.gunClass];
+      this.reloading = spec.reload; this.reloadStage = 1;
+      sfx.at('reloadStart', b.pos, spec.key);
+    } else if (this.target && targetPoint && this.aimT > reactT && this.cooldown <= 0) {
       if (this.ammo <= 0) {
         const spec = TOOLS[this.gunClass];
         this.reloading = spec.reload; this.reloadStage = 1;
@@ -774,10 +808,10 @@ export class Bot {
       }
       else {
         const from = b.eye();
-        const toFoe = new THREE.Vector3().subVectors(this.target.body.pos, b.pos).setY(0).normalize();
+        const toFoe = new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize();
         // The muzzle only speaks once the head has turned on target — and
         // opening shots go wide before the aim settles. No 180° no-scopes.
-        if (this.face.dot(toFoe) > 0.87 && g.losClear(from, this.target.body.eye())) {
+        if (this.face.dot(toFoe) > 0.87 && g.losClear(from, targetEye)) {
           this.ammo--;
           const burstPause = Math.random() < 0.25;
           this.cooldown = TOOLS[this.gunClass].interval * (burstPause ? 4 : 1); // burst rhythm
@@ -804,8 +838,8 @@ export class Bot {
           // aim precisely at the head by default" into bots aimbot-sniping
           // every fight. Headshots now come from spread landing high, the
           // way they should, not from being the default aim point.
-          const aimAt = new THREE.Vector3(this.target.body.pos.x,
-            this.target.body.pos.y + this.target.body.half.h * 0.5, this.target.body.pos.z);
+          const aimAt = new THREE.Vector3(targetPoint.x,
+            targetPoint.y + this.target.body.half.h * 0.5, targetPoint.z);
           const aim = new THREE.Vector3().subVectors(aimAt, from).normalize();
           const held = Math.min(1, (this.aimT - reactT) / 1.0); // 0 fresh -> 1 well-aimed
           // Fresh-shot end widened 1.8 -> 3.2: the very first shot right as
@@ -816,7 +850,7 @@ export class Bot {
           // ended was still too good. Well-aimed end (0.5) is unchanged:
           // a bot that's held aim for a full second earns real accuracy,
           // same as it always did.
-          const spreadMul = (3.2 - 2.7 * held) / this.skill;
+          const spreadMul = (3.2 - 2.7 * held) * this.difficulty.aimError / this.skill;
           g.fireHitscan(this, from, aim, { ...spec, spread: spec.spread * spreadMul });
         }
       }
@@ -825,8 +859,8 @@ export class Bot {
     // --- presentation: eyes track the fight, but heads take time to turn ---
     const pg = this.parts.group;
     pg.position.copy(b.pos);
-    const want = this.target
-      ? new THREE.Vector3().subVectors(this.target.body.pos, b.pos).setY(0).normalize()
+    const want = this.target && targetPoint
+      ? new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize()
       : dir;
     if (want.lengthSq() > 0.01) {
       const ang = this.face.angleTo(want);
@@ -839,6 +873,42 @@ export class Bot {
     this.parts.gun.visible = !shoveling;
     this.parts.spade.visible = shoveling;
     animateSoldier(this.parts, Math.hypot(b.vel.x, b.vel.z), g.time + this.name.length);
+  }
+
+  _planLocalRoute(direct, fy) {
+    const w = this.game.world, b = this.body;
+    const side = this.id % 2 ? -1 : 1;
+    const degrees = [0, 30 * side, -30 * side, 60 * side, -60 * side,
+      90 * side, -90 * side];
+    const candidates = [];
+    for (const deg of degrees) {
+      const angle = deg * Math.PI / 180;
+      const x = direct.x * Math.cos(angle) - direct.z * Math.sin(angle);
+      const z = direct.x * Math.sin(angle) + direct.z * Math.cos(angle);
+      let clear = 0, maxStep = 0, maxDrop = 0;
+      for (const reach of [1.1, 2.1, 3.1, 4.1]) {
+        const px = Math.floor(b.pos.x + x * reach);
+        const pz = Math.floor(b.pos.z + z * reach);
+        // A one-high obstacle with two cells above it is a step; a two-high
+        // face is a wall. Open cells need support no more than two down or the
+        // route is a fall/bridge decision handled by the existing rim logic.
+        if (w.solid(px, fy, pz)) {
+          if (w.solid(px, fy + 1, pz) || w.solid(px, fy + 2, pz)) break;
+          maxStep = Math.max(maxStep, 1);
+        } else {
+          if (w.solid(px, fy + 1, pz)) break;
+          let drop = 0;
+          for (let y = fy - 1; y >= fy - 3 && !w.solid(px, y, pz); y--) drop++;
+          maxDrop = Math.max(maxDrop, drop);
+          if (drop > 2) break;
+        }
+        clear++;
+      }
+      candidates.push({ angle, x, z, clear, maxStep, maxDrop,
+        progress: Math.cos(angle) * clear });
+    }
+    const best = chooseLocalRoute(candidates);
+    return best ? new THREE.Vector3(best.x, 0, best.z).normalize() : null;
   }
 
   _acquire(profile = CLASS_PROFILE[this.gunClass]) {
@@ -864,9 +934,18 @@ export class Bot {
     return best;
   }
 
-  // Shot in the back? Whirl toward the shooter — seeing is believing.
+  // Shot in the back? The impact supplies a direction, not wall vision.
   alert(from) {
-    if (from?.alive) this.face.subVectors(from.body.pos, this.body.pos).setY(0).normalize();
+    if (from?.alive && from.team !== this.team) {
+      this.face.subVectors(from.body.pos, this.body.pos).setY(0).normalize();
+      this.target = from;
+      this.targetVisible = false;
+      this.memoryPos.copy(from.body.pos); // damage direction is legitimate sensory information
+      this.memorySeenAt = this.game.time;
+      this.memoryT = Math.min(1.5, this.difficulty.memory);
+      this.aimT = 0;
+      this.nextThink = Math.min(this.nextThink, this.game.time + 0.08);
+    }
   }
 
   // Shovel a single voxel (debris, edit log, network sync all handled inside).
@@ -954,6 +1033,12 @@ export class Bot {
     this.target = null;
     this.aimT = 0;
     this.memoryT = 0;
+    this.memorySeenAt = -Infinity;
+    this.targetVisible = false;
+    this.cachedGoal = null;
+    this.nextThink = this.game.time + this.difficulty.thinkInterval;
+    this.navRevision = this.game.navRevision ?? 0;
+    this.orderId = null;
     this.face.set(this.heading, 0, 0);
     this.lastPos.copy(this.body.pos);
     this.deadT = -1;

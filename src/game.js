@@ -19,21 +19,43 @@ import { validClientMessage, validServerMessage } from './protocol.js';
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
   resetEnvironmentalState, stepBreath } from './environment.js';
+import { modeMatchSeconds, regulationDecision, respawnWaveDelay, scoreLeader,
+  tacticalSpawnScore } from './pacing.js';
+import { assistCreditors, CONTRIBUTION, contributionRow,
+  rankContributionRows } from './scoring.js';
+import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
+  occupiedScoringTeam, stepHillCapture, stepHillRotation } from './koth.js';
+import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
+  OVERCHARGE_WINDUP, availableStreakAbility, gainStreak, overchargeDamage,
+  spendStreak, stepOvercharge } from './streaks.js';
+import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
+  applyFieldSupply, inFieldStation, nearestFieldStation, stationCanSupply,
+  stepFieldStation } from './field-stations.js';
+import { buildMatchReport } from './match-report.js';
+import { rematchVotesNeeded, TEAM_PING_COOLDOWN, TEAM_PING_LIMIT,
+  TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
 
 const WIN_SCORE = 3;
+const POST_MATCH_TIME = 14;
 // Team deathmatch: no flags, kills are points. ?killcap= lowers the bar for tests.
 // Module-scope URL params are guarded so the file imports headless (Node
 // test harnesses have no `location`).
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 const killcapParam = parseInt(QUERY.get('killcap'), 10);
 const KILL_LIMIT = Number.isInteger(killcapParam) ? Math.max(2, killcapParam) : 30;
-// King of the hill: own the point to accrue hold time; first to HOLD_LIMIT
-// seconds wins. Flipping a held point takes CAP_TIME uncontested seconds on
-// it. ?kothtime= shrinks the clock for tests.
+// King of the hill: capture and physically occupy the point to accrue time;
+// first to HOLD_LIMIT seconds wins. ?kothtime= shrinks the clock for tests.
 const kothtimeParam = parseInt(QUERY.get('kothtime'), 10);
 const HOLD_LIMIT = Number.isInteger(kothtimeParam) ? Math.max(10, kothtimeParam) : 120;
 const CAP_TIME = 6;
-const REDEPLOY = 10; // seconds back at base after dying — humans and bots alike
+// Short-cycle visual QA hook; normal rounds move every 45 seconds.
+const hillcycleParam = parseInt(QUERY.get('hillcycle'), 10);
+const HILL_CYCLE = Number.isInteger(hillcycleParam)
+  ? Math.min(120, Math.max(12, hillcycleParam)) : HILL_ACTIVE_TIME;
+// Test hook for exercising regulation/overtime without waiting a full round.
+const matchtimeParam = parseInt(QUERY.get('matchtime'), 10);
+const MATCH_TIME_OVERRIDE = Number.isInteger(matchtimeParam)
+  ? Math.min(3600, Math.max(5, matchtimeParam)) : null;
 const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
 // A client declares the host dead after this much snapshot silence. Chosen
 // against the interval keepalive in main.js: a healthy backgrounded host
@@ -275,7 +297,7 @@ const hud = {
     else $('ammo').innerHTML = p.reloading > 0
       ? `<small>reloading…</small>`
       : `${p.ammo[p.tool]} <small>/ ${t.mag}</small>`;
-    $('toolhint').textContent = `Q·E / 1–4 weapons · CTRL crouch · R reload`;
+    $('toolhint').textContent = `Q·E / 1–4 weapons · G squad ping · R reload`;
   },
   health(p) {
     $('healthfill').style.width = Math.max(0, p.health) + '%';
@@ -319,10 +341,20 @@ const hud = {
   streakStatus(p) {
     const ready = $('airstrikeReady');
     if (ready) {
-      if (p._piloting || p._fallingT > 0 || p._lingerT > 0 || p._overchargeT > 0) ready.style.display = 'none';
-      else if ((p._streak ?? 0) >= 10) { ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block'; }
-      else if ((p._streak ?? 0) - (p._overchargeAtStreak ?? 0) >= 5) { ready.textContent = 'overcharge ready — [F]'; ready.style.display = 'block'; }
-      else ready.style.display = 'none';
+      const points = Math.floor(p._streak ?? 0);
+      const ability = availableStreakAbility(points, p._overchargeWindup, p._overchargeT);
+      ready.classList.toggle('building', !ability);
+      if (p._piloting || p._fallingT > 0 || p._lingerT > 0
+          || p._overchargeWindup > 0 || p._overchargeT > 0) ready.style.display = 'none';
+      else if (ability === 'airstrike') {
+        ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block';
+      } else if (ability === 'overcharge') {
+        ready.textContent = `overcharge ready — [F] · ${points}/${AIRSTRIKE_COST} strike`;
+        ready.style.display = 'block';
+      } else if (points > 0) {
+        ready.textContent = `combat momentum ${points}/${OVERCHARGE_COST}`;
+        ready.style.display = 'block';
+      } else ready.style.display = 'none';
     }
     const overlay = $('airstrikeHud');
     if (overlay) {
@@ -335,7 +367,13 @@ const hud = {
     }
     const active = $('overchargeActive');
     if (active) {
-      if (p._overchargeT > 0) { active.textContent = `overcharge — ${Math.ceil(p._overchargeT)}s`; active.style.display = 'block'; }
+      if (p._overchargeWindup > 0) {
+        active.textContent = `overcharge charging — ${p._overchargeWindup.toFixed(1)}s`;
+        active.classList.add('charging'); active.style.display = 'block';
+      } else if (p._overchargeT > 0) {
+        active.textContent = `overcharge ${Math.ceil(p._overchargeT)}s · +35% out / +25% in`;
+        active.classList.remove('charging'); active.style.display = 'block';
+      }
       else active.style.display = 'none';
     }
   },
@@ -345,13 +383,22 @@ const hud = {
       : `<span class="g">GREEN ${g.captures.green}</span><span style="opacity:.4">—</span><span class="b">${g.captures.blue} BLUE</span>`;
     if (next !== this._lastScore) { this._lastScore = next; $('score').innerHTML = next; }
     this._flagState(g);
+    this.clock(g);
+  },
+  clock(g) {
+    const el = $('matchclock');
+    if (!el) return;
+    const text = g.overtime ? 'OVERTIME' : holdClock(Math.max(0, g.matchRemaining ?? 0));
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('overtime', !!g.overtime);
+    el.classList.toggle('urgent', !g.overtime && (g.matchRemaining ?? 0) <= 60);
   },
   objective(g) {
     const el = $('objective');
     if (!el) return;
     const p = g.player;
     let target = null, label = '';
-    if (g.hill) { target = g.hill.pos; label = 'HILL'; }
+    if (g.hill) { target = g.hill.pos; label = g.hill.label ?? 'HILL'; }
     else if (g.flags) {
       if (p.carrier) { target = g.flags[p.team].home; label = 'RETURN'; }
       else { const enemy = p.team === 'green' ? 'blue' : 'green'; target = g.flags[enemy].pos; label = 'FLAG'; }
@@ -364,13 +411,61 @@ const hud = {
     el.querySelector('.arrow').style.transform = `rotate(${angle}rad)`;
     el.querySelector('.label').textContent = `${label} ${Math.round(Math.hypot(dx, dz))}m`;
   },
+  teamPing(g) {
+    const el = $('teamPing');
+    if (!el) return;
+    const p = g.player;
+    const mark = g.teamPings?.filter(m => m.team === p.team)
+      .sort((a, b) => p.body.pos.distanceToSquared(a.pos) - p.body.pos.distanceToSquared(b.pos))[0];
+    if (!mark || !p.alive) { el.style.display = 'none'; return; }
+    const dx = mark.pos.x - p.body.pos.x, dz = mark.pos.z - p.body.pos.z;
+    const look = p.lookDir();
+    const angle = Math.atan2(look.x * dz - look.z * dx, look.x * dx + look.z * dz);
+    el.style.display = 'flex';
+    el.querySelector('.arrow').style.transform = `rotate(${angle}rad)`;
+    el.querySelector('.label').textContent = `${mark.kind} · ${mark.name} · ${Math.round(Math.hypot(dx, dz))}m`;
+  },
+  rematch(g, voters = [], needed = 1) {
+    const btn = $('rematchBtn');
+    if (!btn) return;
+    const mine = g._kdKey(g.player);
+    const voted = voters.includes(mine);
+    btn.disabled = voted;
+    btn.classList.toggle('voted', voted);
+    btn.textContent = `${voted ? 'REMATCH VOTED' : 'VOTE REMATCH'} · ${voters.length}/${needed}`;
+  },
+  fieldStation(g) {
+    const el = $('fieldStation');
+    if (!el) return;
+    const p = g.player;
+    const near = p?.alive
+      ? nearestFieldStation(g.fieldStations, p.body.pos, FIELD_STATION_NOTICE_RADIUS) : null;
+    if (!near) { el.style.display = 'none'; return; }
+    const s = near.station;
+    let text;
+    if (s.cooldown > 0) text = `${s.label} CACHE · RECHARGING ${Math.ceil(s.cooldown)}s`;
+    else if (s.contested) text = `${s.label} CACHE · CONTESTED`;
+    else if (s.progress > 0)
+      text = `${s.label} CACHE · SECURING ${Math.round(s.progress / FIELD_STATION_CAPTURE_TIME * 100)}%`;
+    else if (!stationCanSupply(p)) text = `${s.label} CACHE · SUPPLIES FULL`;
+    else text = `${s.label} CACHE · HOLD POSITION TO RESUPPLY`;
+    el.textContent = text;
+    el.classList.toggle('contested', !!s.contested);
+    el.classList.toggle('cooldown', s.cooldown > 0);
+    el.style.display = 'block';
+  },
   _flagState(g) {
     if (g.hill) { // king of the hill: who owns the point, who's taking it
       const h = g.hill;
-      const text = h.contested ? 'CONTESTED'
+      const scoring = occupiedScoringTeam(h.owner, h.presence);
+      const state = h.contested ? 'CONTESTED — NO SCORE'
         : h.progress > 0.1 ? `${h.capTeam.toUpperCase()} CAPTURING ${Math.round(h.progress / CAP_TIME * 100)}%`
-        : h.owner ? `${h.owner.toUpperCase()} HOLDS THE HILL`
-        : `hold the hill for ${holdClock(HOLD_LIMIT)} to win`;
+        : scoring ? `${scoring.toUpperCase()} OCCUPIES THE HILL`
+        : h.owner ? `${h.owner.toUpperCase()} CONTROLS · HILL VACANT — NO SCORE`
+        : `capture and occupy for ${holdClock(HOLD_LIMIT)} to win`;
+      const moving = !g.overtime && h.rotateIn <= HILL_MOVE_WARNING
+        ? ` · MOVES IN ${Math.max(1, Math.ceil(h.rotateIn))}` : '';
+      const text = state + moving;
       if (text !== this._lastFlags) { this._lastFlags = text; $('flagstate').textContent = text; }
       return;
     }
@@ -389,23 +484,56 @@ const hud = {
     const text = parts.join(' · ') || `first to ${WIN_SCORE} captures`;
     if (text !== this._lastFlags) { this._lastFlags = text; $('flagstate').textContent = text; }
   },
-  // Scoreboard table, sorted by kills. Shared by the TAB overlay and the
+  // Scoreboard table, sorted by total contribution. Shared by the TAB overlay and the
   // end-of-round summary. Names are composed here from map keys that were
   // cleanName'd (local) or sanitized on receipt (client), so plain text.
   kdTable(g) {
-    const rows = [...g.kd.entries()].sort((a, b) =>
-      b[1].k - a[1].k || a[1].d - b[1].d || (a[1].name ?? '').localeCompare(b[1].name ?? ''));
+    const rows = rankContributionRows(g.kd.entries());
     const me = g.player ? g._kdKey(g.player) : null;
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    let html = '<table class="kd"><tr><th></th><th>K</th><th>D</th><th>K/D</th></tr>';
+    let html = '<table class="kd"><tr><th></th><th>SCORE</th><th>K</th><th>D</th><th>A</th><th>OBJ</th></tr>';
     for (const [key, r] of rows) {
       const c = teamCss(r.team);
-      const ratio = (r.k / Math.max(1, r.d)).toFixed(2);
       html += `<tr${key === me ? ' class="me"' : ''}>`
         + `<td style="color:${c}">${esc(r.name)}</td>`
-        + `<td>${r.k}</td><td>${r.d}</td><td>${ratio}</td></tr>`;
+        + `<td>${Math.floor(r.score ?? 0)}</td><td>${r.k}</td><td>${r.d}</td>`
+        + `<td>${r.a ?? 0}</td><td>${Math.floor(r.objective ?? 0)}</td></tr>`;
     }
     return html + '</table>';
+  },
+  matchReport(g, report, recordUpdate) {
+    const r = report.local;
+    $('endStats').innerHTML = [
+      ['SCORE', Math.round(r.score), `${report.overallRank === 1 ? 'match leader' : 'contribution'}`],
+      ['K / D / A', `${r.k} / ${r.d} / ${r.a}`, `${r.d ? (r.k / r.d).toFixed(2) : r.k.toFixed(2)} K/D`],
+      ['OBJECTIVE', Math.round(r.objective), g.gameMode === 'koth' ? 'actions + hold time' : 'objective actions'],
+      ['RANK', `#${report.overallRank} / ${report.overallSize}`,
+        `#${report.teamRank} of ${report.teamSize} on team`],
+    ].map(([label, value, note]) => `<div class="reportStat"><span>${label}</span>`
+      + `<b>${value}</b><small>${note}</small></div>`).join('');
+
+    $('endMedals').innerHTML = report.medals.length
+      ? report.medals.map(m => `<div class="medal ${m.id}"><b>${m.name}</b><span>${m.detail}</span></div>`).join('')
+      : '<div class="noMedals">NO MEDALS THIS ROUND</div>';
+
+    const bests = recordUpdate.newBests;
+    if (bests.length) {
+      $('endBests').classList.add('new');
+      $('endBests').textContent = `NEW ${recordUpdate.mode.toUpperCase()} BEST${bests.length > 1 ? 'S' : ''} · `
+        + bests.map(b => `${b.label} ${b.value}`).join(' · ');
+    } else {
+      $('endBests').classList.remove('new');
+      const saved = stats.get().records?.[recordUpdate.mode] ?? {};
+      $('endBests').textContent = `${recordUpdate.mode.toUpperCase()} PERSONAL BESTS · `
+        + `SCORE ${Math.round(saved.score ?? 0)} · KILLS ${Math.round(saved.k ?? 0)} · `
+        + `ASSISTS ${Math.round(saved.a ?? 0)} · OBJECTIVE ${Math.round(saved.objective ?? 0)}`;
+    }
+    const mastery = recordUpdate.mastery ?? stats.mastery();
+    $('endMastery').textContent = recordUpdate.newMasteryTier
+      ? `${recordUpdate.newMasteryTier.name} MASTERY UNLOCKED · ${recordUpdate.newMasteryTier.bands} WEAPON BAND${recordUpdate.newMasteryTier.bands === 1 ? '' : 'S'}`
+      : mastery.next
+        ? `${mastery.tier.name} MASTERY · ${mastery.remaining} SCORE TO ${mastery.next.name}`
+        : `${mastery.tier.name} MASTERY · ALL WEAPON BANDS EARNED`;
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);
@@ -479,7 +607,7 @@ const hud = {
   },
   respawn(t) {
     $('respawn').style.opacity = t > 0 ? 1 : 0;
-    if (t > 0) $('respawn').textContent = `REDEPLOYING IN ${Math.ceil(t)}…`;
+    if (t > 0) $('respawn').textContent = `TEAM WAVE IN ${Math.ceil(t)}…`;
     $('classPick').style.opacity = t > 0 ? 1 : 0;
   },
   // Highlights which class is currently PENDING for the next life — called
@@ -656,6 +784,48 @@ const hud = {
       ctx.globalAlpha = 0.85;
       ctx.beginPath(); ctx.arc(cx, cz, 2.4, 0, 7); ctx.fill();
       ctx.globalAlpha = 1;
+      // During the relocation warning, preview the next point so squads can
+      // rotate early instead of learning the destination after the jump.
+      if (!g.overtime && h.rotateIn <= HILL_MOVE_WARNING && h.spots?.length > 1) {
+        const next = h.spots[nextHillIndex(h.index, h.spots.length)];
+        ctx.strokeStyle = 'rgba(255,217,122,.9)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.arc((next.x + 0.5) * s, (next.z + 0.5) * s,
+          (next.r ?? h.r) * s, 0, 7); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    // Neutral field caches remain marked after their physical shelter is
+    // damaged, so the team can rebuild around the same tactical location.
+    for (const station of g.fieldStations ?? []) {
+      const cx = station.x * s, cz = station.z * s;
+      ctx.save();
+      ctx.translate(cx, cz);
+      ctx.strokeStyle = station.contested ? '#e05a4e'
+        : station.cooldown > 0 ? 'rgba(232,236,242,.35)' : '#ffd97a';
+      ctx.lineWidth = station.contested ? 1.8 : 1.2;
+      const r = station.contested ? 3.5 + Math.sin(g.time * 7) : 3.2;
+      ctx.strokeRect(-r, -r, r * 2, r * 2);
+      if (station.progress > 0) {
+        ctx.fillStyle = station.team ? teamCss(station.team) : '#ffd97a';
+        ctx.globalAlpha = 0.75;
+        ctx.fillRect(-2, 2.6, 4 * Math.min(1,
+          station.progress / FIELD_STATION_CAPTURE_TIME), 1.2);
+      }
+      ctx.restore();
+    }
+    // Tactical marks are team-only and expire quickly; a pulsing diamond
+    // gives them enough map presence without obscuring terrain or enemies.
+    for (const mark of g.teamPings ?? []) {
+      if (mark.team !== g.player.team) continue;
+      const cx = mark.pos.x * s, cz = mark.pos.z * s;
+      const r = 3.5 + Math.sin(g.time * 8) * 0.8;
+      ctx.save(); ctx.translate(cx, cz);
+      ctx.strokeStyle = '#ffd97a'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r, 0);
+      ctx.lineTo(0, r); ctx.lineTo(-r, 0); ctx.closePath(); ctx.stroke();
+      ctx.restore();
     }
     // You: a white wedge pointed where you look. lookDir's ground projection
     // is (cos yaw, -sin yaw) in world (x,z), and canvas z runs downward.
@@ -773,10 +943,15 @@ export class Game {
     this._lastHealth = 100;
     this._respawnT = 0;                  // client: cosmetic redeploy countdown
     this._chatCd = 0;                    // chat send cooldown (wall clock)
+    this.teamPings = [];                 // short-lived, team-only tactical marks
+    this._nextTeamPingId = 1;
+    this._rematchVotes = new Set();
     this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
     this._pendingStrikes = [];           // host/solo authoritative impact timers
     this._airstrikeDrones = new Map();   // every mode: local visual replicas by strike id
     this._lastStrikeRows = [];           // client: latest full strike state for migration
+    this._lastAbilityRows = [];          // contribution meter + Overcharge migration state
+    this._lastStationRows = [];          // field-cache cooldown/capture migration state
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
     // resets every rebuild(), so this tracks "what was my own row's k/d the
     // last time I checked" to diff against, not a running lifetime total.
@@ -785,6 +960,7 @@ export class Game {
     this.world = new VoxelWorld(scene);
     this.mapIndex = 0;                   // MAPS rotation position
     generateMap(this.world, this.seed, this.mapIndex);
+    this._initFieldStations();
     this._applyMapAtmosphere(this.mapIndex);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
@@ -808,12 +984,17 @@ export class Game {
     this.player.name = opts.name ?? 'You';
     this.hud = hud;
     this.chat = new Chat(this);
+    $('rematchBtn')?.addEventListener('click', () => this.requestRematch());
 
     if (this.mode !== 'client') this._spawnBots();
 
     this.gameMode = 'ctf';             // 'ctf' | 'tdm' | 'koth' — set before rebuild()
+    this.matchElapsed = 0;
+    this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
+    this.overtime = false;
+    this.winner = null;
     this.mapLock = null;               // host map pref: fixed index, or null = rotate
-    this.hill = null;                  // koth: { pos, r, owner, progress, contested }
+    this.hill = null;                  // koth: occupied rotating objective state
     this.flags = { green: new Flag(this, 'green'), blue: new Flag(this, 'blue') };
     this.captures = { green: 0, blue: 0 };
     this.grenades = [];
@@ -837,6 +1018,8 @@ export class Game {
     // 0/0 soldier still shows up. Host broadcasts the table on each death;
     // clients replace their copy wholesale (names are unique enough keys).
     this.kd = new Map();
+    this._scoreDirty = false;
+    this._scoreBroadcastT = 0;
     this._kdSeed();
 
     hud.refreshTool(this.player);
@@ -913,9 +1096,13 @@ export class Game {
   }
 
   rebuild(seed, map = this.mapIndex) {
+    this._clearTeamPings();
+    this._rematchVotes.clear();
     this._clearAirstrikeDrones();
     this._pendingStrikes = [];
     this._lastStrikeRows = [];
+    this._lastAbilityRows = [];
+    this._lastStationRows = [];
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
     for (const av of this.avatars.values()) av.dispose();
@@ -926,6 +1113,7 @@ export class Game {
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
+    this._initFieldStations();
     // Map generation owns the placed-block palette. Refresh the persistent
     // first-person model from that exact source before it is shown again.
     this.player?.syncBlockColor();
@@ -942,12 +1130,18 @@ export class Game {
     // Only capture-the-flag has flags; deathmatch and king of the hill don't.
     this.flags = this.gameMode === 'ctf'
       ? { green: new Flag(this, 'green'), blue: new Flag(this, 'blue') } : null;
-    // King of the hill: the zone rides the live terrain, so only the center
-    // and radius are fixed; the y-band is re-read per tick as craters form.
-    const hd = MAPS[this.mapIndex].hill ?? { x: SX / 2, z: SZ / 2, r: 8 };
+    // King of the hill: three map-authored, base-equidistant objectives. The
+    // active zone rides the live terrain; its vertical band is re-read per
+    // tick as players crater or rebuild the ground beneath it.
+    const spots = MAPS[this.mapIndex].hills
+      ?? [MAPS[this.mapIndex].hill ?? { x: SX / 2, z: SZ / 2, r: 8, label: 'CENTER' }];
+    const hd = spots[0];
     this.hill = this.gameMode === 'koth' && hd
-      ? { pos: new THREE.Vector3(hd.x + 0.5, this.world.surface(hd.x, hd.z), hd.z + 0.5),
-          r: hd.r, owner: null, progress: 0, contested: false, capTeam: null }
+      ? { spots, index: 0, label: hd.label ?? 'HILL',
+          pos: new THREE.Vector3(hd.x + 0.5,
+            this.world.surface(Math.floor(hd.x), Math.floor(hd.z)), hd.z + 0.5),
+          r: hd.r, owner: null, progress: 0, contested: false, capTeam: null,
+          presence: { green: 0, blue: 0 }, rotateIn: HILL_CYCLE }
       : null;
     if (this.hill) this._createHillVisual();
     this.respawnTimers.clear();
@@ -961,6 +1155,10 @@ export class Game {
       this._spawnBots();
     }
     this.captures = { green: 0, blue: 0 };
+    this.matchElapsed = 0;
+    this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
+    this.overtime = false;
+    this.winner = null;
     this.editLog = [];
     this.blockHits.clear();
     this.grenades = [];
@@ -979,6 +1177,8 @@ export class Game {
     this.over = false;
     this._lastHealth = 100;
     this.kd = new Map(); // fresh round, fresh scoreboard
+    this._scoreDirty = false;
+    this._scoreBroadcastT = 0;
     this._statsSeen = { k: 0, d: 0 }; // fresh baseline — see the constructor note
     this._kdSeed();
     hud.score(this);
@@ -995,10 +1195,36 @@ export class Game {
   _kdRow(e) {
     const key = this._kdKey(e);
     let r = this.kd.get(key);
-    if (!r) this.kd.set(key, r = { name: e.name, team: e.team, k: 0, d: 0 });
+    if (!r) this.kd.set(key, r = contributionRow({ name: e.name, team: e.team }));
+    else Object.assign(r, contributionRow(r));
     r.name = e.name;
     r.team = e.team; // migration/rejoin could flip an index's side
     return r;
+  }
+  _award(e, points = 0, { assists = 0, objective = 0 } = {}, refresh = true) {
+    if (!e) return;
+    const earned = Math.max(0, Number(points) || 0);
+    const r = this._kdRow(e);
+    r.score += earned;
+    r.a += Math.max(0, Number(assists) || 0);
+    r.objective += Math.max(0, Number(objective) || 0);
+    // Human streak rewards use the exact same contribution values as the
+    // scoreboard. Kills still matter, but assists and playing the objective
+    // now advance the meter too. Bots do not call rewards, so don't maintain
+    // a meter they can never spend.
+    if (e === this.player || e.isRemote) e._streak = gainStreak(e._streak, earned);
+    this._scoreDirty = true;
+    if (refresh) hud.statsRefresh(this);
+  }
+  _scoreRows() {
+    return [...this.kd].map(([key, r]) => [key, r.name, r.team, r.k, r.d,
+      Math.round(r.score), r.a, Math.round(r.objective)]);
+  }
+  _broadcastScoreboard(force = false) {
+    if (!this._scoreDirty && !force) return;
+    this._scoreDirty = false;
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'kd', rows: this._scoreRows() });
+    hud.statsRefresh(this);
   }
   // Lifetime kills/deaths (see stats.js) are driven off the same scoreboard
   // both roles already keep current — diffed against the last-seen values
@@ -1038,6 +1264,74 @@ export class Game {
 
   // this.player is undefined while its constructor asks for its first spawn.
   entities() { return [this.player, ...this.remote.values(), ...this.bots].filter(Boolean); }
+
+  _initFieldStations() {
+    this.fieldStations = (MAPS[this.mapIndex]?.stations ?? []).map((s, index) => ({
+      index, x: s.x, y: s.y ?? this.world.surface(Math.floor(s.x), Math.floor(s.z)) + 1,
+      z: s.z, label: s.label ?? `FIELD ${index + 1}`,
+      cooldown: 0, progress: 0, team: null, contested: false,
+    }));
+  }
+
+  _stationRows() {
+    const code = team => team === 'green' ? 1 : team === 'blue' ? 2 : 0;
+    return (this.fieldStations ?? []).map(s => [s.index,
+      Math.round(Math.max(0, s.cooldown) * 10),
+      Math.round(Math.max(0, s.progress) * 10), code(s.team), s.contested ? 1 : 0]);
+  }
+
+  _syncStationRows(rows) {
+    this._lastStationRows = rows.map(row => row.slice());
+    for (const row of rows) {
+      const s = this.fieldStations?.[row[0]];
+      if (!s) continue;
+      s.cooldown = row[1] / 10;
+      s.progress = row[2] / 10;
+      s.team = row[3] === 1 ? 'green' : row[3] === 2 ? 'blue' : null;
+      s.contested = !!row[4];
+    }
+  }
+
+  // Only one critically under-supplied bot per team diverts to a cache at a
+  // time. Carriers, active fighters, flag responders, and defenders keep
+  // their real job; this is a short tactical detour, not a new bot obsession.
+  botFieldStationGoal(bot) {
+    if (!bot?.alive || bot.carrier || bot.target || bot.responding
+        || bot.role === 'defend' || (this.flags?.[bot.team]?.state ?? 'home') !== 'home'
+        || !((bot.blocks ?? 0) <= 6 || (bot.nades ?? 0) === 0)) return null;
+    const ready = (this.fieldStations ?? []).filter(s => s.cooldown <= 0);
+    const near = nearestFieldStation(ready, bot.body.pos, 52);
+    if (!near) return null;
+    const contenders = this.bots.filter(b => b.alive && b.team === bot.team && !b.carrier
+      && !b.target && ((b.blocks ?? 0) <= 6 || (b.nades ?? 0) === 0));
+    contenders.sort((a, b) => Math.hypot(a.body.pos.x - near.station.x,
+      a.body.pos.z - near.station.z) - Math.hypot(b.body.pos.x - near.station.x,
+      b.body.pos.z - near.station.z) || a.id - b.id);
+    if (contenders[0] !== bot) return null;
+    return new THREE.Vector3(near.station.x, near.station.y, near.station.z);
+  }
+
+  _updateFieldStations(dt) {
+    for (const station of this.fieldStations ?? []) {
+      const occupants = this.entities().filter(e => e.alive && inFieldStation(station, e));
+      const next = stepFieldStation(station, occupants, dt);
+      Object.assign(station, next);
+      if (!next.activated) continue;
+      for (const e of occupants) {
+        if (e.team !== next.activated || !stationCanSupply(e)) continue;
+        const grant = applyFieldSupply(e);
+        if (!grant.blocks && !grant.nades) continue;
+        if ('grenadeRegen' in e) e.grenadeRegen = 0;
+        if ('nadeRegen' in e) e.nadeRegen = 0;
+        const text = `FIELD CACHE · +${grant.blocks} BLOCKS · +${grant.nades} GRENADE`;
+        if (e === this.player) {
+          sfx.pickup(); hud.message(text, '#ffd97a'); hud.refreshTool(e);
+        } else if (e.isRemote) {
+          this.net.sendTo(e.id, { t: 'e', k: 'supply', blocks: grant.blocks, nades: grant.nades });
+        }
+      }
+    }
+  }
 
   // Announcements: show locally, and relay to clients when hosting.
   feed(html) {
@@ -1081,10 +1375,21 @@ export class Game {
       p.team === team || Math.hypot(p.x - spot.x, p.z - spot.z) > r);
   }
 
-  // Pick a spawn just outside the base gate: never in water, never at the
-  // bottom of a fresh crater, and as far from living enemies as the options
-  // allow — spawning into a camper's sights is how you get one-shotted.
-  spawnPoint(team) {
+  _spawnSurface(x, z) {
+    const fx = Math.floor(x), fz = Math.floor(z);
+    if (fx < 2 || fz < 2 || fx >= SX - 2 || fz >= SZ - 2) return null;
+    const h = this.world.surface(fx, fz);
+    if (h < SEA) return null;
+    let rim = h;
+    for (const [dx, dz] of [[3, 0], [-3, 0], [0, 3], [0, -3]])
+      rim = Math.max(rim, this.world.surface(fx + dx, fz + dz));
+    if (rim - h > 3) return null; // crater floor — use the rim instead
+    return { x, y: h + 1.02, z };
+  }
+
+  // CTF intentionally retains base deployment: crossing the field with the
+  // flag is the mode's core risk. The other modes use _dynamicSpawnPoint.
+  _baseSpawnPoint(team) {
     const b = BASE[team];
     const dir = team === 'green' ? 1 : -1; // just outside the gate, facing the field
     const foes = this.foesOf(team).filter(e => e.alive).map(e => e.body.pos);
@@ -1092,20 +1397,83 @@ export class Game {
     for (let i = 0; i < 16; i++) {
       const x = b.x + dir * (4 + Math.random() * 16) + (Math.random() - 0.5) * 8;
       const z = b.z + (Math.random() - 0.5) * 36;
-      const fx = Math.floor(x), fz = Math.floor(z);
-      const h = this.world.surface(fx, fz);
-      if (h < SEA) continue; // don't spawn swimming
-      let rim = h;
-      for (const [dx, dz] of [[3, 0], [-3, 0], [0, 3], [0, -3]])
-        rim = Math.max(rim, this.world.surface(fx + dx, fz + dz));
-      if (rim - h > 3) continue; // crater floor — spawn up on solid ground
+      const candidate = this._spawnSurface(x, z);
+      if (!candidate) continue;
       let nearest = 40;
-      for (const f of foes) nearest = Math.min(nearest, Math.hypot(f.x - x, f.y - h, f.z - z));
-      if (nearest > bestScore) { bestScore = nearest; best = { x, y: h + 1.02, z }; }
+      for (const f of foes) nearest = Math.min(nearest,
+        Math.hypot(f.x - x, f.y - candidate.y, f.z - z));
+      if (nearest > bestScore) { bestScore = nearest; best = candidate; }
     }
     if (best) return best;
     const x = b.x + dir * 12, z = b.z;
     return { x, y: this.world.surface(Math.floor(x), Math.floor(z)) + 1.02, z };
+  }
+
+  _dynamicSpawnPoint(team) {
+    const living = this.entities().filter(e => e?.alive && e.body);
+    const foes = living.filter(e => e.team !== team);
+    const allies = living.filter(e => e.team === team);
+    const b = BASE[team], dir = team === 'green' ? 1 : -1;
+    const objective = this.hill?.pos ?? (foes.length ? {
+      x: foes.reduce((n, e) => n + e.body.pos.x, 0) / foes.length,
+      z: foes.reduce((n, e) => n + e.body.pos.z, 0) / foes.length,
+    } : { x: SX / 2, z: SZ / 2 });
+    const raw = [];
+
+    // Reinforce living squadmates without spawning on their shoulders.
+    for (const ally of allies) for (let i = 0; i < 3; i++) {
+      const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 12;
+      raw.push([ally.body.pos.x + Math.cos(a) * r, ally.body.pos.z + Math.sin(a) * r]);
+    }
+    if (this.gameMode === 'koth' && this.hill) {
+      // Approach the hill from the team's side, but vary range and bearing so
+      // a wave does not materialize in one grenade-sized knot.
+      const homeAngle = Math.atan2(b.z - this.hill.pos.z, b.x - this.hill.pos.x);
+      for (let i = 0; i < 24; i++) {
+        const a = homeAngle + (Math.random() - 0.5) * 2.5;
+        const r = this.hill.r + 18 + Math.random() * 18;
+        raw.push([this.hill.pos.x + Math.cos(a) * r,
+          this.hill.pos.z + Math.sin(a) * r]);
+      }
+    } else {
+      // TDM lives in the battlefield rather than at either flag stand. Seed
+      // broad team-side lanes, then let safety/exposure scoring choose among
+      // them based on where the live fight actually is.
+      for (let i = 0; i < 24; i++) {
+        const advance = 44 + Math.random() * 48;
+        raw.push([b.x + dir * advance + (Math.random() - 0.5) * 16,
+          b.z + (Math.random() - 0.5) * 110]);
+      }
+    }
+
+    const enemyRows = foes.map(e => e.body.pos);
+    const allyRows = allies.map(e => e.body.pos);
+    let best = null, bestScore = -Infinity;
+    for (const [x, z] of raw) {
+      const candidate = this._spawnSurface(x, z);
+      if (!candidate) continue;
+      const eye = new THREE.Vector3(candidate.x, candidate.y + 1.4, candidate.z);
+      let visibleEnemies = 0;
+      for (const foe of foes) {
+        if (eye.distanceTo(foe.body.eye()) <= 65 && this.losClear(eye, foe.body.eye()))
+          visibleEnemies++;
+      }
+      const score = tacticalSpawnScore(candidate, {
+        enemies: enemyRows, allies: allyRows, objective, visibleEnemies,
+      });
+      if (score > bestScore) { bestScore = score; best = candidate; }
+    }
+    return best;
+  }
+
+  // TDM/KOTH return players to a safe edge of the live battle; CTF keeps the
+  // long base-to-base run because that travel is the objective's structure.
+  spawnPoint(team) {
+    if (this.gameMode === 'tdm' || this.gameMode === 'koth') {
+      const dynamic = this._dynamicSpawnPoint(team);
+      if (dynamic) return dynamic;
+    }
+    return this._baseSpawnPoint(team);
   }
 
   losClear(a, b) {
@@ -1331,6 +1699,96 @@ export class Game {
     this.net.send({ t: 'a', k: 'nade', o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
 
+  // ---------------- squad pings ----------------
+  requestTeamPing(e = this.player) {
+    if (!e?.alive || this.over) return;
+    const d = arr(e.lookDir());
+    if (this.mode === 'client') this.net?.send({ t: 'a', k: 'mark', d });
+    else this._hostPlaceTeamPing(e, d);
+  }
+
+  _teamPingKind(pos, team) {
+    if (this.hill && pos.distanceToSquared(this.hill.pos) <= (this.hill.r + 4) ** 2)
+      return 'HILL';
+    if (this.flags) {
+      if (pos.distanceToSquared(this.flags[team].home) <= 64) return 'DEFEND';
+      if (pos.distanceToSquared(this.flags[this.enemyOf(team)].home) <= 64) return 'ATTACK';
+    }
+    if ((this.fieldStations ?? []).some(s => (pos.x - s.x) ** 2 + (pos.z - s.z) ** 2 <= 36))
+      return 'SUPPLY';
+    return 'MOVE';
+  }
+
+  _hostPlaceTeamPing(e, rawDir) {
+    const direction = normalizeDirection(rawDir);
+    if (!direction || !e?.alive || this.over) return;
+    if (this.time - (e._teamPingAt ?? -Infinity) < TEAM_PING_COOLDOWN) return;
+    e._teamPingAt = this.time;
+    const origin = e.body.eye();
+    const dir = v3(direction);
+    const hit = this.world.raycast(origin, dir, TEAM_PING_RANGE);
+    let pos;
+    if (hit) {
+      pos = new THREE.Vector3(hit.x + 0.5 + hit.nx * 0.56,
+        hit.y + 0.5 + hit.ny * 0.56, hit.z + 0.5 + hit.nz * 0.56);
+    } else {
+      pos = origin.clone().addScaledVector(dir, TEAM_PING_RANGE * 0.62);
+      pos.x = Math.min(SX - 1, Math.max(1, pos.x));
+      pos.z = Math.min(SZ - 1, Math.max(1, pos.z));
+      pos.y = Math.max(SEA + 1, this.world.surface(Math.floor(pos.x), Math.floor(pos.z)) + 1);
+    }
+    pos.x = Math.min(SX, Math.max(0, pos.x));
+    pos.y = Math.min(SY + 8, Math.max(-4, pos.y));
+    pos.z = Math.min(SZ, Math.max(0, pos.z));
+    const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: cleanName(e.name),
+      team: e.team, x: pos.x, y: pos.y, z: pos.z, kind: this._teamPingKind(pos, e.team) };
+    if (this.player.team === e.team) this._receiveTeamPing(msg);
+    if (this.mode === 'host') for (const p of this.remote.values())
+      if (p.team === e.team) this.net.sendTo(p.id, msg);
+  }
+
+  _receiveTeamPing(d) {
+    if (d.team !== this.player.team) return;
+    // Gold is already the HUD's navigation language and stays legible on
+    // both green and blue terrain; team filtering, not color, protects scope.
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffd97a, transparent: true });
+    const group = new THREE.Group();
+    const add = (w, h, z, y) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, z), mat);
+      m.position.y = y; group.add(m);
+    };
+    add(0.28, 0.08, 0.28, 0.04);
+    add(0.07, 0.62, 0.07, 0.35);
+    add(0.4, 0.08, 0.4, 0.7);
+    group.position.set(d.x, d.y, d.z);
+    this.scene.add(group);
+    this.teamPings.push({ id: d.id, name: cleanName(d.name), team: d.team,
+      kind: d.kind, pos: new THREE.Vector3(d.x, d.y, d.z), group, mat, ttl: TEAM_PING_TTL });
+    while (this.teamPings.length > TEAM_PING_LIMIT) this._removeTeamPing(this.teamPings[0]);
+    sfx.ping();
+  }
+
+  _removeTeamPing(mark) {
+    const i = this.teamPings.indexOf(mark);
+    if (i >= 0) this.teamPings.splice(i, 1);
+    disposeObject(mark.group);
+  }
+
+  _clearTeamPings() {
+    for (const mark of [...(this.teamPings ?? [])]) this._removeTeamPing(mark);
+    this.teamPings = [];
+  }
+
+  _updateTeamPings(dt) {
+    for (const mark of [...this.teamPings]) {
+      mark.ttl -= dt;
+      if (mark.ttl <= 0) { this._removeTeamPing(mark); continue; }
+      mark.group.visible = this.player.body.pos.distanceToSquared(mark.pos) > 9;
+      mark.group.position.y = mark.pos.y + Math.round(Math.sin(this.time * 5) * 2) * 0.04;
+      mark.mat.opacity = Math.min(1, mark.ttl * 1.5);
+    }
+  }
+
   // ---------------- chat ----------------
   // Local echo is immediate; in a room the host is the relay (and the spam
   // filter), so a message reaches every screen exactly once.
@@ -1371,13 +1829,15 @@ export class Game {
     const t = text.trim();
     const streakMatch = /^\/streak(?:\s+(-?\d+))?$/.exec(t);
     if (streakMatch) {
-      this.player._streak = streakMatch[1] !== undefined ? Math.max(0, parseInt(streakMatch[1], 10)) : 10;
-      hud.feed(`DEV: streak set to ${this.player._streak}`);
+      this.player._streak = streakMatch[1] !== undefined
+        ? Math.min(AIRSTRIKE_COST, Math.max(0, parseInt(streakMatch[1], 10)))
+        : AIRSTRIKE_COST;
+      hud.feed(`DEV: momentum set to ${this.player._streak}`);
       return true;
     }
     if (t === '/streakreset') {
       this.player._streak = 0;
-      this.player._overchargeAtStreak = 0;
+      this.player._overchargeWindup = 0;
       this.player._overchargeT = 0;
       this.player._piloting = false;
       this.player._fallingT = 0;
@@ -1459,11 +1919,6 @@ export class Game {
       if (attacker._mkCount >= 2) {
         tier = attacker._mkCount >= 4 ? 'multi' : attacker._mkCount === 3 ? 'triple' : 'double';
       }
-      // Killstreak: kills without dying, no time window at all — genuinely
-      // different rule from the multi-kill counter just above, which
-      // resets on a 5s gap. This one only resets on death (see each
-      // die()). Airstrike is the only thing gated on it right now.
-      attacker._streak = (attacker._streak ?? 0) + 1;
     }
     if (attacker === this.player) {
       hud.hitmark(killed); // the crosshair confirmation is unconditional — multi-kill or not, every kill gets it
@@ -1489,13 +1944,19 @@ export class Game {
     // is protected. Self-damage remains valid.
     if (!options.environmental && !combatDamageAllowed(victim.team, attacker?.team,
         victim === attacker, this.friendlyFire)) return false;
-    // Overcharge: 1.5x damage dealt AND taken — a genuine risk/reward
-    // toggle, not a pure buff. Both checks apply independently and stack
-    // naturally if attacker and victim are BOTH overcharged at once
-    // (2.25x total) — a real, if rare, emergent case worth letting
-    // happen rather than specifically guarding against.
-    if (!options.environmental && attacker?._overchargeT > 0) amount *= 1.5;
-    if (!options.environmental && victim._overchargeT > 0) amount *= 1.5;
+    // Overcharge is a visible, bounded risk/reward window. Environmental
+    // damage stays untouched; combat damage gains +35% outgoing and +25%
+    // incoming risk, with both independently applying when two charged
+    // soldiers fight each other.
+    if (!options.environmental) amount = overchargeDamage(amount,
+      attacker?._overchargeT > 0, victim._overchargeT > 0);
+    if (attacker && attacker !== victim && Number.isFinite(amount) && amount > 0) {
+      const ledger = victim._damageLedger ??= new Map();
+      const prior = ledger.get(attacker) ?? { damage: 0, at: this.time };
+      prior.damage += Math.min(Math.max(0, victim.health), amount);
+      prior.at = this.time;
+      ledger.set(attacker, prior);
+    }
     victim.health -= amount;
     victim.alert?.(attacker); // bots whirl toward whoever shot them
     const src = sourcePos ?? attacker?.body?.pos;
@@ -1552,6 +2013,8 @@ export class Game {
   }
 
   onDeath(victim, killer) {
+    const wasCarrier = !!victim.carrier;
+    const deathCause = victim._deathCause;
     // Flag drops where the carrier fell (capture-the-flag only).
     if (this.flags && victim.carrier) {
       victim.carrier = false;
@@ -1572,11 +2035,35 @@ export class Game {
     // Scoreboard: a death for the fallen, a kill for the killer — suicides
     // and terrain score a death only, same as TDM team scoring below.
     this._kdRow(victim).d++;
-    if (killer && killer !== victim) this._kdRow(killer).k++;
-    if (this.mode === 'host')
-      this.net.broadcast({ t: 'e', k: 'kd',
-        rows: [...this.kd].map(([key, r]) => [key, r.name, r.team, r.k, r.d]) });
-    hud.statsRefresh(this); // keep an open TAB overlay live
+    this._scoreDirty = true;
+    if (killer && killer !== victim) {
+      this._kdRow(killer).k++;
+      this._award(killer, CONTRIBUTION.kill);
+      if (deathCause === 'collapse')
+        this._award(killer, CONTRIBUTION.collapseKill);
+
+      if (wasCarrier) this._award(killer, CONTRIBUTION.carrierStop, { objective: 1 });
+      if (this.flags) {
+        const own = this.flags[killer.team].home;
+        if (killer.body.pos.distanceTo(own) <= 18 || victim.body.pos.distanceTo(own) <= 18)
+          this._award(killer, CONTRIBUTION.objectiveDefense, { objective: 1 });
+        const carrier = this.entities().find(e => e !== killer && e.alive
+          && e.team === killer.team && e.carrier);
+        if (carrier && (carrier.body.pos.distanceTo(killer.body.pos) <= 20
+            || carrier.body.pos.distanceTo(victim.body.pos) <= 20))
+          this._award(killer, CONTRIBUTION.carrierEscort, { objective: 1 });
+      } else if (this.hill) {
+        const radius = this.hill.r + 8;
+        if (killer.body.pos.distanceTo(this.hill.pos) <= radius
+            || victim.body.pos.distanceTo(this.hill.pos) <= radius)
+          this._award(killer, CONTRIBUTION.objectiveDefense, { objective: 1 });
+      }
+
+      for (const helper of assistCreditors(victim._damageLedger, killer, this.time))
+        this._award(helper, CONTRIBUTION.assist, { assists: 1 });
+    }
+    victim._damageLedger?.clear();
+    this._broadcastScoreboard(true); // keep every open TAB overlay and client current
     this._syncPersistentStats(); // host/solo side; the client path is in the 'kd' case below
 
     // Deathmatch: a kill is a point. Suicides and the terrain score nothing.
@@ -1584,12 +2071,16 @@ export class Game {
       this.captures[killer.team]++;
       hud.score(this);
       if (this.captures[killer.team] >= KILL_LIMIT) this._end(killer.team);
+      else this._checkOvertimeEnd();
     }
 
-    // Everyone waits out the same redeploy timer — bots too, or a raid on
-    // the enemy base would face a fresh wave every few seconds.
-    this.respawnTimers.set(victim, REDEPLOY);
-    if (victim === this.player) hud.respawn(REDEPLOY);
+    if (this.over) return 0;
+    // Every death joins the next shared mode-specific team wave. Players who
+    // fall together return together instead of trickling back one by one.
+    const redeploy = respawnWaveDelay(this.gameMode, this.matchElapsed);
+    this.respawnTimers.set(victim, redeploy);
+    if (victim === this.player) hud.respawn(redeploy);
+    return redeploy;
   }
 
   // ---------------- block tools ----------------
@@ -1683,7 +2174,7 @@ export class Game {
         }
       // Falling masonry is the damage source, not whoever happened to
       // remove its support. Point the victim toward the collapsing cell.
-      if (hit) this.damage(e, hit, who, source);
+      if (hit) this.damage(e, hit, who, source, { cause: 'collapse' });
     }
     if (this.mode === 'host') {
       for (const c of cells) this.editLog.push([c.x, c.y, c.z, 0]); // late joiners
@@ -1872,14 +2363,15 @@ export class Game {
   // Spends the streak HERE, not when piloting mode was entered — cancel
   // out of targeting with no shot fired and nothing was ever charged.
   _confirmAirstrike(attacker, x, z, yaw) {
-    if ((attacker._streak ?? 0) < 10) return;
+    if (availableStreakAbility(attacker._streak ?? 0,
+        attacker._overchargeWindup, attacker._overchargeT) !== 'airstrike') return;
     x = Math.max(0, Math.min(SX, x)); z = Math.max(0, Math.min(SZ, z));
     // The action packet captures the caller's first-person yaw at commit
     // time. Normalize it once here so arbitrarily large but finite angles
     // cannot leak into transforms or the quantized snapshot representation.
     yaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw))
       : attacker === this.player ? attacker.yaw : attacker.yaw + Math.PI / 2;
-    attacker._streak = 0;
+    attacker._streak = spendStreak(attacker._streak, AIRSTRIKE_COST);
     const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
     const id = this._nextStrikeId++;
     const owner = attacker === this.player ? this._hostIdx : attacker.ridx;
@@ -2010,28 +2502,79 @@ export class Game {
       if (!want.has(id)) this._removeAirstrikeDrone(id);
   }
 
-  // Host/solo-authoritative, re-validated here for the same reason as
-  // above: a guest's claim that it's eligible is never trusted on its own.
-  // Repeatable, but rate-limited by streak progress rather than time: the
-  // original unlimited-with-a-5s-cooldown design let anyone above the
-  // threshold keep reactivating this roughly every 15s for the rest of a
-  // life, a near-permanent 1.5x/1.5x once someone was already winning —
-  // exactly the runaway-power problem this system exists to avoid. The
-  // fix isn't "never again" (that punished long games with a whole
-  // streak's worth of dead potential) — it's "again every 5 more kills."
-  // _overchargeAtStreak tracks the streak value AT the last activation;
-  // the gate is (current streak - that value) >= 5, so the first use at
-  // streak 5 sets it to 5, unlocking again at streak 10, then 15, and so
-  // on — reset only on death (RemotePlayer#die / Player#die / _clientDied),
-  // not by anything Airstrike does to _streak, so spending an airstrike
-  // and rebuilding a streak in the same life doesn't grant a free extra
-  // Overcharge along the way.
+  _abilityRows() {
+    const row = (p, idx) => [idx, Math.round(p._streak ?? 0),
+      Math.max(0, Math.round((p._overchargeWindup ?? 0) * 10)),
+      Math.max(0, Math.round((p._overchargeT ?? 0) * 10))];
+    return [row(this.player, this._hostIdx),
+      ...[...this.remote.values()].map(p => row(p, p.ridx))];
+  }
+
+  _syncAbilityRows(rows) {
+    if (!Array.isArray(rows)) return;
+    this._lastAbilityRows = rows.map(row => row.slice());
+    for (const [idx, points, windup, active] of rows) {
+      const charging = Math.max(0, windup) / 10;
+      const live = Math.max(0, active) / 10;
+      if (this.mode === 'client') {
+        if (idx === this.myIdx) {
+          this.player._streak = points;
+          this.player._overchargeWindup = charging;
+          this.player._overchargeT = live;
+        } else {
+          this.avatars.get('p' + idx)?.setOvercharge(charging > 0, live > 0);
+        }
+      } else {
+        const p = idx === this._hostIdx ? this.player
+          : [...this.remote.values()].find(remote => remote.ridx === idx);
+        if (!p) continue;
+        p._streak = points;
+        p._overchargeWindup = charging;
+        p._overchargeT = live;
+        p.avatar?.setOvercharge(charging > 0, live > 0);
+      }
+    }
+  }
+
+  // Host/solo authority spends a fixed contribution cost, then starts a
+  // visible windup. The damage modifiers do not begin until that telegraph
+  // finishes, giving opponents a short but real reaction window.
   _activateOvercharge(p) {
-    if ((p._streak ?? 0) - (p._overchargeAtStreak ?? 0) < 5 || p._overchargeT > 0) return;
-    p._overchargeT = 30;
-    p._overchargeAtStreak = p._streak ?? 0;
-    if (p === this.player) sfx.overcharge();
-    else if (p.isRemote) this.net.sendTo(p.id, { t: 'e', k: 'overcharge' });
+    if (availableStreakAbility(p._streak ?? 0,
+        p._overchargeWindup, p._overchargeT) !== 'overcharge') return;
+    p._streak = spendStreak(p._streak, OVERCHARGE_COST);
+    p._overchargeWindup = OVERCHARGE_WINDUP;
+    p._overchargeT = 0;
+    p.avatar?.setOvercharge(true, false);
+    this._broadcastOvercharge(p, 'windup', OVERCHARGE_WINDUP);
+    this.feed(`${nameSpan(p)} is charging <b>OVERCHARGE</b>`);
+    this.messageTeam(p.team, 'ALLY OVERCHARGE CHARGING', teamCss(p.team));
+    this.messageTeam(this.enemyOf(p.team), 'ENEMY OVERCHARGE CHARGING', '#e05a4e');
+  }
+
+  _broadcastOvercharge(p, phase, remaining) {
+    const owner = p === this.player ? this._hostIdx : p.ridx;
+    if (phase === 'windup') {
+      if (p === this.player) sfx.overcharge();
+      else sfx.at('overcharge', p.body.pos);
+    }
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'overcharge',
+      owner, phase, remaining });
+  }
+
+  _updateOvercharges(dt) {
+    for (const p of [this.player, ...this.remote.values()]) {
+      const state = stepOvercharge(p._overchargeWindup, p._overchargeT, dt);
+      p._overchargeWindup = state.charging;
+      p._overchargeT = state.active;
+      p.avatar?.setOvercharge(state.charging > 0, state.active > 0);
+      if (state.started) {
+        this._broadcastOvercharge(p, 'active', OVERCHARGE_DURATION);
+        this.feed(`${nameSpan(p)} is <b>OVERCHARGED</b>`);
+      } else if (state.ended) {
+        this._broadcastOvercharge(p, 'end', 0);
+      }
+    }
   }
 
   // The warning itself stays one-shot. Flight visuals are created separately
@@ -2046,7 +2589,7 @@ export class Game {
 
   // A genuinely bigger, more dangerous explosion than a hand grenade —
   // meant to read as a different scale of munition entirely, matching a
-  // 10-kill streak's worth of buildup. Same explodeAt + editLog/'boom'
+  // 1,000 contribution points of buildup. Same explodeAt + editLog/'boom'
   // sync pattern as a grenade, just larger numbers throughout.
   _airstrikeImpact(pos, owner, strikeId) {
     const R = 4.5; // visual crater radius — unchanged
@@ -2104,6 +2647,8 @@ export class Game {
         enemyFlag.carrier = e;
         e.carrier = true;
         sfx.pickup();
+        this._award(e, CONTRIBUTION.flagPickup, { objective: 1 });
+        this._broadcastScoreboard(true);
         this.feed(`${nameSpan(e)} took the ${this.enemyOf(e.team).toUpperCase()} flag`);
         this.messageTo(e, 'YOU HAVE THE FLAG — RUN HOME!', '#ffd97a');
         this.messageTeam(e.team === 'blue' ? 'green' : 'blue', 'OUR FLAG IS TAKEN!', '#e74c3c');
@@ -2111,6 +2656,8 @@ export class Game {
       // Touching your own dropped flag sends it home.
       if (ownFlag.state === 'dropped' && e.body.pos.distanceTo(ownFlag.pos) < 1.9) {
         ownFlag.returnHome();
+        this._award(e, CONTRIBUTION.flagReturn, { objective: 1 });
+        this._broadcastScoreboard(true);
         this.feed(`${nameSpan(e)} returned the ${e.team.toUpperCase()} flag`);
         this.messageTo(e, 'FLAG RETURNED', '#8fd98f');
       }
@@ -2120,18 +2667,55 @@ export class Game {
         e.carrier = false;
         this.captures[e.team]++;
         enemyFlag.returnHome();
+        this._award(e, CONTRIBUTION.flagCapture, { objective: 1 });
+        this._broadcastScoreboard(true);
         sfx.capture();
         this.feed(`${nameSpan(e)} <b>CAPTURED</b> the flag`);
         this.message(e.team === 'green' ? 'CAPTURE! GREEN SCORES' : 'CAPTURE! BLUE SCORES',
           teamCss(e.team));
         hud.score(this);
         if (this.captures[e.team] >= WIN_SCORE) this._end(e.team);
+        else this._checkOvertimeEnd();
       }
     }
     hud.score(this);
   }
 
   // ---------------- king of the hill ----------------
+  _setHillIndex(index, resetState = true) {
+    const h = this.hill;
+    if (!h?.spots?.length) return;
+    const next = ((Number.isInteger(index) ? index : 0) % h.spots.length
+      + h.spots.length) % h.spots.length;
+    const spot = h.spots[next];
+    if (this.hillVisual) { disposeObject(this.hillVisual.mesh); this.hillVisual = null; }
+    h.index = next;
+    h.label = spot.label ?? `HILL ${next + 1}`;
+    h.pos.set(spot.x + 0.5,
+      this.world.surface(Math.floor(spot.x), Math.floor(spot.z)), spot.z + 0.5);
+    h.r = spot.r ?? 8;
+    if (resetState) {
+      h.owner = null;
+      h.progress = 0;
+      h.contested = false;
+      h.capTeam = null;
+      h.presence = { green: 0, blue: 0 };
+      h.rotateIn = HILL_CYCLE;
+    }
+    this._createHillVisual();
+  }
+
+  _relocateHill() {
+    const h = this.hill;
+    if (!h?.spots?.length) return;
+    const index = nextHillIndex(h.index, h.spots.length);
+    this._setHillIndex(index, true);
+    sfx.capture();
+    this.feed(`<b>HILL RELOCATED</b> — ${h.label}`);
+    this.message(`HILL RELOCATED — ${h.label}`, '#ffd97a');
+    hud.score(this);
+  }
+
   _createHillVisual() {
     const h = this.hill, cells = [];
     const r = Math.max(4, Math.round(h.r));
@@ -2171,53 +2755,119 @@ export class Game {
     v.mesh.instanceMatrix.needsUpdate = true;
   }
 
-  // One point at map center. Stand on it alone for CAP_TIME seconds to take
-  // it (or to flip it); once owned, the owner's clock accrues hold time
-  // whether or not anyone is standing there — you lose it only when the
-  // enemy flips it. Contested (both teams on the point) freezes a capture
-  // in progress but doesn't undo it. First to HOLD_LIMIT seconds of hold
-  // wins. "On the point" means inside the radius AND near the local surface
-  // — towers above and tunnels below don't count, but a cratered hill does.
+  // Capture takes CAP_TIME uncontested seconds. Ownership alone is not worth
+  // time: the owning team must keep at least one soldier physically present,
+  // and any enemy contest freezes both capture and scoring. The objective
+  // relocates on a host-authoritative clock during regulation, then remains
+  // fixed through overtime so the deciding fight cannot move away.
   _updateHill(dt) {
     const h = this.hill;
-    let g = 0, b = 0;
+    const rotation = stepHillRotation(h.rotateIn, dt, this.overtime,
+      HILL_CYCLE, HILL_MOVE_WARNING);
+    h.rotateIn = rotation.remaining;
+    if (rotation.warn) {
+      const next = h.spots[nextHillIndex(h.index, h.spots.length)];
+      this.feed(`<b>HILL MOVES IN ${HILL_MOVE_WARNING}</b> — ${next.label ?? 'NEXT POINT'}`);
+      this.message(`NEXT HILL — ${next.label ?? 'NEW POSITION'}`, '#ffd97a');
+    }
+    if (rotation.rotate) { this._relocateHill(); return; }
+
+    const present = { green: [], blue: [] };
     for (const e of this.entities()) {
       if (!e.alive) continue;
       const dx = e.body.pos.x - h.pos.x, dz = e.body.pos.z - h.pos.z;
       if (dx * dx + dz * dz > h.r * h.r) continue;
       const surf = this.world.surface(Math.floor(e.body.pos.x), Math.floor(e.body.pos.z));
       if (e.body.pos.y < surf - 4 || e.body.pos.y > surf + 6) continue;
-      if (e.team === 'green') g++; else b++;
+      present[e.team].push(e);
     }
+    const g = present.green.length, b = present.blue.length;
     h.contested = g > 0 && b > 0;
+    h.presence = { green: g, blue: b };
     const sole = g > 0 && b === 0 ? 'green' : b > 0 && g === 0 ? 'blue' : null;
-    if (sole) h.capTeam = sole;
-    if (sole && sole !== h.owner) {
-      h.progress += dt;
-      if (h.progress >= CAP_TIME) {
-        h.owner = sole;
-        h.progress = 0;
-        sfx.capture();
-        this.feed(sole === 'green' ? '<b>GREEN</b> holds the hill' : '<b>BLUE</b> holds the hill');
-        this.message(sole === 'green' ? 'GREEN HOLDS THE HILL' : 'BLUE HOLDS THE HILL',
-          teamCss(sole));
-      }
-    } else if (!h.contested && h.progress > 0) {
-      h.progress = Math.max(0, h.progress - dt * 1.5); // abandoned or owner-only: decay
+    const capture = stepHillCapture(h, sole, h.contested, dt, CAP_TIME);
+    h.owner = capture.owner;
+    h.capTeam = capture.capTeam;
+    h.progress = capture.progress;
+    if (capture.captured) {
+      for (const e of present[capture.captured])
+        this._award(e, CONTRIBUTION.hillCapture, { objective: 1 }, false);
+      this._broadcastScoreboard(true);
+      sfx.capture();
+      this.feed(capture.captured === 'green' ? '<b>GREEN</b> holds the hill' : '<b>BLUE</b> holds the hill');
+      this.message(capture.captured === 'green' ? 'GREEN HOLDS THE HILL' : 'BLUE HOLDS THE HILL',
+        teamCss(capture.captured));
     }
-    if (h.owner && !this.over) {
-      this.captures[h.owner] += dt; // hold seconds (floats; displayed as clocks)
-      if (this.captures[h.owner] >= HOLD_LIMIT) this._end(h.owner);
+    const scoring = occupiedScoringTeam(h.owner, h.presence);
+    if (scoring && !this.over) {
+      this.captures[scoring] += dt; // occupied seconds (floats; displayed as clocks)
+      for (const e of present[scoring]) this._award(e,
+        CONTRIBUTION.hillHoldPerSecond * dt, { objective: dt }, false);
+      if (this.captures[scoring] >= HOLD_LIMIT) this._end(scoring);
     }
     hud.score(this);
     this._updateHillVisual();
+    this._checkOvertimeEnd();
+  }
+
+  _flagsLive() {
+    return !!this.flags && ['green', 'blue'].some(team => this.flags[team].state !== 'home');
+  }
+
+  _losingTeamOnHill() {
+    const leader = scoreLeader(this.captures);
+    if (!leader || !this.hill) return false;
+    const losing = this.enemyOf(leader);
+    return (this.hill.presence?.[losing] ?? 0) > 0;
+  }
+
+  _startOvertime() {
+    if (this.overtime || this.over) return;
+    this.overtime = true;
+    this.matchRemaining = 0;
+    this.feed('<b>OVERTIME</b>');
+    this.message('OVERTIME', '#ffd97a');
+    hud.clock(this);
+  }
+
+  _checkOvertimeEnd() {
+    if (!this.overtime || this.over) return;
+    const leader = scoreLeader(this.captures);
+    if (!leader) return;
+    if (this.gameMode === 'ctf' && this._flagsLive()) return;
+    if (this.gameMode === 'koth' && this._losingTeamOnHill()) return;
+    this._end(leader);
+  }
+
+  _updateMatchClock(dt) {
+    if (this.over) return;
+    this.matchElapsed += dt;
+    if (this.overtime) { this._checkOvertimeEnd(); hud.clock(this); return; }
+    const before = this.matchRemaining;
+    this.matchRemaining = Math.max(0, this.matchRemaining - dt);
+    if (before > 0 && this.matchRemaining <= 0) {
+      const decision = regulationDecision(this.gameMode, this.captures, {
+        flagsLive: this._flagsLive(),
+        losingTeamOnHill: this._losingTeamOnHill(),
+      });
+      if (decision.winner) this._end(decision.winner);
+      else this._startOvertime();
+    }
+    hud.clock(this);
   }
 
   _end(winner) {
     if (this.over) return;
+    this._broadcastScoreboard(true);
     this.over = true;
+    this.winner = winner;
+    this._rematchVotes.clear();
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'end', winner });
-    stats.addMatch(winner === this.player.team);
+    const report = buildMatchReport(this._kdKey(this.player), this.kd.entries());
+    const recordUpdate = stats.finishMatch(winner === this.player.team,
+      this.gameMode, report.local);
+    this.player.syncMastery();
+    this.onStatsChanged?.();
     document.exitPointerLock();
     hud.statsHide(); // the summary board replaces the overlay
     $('hud').classList.remove('on');
@@ -2226,14 +2876,20 @@ export class Game {
     $('endTitle').style.color = won ? '#8fd98f' : '#e74c3c';
     const next = MAPS[this._nextMap()].name;
     const score = this.hill
-      ? `held the hill ${holdClock(this.captures.green)} — ${holdClock(this.captures.blue)}`
+      ? `occupied the hill ${holdClock(this.captures.green)} — ${holdClock(this.captures.blue)}`
       : `wins ${this.captures.green} — ${this.captures.blue}`;
-    $('endDetail').textContent = `${winner.toUpperCase()} ${score} · next up: ${next}`;
-    $('endBoard').innerHTML = hud.kdTable(this); // round summary: everyone's K/D
+    $('endDetail').textContent = `${winner.toUpperCase()} ${score} · ${MAPS[this.mapIndex].name}`
+      + ` · ${holdClock(this.matchElapsed)}`;
+    hud.matchReport(this, report, recordUpdate);
+    $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
+    $('endNote').textContent = this.mode === 'client'
+      ? `next up: ${next} · waiting for host`
+      : `next up: ${next} · ${POST_MATCH_TIME}s`;
     $('end').classList.remove('hidden');
+    this._publishRematchState();
     if (!won) sfx.lose();
     // The room rotates maps on its own a few seconds after the final capture.
-    if (this.mode !== 'client') this._rotateT = 7;
+    if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
   }
 
   // Next map in the rotation for the CURRENT mode: a host pin wins if it's
@@ -2248,6 +2904,10 @@ export class Game {
   _rotate() {
     const map = this._nextMap();
     const seed = Math.floor(Math.random() * 1e9);
+    this._restartRound(map, seed);
+  }
+
+  _restartRound(map, seed) {
     // Swap green<->blue for everyone before the next map generates. Team
     // COMPOSITION doesn't change — who's grouped with whom stays put — only
     // which color/side that group is called. Bases and flag stands never
@@ -2265,6 +2925,45 @@ export class Game {
     // the roster again (their full-state maps were cleared on rebuild).
     if (this.mode === 'host') this.net.broadcast(this._rosterMsg());
     this.onRestart?.(MAPS[map].name);
+  }
+
+  _humanKeys() {
+    return ['p' + this._hostIdx, ...[...this.remote.values()].map(p => 'p' + p.ridx)];
+  }
+
+  _publishRematchState() {
+    const humans = this.mode === 'client'
+      ? Math.max(1, this._rosterP?.size ?? 1) : this.remote.size + 1;
+    const voters = [...this._rematchVotes];
+    const needed = rematchVotesNeeded(humans);
+    hud.rematch(this, voters, needed);
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'rematch', voters, needed });
+  }
+
+  requestRematch() {
+    if (!this.over) return;
+    if (this.mode === 'client') {
+      this.net?.send({ t: 'a', k: 'rematch' });
+      return;
+    }
+    this._hostRematchVote(this.player);
+  }
+
+  _hostRematchVote(e) {
+    if (!this.over || !e) return;
+    const key = this._kdKey(e);
+    if (!this._humanKeys().includes(key) || this._rematchVotes.has(key)) return;
+    this._rematchVotes.add(key);
+    this._publishRematchState();
+    this._maybeStartRematch();
+  }
+
+  _maybeStartRematch() {
+    if (!this.over || this._rematchVotes.size < rematchVotesNeeded(this.remote.size + 1)) return;
+    this._rotateT = null;
+    // A rematch restores the same authored battlefield and procedural seed,
+    // but swaps sides so asymmetric cover never becomes a permanent edge.
+    this._restartRound(this.mapIndex, this.seed);
   }
 
   // ---------------- host networking ----------------
@@ -2325,6 +3024,14 @@ export class Game {
     const p = this.remote.get(id);
     if (!p) return;
     if (d.t === 'a' && d.k === 'chat') return this._hostOnChat(id, d.text, d.scope);
+    if (d.t === 'a' && d.k === 'mark') {
+      this._hostPlaceTeamPing(p, d.d);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'rematch') {
+      this._hostRematchVote(p);
+      return;
+    }
     // Class pick: sent while dead, so it must NOT require p.alive the way
     // shoot/dig/place/nade do below (same reason chat gets its own early
     // case above it) — applied at the NEXT respawn, not immediately.
@@ -2557,7 +3264,13 @@ export class Game {
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
+    if (this.over) {
+      this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
+      this.net.sendTo(id, { t: 'e', k: 'rematch', voters: [...this._rematchVotes],
+        needed: rematchVotesNeeded(this.remote.size + 1) });
+    }
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
+    this._broadcastScoreboard(true);
     this.feed(`${nameSpan(proxy)} joined ${team.toUpperCase()}`);
   }
 
@@ -2628,13 +3341,15 @@ export class Game {
         bot.alive = false;
         bot.deadT = 1.5; // corpse already finished tumbling on our screen
         bot.parts.group.visible = false;
-        this.respawnTimers.set(bot, REDEPLOY);
+        this.respawnTimers.set(bot, respawnWaveDelay(this.gameMode, this.matchElapsed));
       }
       this.bots.push(bot);
     }
     // Interest management can hide bots too. Refill only the missing seats;
     // _spawnBots now accounts for the visible bots restored just above.
     this._spawnBots();
+    this._syncAbilityRows(this._lastAbilityRows);
+    this._syncStationRows(this._lastStationRows);
     // Airstrike rows are unconditional full state, so a strike already in
     // flight survives the baton pass too. Damage attribution is retained
     // when its caller survived; if the departed host called it, the blast
@@ -2666,16 +3381,23 @@ export class Game {
         else { f.state = 'dropped'; f.carrier = null; f.dropTimer = 30; }
       }
     }
-    // The hill keeps its owner and capture progress across the handover.
+    // The hill keeps its location, owner, capture progress, and relocation
+    // clock across the handover.
     if (this.hill && this._hillRow) {
+      if (Number.isInteger(this._hillRow[4]) && this._hillRow[4] !== this.hill.index)
+        this._setHillIndex(this._hillRow[4], false);
       this.hill.owner = this._hillRow[0];
       this.hill.progress = this._hillRow[1];
       this.hill.contested = !!this._hillRow[2];
       this.hill.capTeam = this._hillRow[3];
+      if (Number.isFinite(this._hillRow[5])) this.hill.rotateIn = this._hillRow[5];
+      if (Number.isFinite(this._hillRow[6]) && Number.isFinite(this._hillRow[7]))
+        this.hill.presence = { green: this._hillRow[6], blue: this._hillRow[7] };
     }
     // A death mid-handover still gets its respawn; a finished match still
     // gets its rotation.
-    if (!this.player.alive) this.respawnTimers.set(this.player, REDEPLOY);
+    if (!this.player.alive) this.respawnTimers.set(this.player,
+      respawnWaveDelay(this.gameMode, this.matchElapsed));
     if (this.over) this._rotateT = 2;
     // Stragglers get a minute to find the new room before their roster entry
     // lapses and any later knock is treated as a fresh join.
@@ -2727,7 +3449,8 @@ export class Game {
     proxy.blocks = blocks;
     proxy.crouched = !!crouch;
     if (nades !== undefined) proxy.nades = nades;
-    if (!proxy.alive) this.respawnTimers.set(proxy, REDEPLOY);
+    if (!proxy.alive) this.respawnTimers.set(proxy,
+      respawnWaveDelay(this.gameMode, this.matchElapsed));
     this.remote.set(id, proxy);
     return proxy;
   }
@@ -2742,9 +3465,11 @@ export class Game {
     this.feed(`${nameSpan(p)} left the battle`);
     p.avatar.dispose();
     this.remote.delete(id);
+    this._rematchVotes.delete('p' + p.ridx);
     this.respawnTimers.delete(p);
     if (!this.over) this.bots.push(new Bot(this, p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
+    if (this.over) { this._publishRematchState(); this._maybeStartRematch(); }
     this._checkAbandoned();
   }
 
@@ -2797,7 +3522,9 @@ export class Game {
         b: [FLAG_CODE[this.flags.blue.state], ...pos(this.flags.blue.pos), Math.ceil(this.flags.blue.dropTimer)],
       },
       h: this.hill && [this.hill.owner, Math.round(this.hill.progress * 10) / 10,
-        this.hill.contested ? 1 : 0, this.hill.capTeam],
+        this.hill.contested ? 1 : 0, this.hill.capTeam, this.hill.index,
+        Math.max(0, Math.round(this.hill.rotateIn * 10) / 10),
+        this.hill.presence?.green ?? 0, this.hill.presence?.blue ?? 0],
       c: [Math.round(this.captures.green * 10) / 10, Math.round(this.captures.blue * 10) / 10],
       g: this.grenades.map(g => pos(g.pos)),
       // Small unconditional channel: [id, target xyz, approach yaw,
@@ -2805,7 +3532,12 @@ export class Game {
       // must not be interest-culled — the warning aircraft is gameplay intel.
       a: this._pendingStrikes.map(s => [s.id, ...pos(s.pos), qa(s.yaw),
         Math.max(0, Math.round(s.t * 1000)), s.owner]),
+      u: this._abilityRows(),
+      l: this._stationRows(),
+      m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
+        Math.max(0, Math.round(this.matchElapsed * 10))],
       o: this.over ? 1 : 0,
+      w: this.winner,
     };
   }
 
@@ -2850,7 +3582,7 @@ export class Game {
       if (conn.dataChannel?.bufferedAmount > 64 * 1024) continue;
       const sent = conn._sentRows ??= { p: new Map(), b: new Map() };
       const out = { t: 's', f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, o: snap.o };
+        a: snap.a, u: snap.u, l: snap.l, m: snap.m, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
       const viewer = this.remote.get(id);
@@ -3055,6 +3787,8 @@ export class Game {
     for (const [key, av] of this.avatars) {
       if (!want.has(key)) { av.dispose(); this.avatars.delete(key); }
     }
+    this._syncAbilityRows(d.u ?? []);
+    this._syncStationRows(d.l ?? []);
     const stateName = ['home', 'carried', 'dropped'];
     if (d.f && this.flags)
       for (const team of ['green', 'blue']) {
@@ -3065,18 +3799,30 @@ export class Game {
       }
     this._hillRow = d.h ?? null; // kept raw: a promoted replica restores it
     if (d.h && this.hill) {
+      if (Number.isInteger(d.h[4]) && d.h[4] !== this.hill.index)
+        this._setHillIndex(d.h[4], false);
       this.hill.owner = d.h[0];
       this.hill.progress = d.h[1];
       this.hill.contested = !!d.h[2];
       this.hill.capTeam = d.h[3];
+      if (Number.isFinite(d.h[5])) this.hill.rotateIn = d.h[5];
+      if (Number.isFinite(d.h[6]) && Number.isFinite(d.h[7]))
+        this.hill.presence = { green: d.h[6], blue: d.h[7] };
       this._updateHillVisual();
     }
     this.captures.green = d.c[0];
     this.captures.blue = d.c[1];
+    if (d.m) {
+      this.matchRemaining = d.m[0] / 10;
+      this.overtime = !!d.m[1];
+      this.matchElapsed = d.m[2] / 10;
+    }
+    this.winner = d.w ?? null;
     hud.score(this);
     const limit = this.gameMode === 'tdm' ? KILL_LIMIT
       : this.gameMode === 'koth' ? HOLD_LIMIT : WIN_SCORE;
-    if (d.o && !this.over) this._end(d.c[0] >= limit ? 'green' : 'blue');
+    if (d.o && !this.over) this._end(d.w ?? (d.c[0] >= limit ? 'green'
+      : d.c[1] >= limit ? 'blue' : scoreLeader(this.captures) ?? 'green'));
     this._lastGrenades = d.g;
   }
 
@@ -3121,21 +3867,20 @@ export class Game {
         break;
       }
       case 'overcharge':
-        // Confirmation from the host that activation succeeded — sets the
-        // SAME duration and repeat-eligibility tracker locally so this
-        // client's own countdown/HUD/re-activation-gate state matches
-        // what the host's authoritative copy is already running. Without
-        // setting this here too, the keydown handler's own local check
-        // (which gates BEFORE ever sending the request, not just after)
-        // would let this guest keep firing requests the host would
-        // silently ignore. Depends on this.player._streak already being
-        // accurate at this exact moment — see the 'hit' case above,
-        // which is what actually keeps a guest's own local streak in
-        // sync with the host's authoritative count in the first place.
-        this.player._overchargeT = 30;
-        this.player._overchargeAtStreak = this.player._streak ?? 0;
-        sfx.overcharge();
+      {
+        const charging = d.phase === 'windup' ? d.remaining : 0;
+        const active = d.phase === 'active' ? d.remaining : 0;
+        if (d.owner === this.myIdx) {
+          this.player._overchargeWindup = charging;
+          this.player._overchargeT = active;
+          if (d.phase === 'windup') sfx.overcharge();
+        } else {
+          const av = this.avatars.get('p' + d.owner);
+          av?.setOvercharge(charging > 0, active > 0);
+          if (d.phase === 'windup' && av) sfx.at('overcharge', av.pos);
+        }
         break;
+      }
       case 'col': { // host collapsed a structure: replay removal + dust only
         const cells = [];
         for (let i = 0; i + 2 < d.cells.length; i += 3) {
@@ -3159,17 +3904,12 @@ export class Game {
       case 'msg':
         if (!d.team || d.team === this.player.team) hud.message(d.text, d.color);
         break;
+      case 'supply':
+        sfx.pickup();
+        hud.message(`FIELD CACHE · +${d.blocks} BLOCKS · +${d.nades} GRENADE`, '#ffd97a');
+        break;
       case 'hit':
         hud.hitmark(d.kill);
-        // Mirrors what _hitFeedback already did on the host's own
-        // authoritative copy of this player (the RemotePlayer) — without
-        // this, a guest's own LOCAL _streak never advanced at all, since
-        // this is the only message a guest's kills are ever reported
-        // back through. That silently broke Overcharge/Airstrike
-        // eligibility for anyone who wasn't hosting: the F-key gate has
-        // to run locally (it decides whether to even send a request),
-        // and it was checking a value that never left zero.
-        if (d.kill) this.player._streak = (this.player._streak ?? 0) + 1;
         if (d.tier) hud.killCallout(d.tier); // replaces the plain chime, same rule as the host-side path
         else d.kill ? sfx.kill() : sfx.hit();
         break;
@@ -3179,12 +3919,17 @@ export class Game {
         hud.chatMsg({ name: cleanName(d.name), team: d.team === 'blue' ? 'blue' : 'green',
                       text: String(d.text ?? '').slice(0, 120), scope: d.scope });
         break;
-      case 'died': this._clientDied(); break;
+      case 'died': this._clientDied(d.rt); break;
       case 'spawn':
         this.player.respawn({ x: d.x, y: d.y, z: d.z });
         if (Number.isFinite(d.yaw)) this.player.yaw = d.yaw;
         hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player);
         this._lastHealth = 100;
+        break;
+      case 'mark': this._receiveTeamPing(d); break;
+      case 'rematch':
+        this._rematchVotes = new Set(d.voters);
+        hud.rematch(this, d.voters, d.needed);
         break;
       case 'corr':
         if ([d.x, d.y, d.z].every(Number.isFinite)) {
@@ -3192,11 +3937,12 @@ export class Game {
           this.player.body.vel.set(0, 0, 0);
         }
         break;
-      case 'kd': // host's scoreboard, replaced wholesale on each death
+      case 'kd': // host's authoritative contribution scoreboard
         this.kd = new Map((d.rows || []).map(r =>
-          [String(r[0]).slice(0, 8), { name: cleanName(r[1]),
-                                       team: r[2] === 'blue' ? 'blue' : 'green',
-                                       k: r[3] | 0, d: r[4] | 0 }]));
+          [String(r[0]).slice(0, 8), contributionRow({ name: cleanName(r[1]),
+            team: r[2] === 'blue' ? 'blue' : 'green', k: r[3] | 0, d: r[4] | 0,
+            score: r[5] ?? (r[3] | 0) * CONTRIBUTION.kill,
+            a: r[6] ?? 0, objective: r[7] ?? 0 })]));
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
@@ -3208,7 +3954,7 @@ export class Game {
     }
   }
 
-  _clientDied() {
+  _clientDied(redeploy) {
     this.player.alive = false;
     // A guest's own death never goes through Player.die() at all — the
     // host tells us we're dead over the wire and we land here instead.
@@ -3231,17 +3977,18 @@ export class Game {
     this.player.swing = 0;
     this.player._mkCount = 0; this.player._mkT = null;
     this.player._streak = 0;
-    this.player._overchargeT = 0; this.player._overchargeAtStreak = 0;
+    this.player._overchargeWindup = 0; this.player._overchargeT = 0;
     this.player._piloting = false;
     this.player._fallingT = 0;
     this.player._lingerT = 0;
     this.player.vmRoot.visible = false; // no floating gun while down
-    this._respawnT = 10; // mirrors the host's human redeploy timer
+    this._respawnT = Number.isFinite(redeploy)
+      ? redeploy : respawnWaveDelay(this.gameMode, this.matchElapsed);
     this.player.resetZoom(); // same reason as Player.die() — this is the guest's equivalent of it
     this.effects.burst(this.player.body.eye(), 26, teamHex(this.player.team), 6);
     sfx.hurt();
     hud.damage();
-    hud.respawn(10);
+    hud.respawn(this._respawnT);
     hud.classPick(this.player._pendingClass); // show the current pick before any key is pressed
   }
 
@@ -3270,6 +4017,11 @@ export class Game {
     // can take ages to give up on its own. Snapshots beat at 15Hz; four
     // seconds of silence means the host is gone and the baton must pass.
     this.clientIdleTick();
+    if (!this.over) {
+      this.matchElapsed += dt;
+      if (!this.overtime) this.matchRemaining = Math.max(0, this.matchRemaining - dt);
+      hud.clock(this);
+    }
     // Cosmetic redeploy countdown — the host's 'rs' event is the real one.
     if (!this.player.alive && this._respawnT > 0) {
       this._respawnT -= dt;
@@ -3296,6 +4048,10 @@ export class Game {
       }
     }
     if (this.player.alive) {
+      const charge = stepOvercharge(this.player._overchargeWindup,
+        this.player._overchargeT, dt);
+      this.player._overchargeWindup = charge.charging;
+      this.player._overchargeT = charge.active;
       this.player.update(dt);
       // The host alone applies damage; the client advances the same pure
       // breath state only so its HUD responds immediately to local movement.
@@ -3347,8 +4103,11 @@ export class Game {
     this.time += dt;
     this.world.animateSky(this.time);
     this._updateUnderwaterFog();
+    this._updateTeamPings(dt);
     hud.minimap(this);
     hud.objective(this);
+    hud.teamPing(this);
+    hud.fieldStation(this);
     hud.ping(this);
     hud.streakStatus(this.player);
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost
@@ -3390,22 +4149,16 @@ export class Game {
         }
       }
     }
-    // RemotePlayer has no update(dt) of its own the way Player does — its
-    // state rides the network snapshot instead — so its Overcharge timer
-    // needs its own tick here specifically, on the host's authoritative
-    // copy, since that's the one damage() actually reads. Nothing further
-    // to do once the active timer hits zero — no cooldown state to enter,
-    // repeat-eligibility is governed entirely by streak progress
-    // (_overchargeAtStreak, checked in _activateOvercharge), not by time.
-    for (const rp of this.remote.values()) {
-      if (rp._overchargeT > 0) { rp._overchargeT -= dt; if (rp._overchargeT < 0) rp._overchargeT = 0; }
-    }
+    // One authoritative timer for every human, including remote proxies.
+    // Clients receive the same state in snapshots and only interpolate it.
+    this._updateOvercharges(dt);
 
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);
+    if (!this.over) this._updateFieldStations(dt);
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.
@@ -3459,9 +4212,18 @@ export class Game {
       this._updateGrenades(dt);
       if (this.flags) this._updateFlags(dt);
       if (this.hill) this._updateHill(dt);
+      this._updateMatchClock(dt);
     } else if (this._rotateT != null) {
       this._rotateT -= dt;
+      const note = $('endNote');
+      if (note) note.textContent = `next up: ${MAPS[this._nextMap()].name} · `
+        + `${Math.max(1, Math.ceil(this._rotateT))}s`;
       if (this._rotateT <= 0) { this._rotateT = null; this._rotate(); }
+    }
+    this._scoreBroadcastT -= dt;
+    if (this._scoreBroadcastT <= 0) {
+      this._scoreBroadcastT = 0.5;
+      this._broadcastScoreboard();
     }
 
     if (this.mode === 'host') {

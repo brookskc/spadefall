@@ -12,15 +12,30 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
+import { Avatar } from '../src/avatar.js';
 import { placedBlockColor } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
   parseSpawnRow, protectedBuildReason, spawnRow, validateMovementReport } from '../src/multiplayer.js';
 import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
 import { allowInbound, shouldSend } from '../src/net.js';
-import { sfx, voxelSurface } from '../src/audio.js';
+import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 import { botSeparation, botTargetScore, hillPost } from '../src/bot-rules.js';
+import { modeMatchSeconds, regulationDecision, respawnWaveDelay,
+  tacticalSpawnScore } from '../src/pacing.js';
+import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
+import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
+  occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
+import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
+  OVERCHARGE_WINDUP, availableStreakAbility, gainStreak, overchargeDamage,
+  spendStreak, stepOvercharge } from '../src/streaks.js';
+import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
+  FIELD_STATION_COOLDOWN, applyFieldSupply, nearestFieldStation,
+  stationCanSupply, stepFieldStation } from '../src/field-stations.js';
+import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
+import { masteryProgress } from '../src/mastery.js';
+import { rematchVotesNeeded, validPingDirection } from '../src/social.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -69,10 +84,21 @@ function mapgenTests() {
       ok(`${name}: ${team} stand above the waterline`, f.y >= SEA, `y=${f.y}`);
       ok(`${name}: ${team} stand has headroom`, a.get(f.x, f.y + 1, f.z) === 0);
     }
-    if (MAPS[m].hill) {
-      const h = MAPS[m].hill;
-      ok(`${name}: hill centre is on dry land`, a.surface(h.x, h.z) >= SEA,
-        `surface=${a.surface(h.x, h.z)}`);
+    for (const [i, h] of (MAPS[m].hills ?? []).entries()) {
+      const surface = a.surface(h.x, h.z);
+      ok(`${name}: hill ${i + 1} is on dry land`, a.surface(h.x, h.z) >= SEA,
+        `surface=${surface}`);
+      ok(`${name}: hill ${i + 1} has playable headroom`,
+        a.get(h.x, surface + 1, h.z) === 0 && a.get(h.x, surface + 2, h.z) === 0);
+    }
+    ok(`${name}: has two named tactical field caches`,
+      MAPS[m].stations?.length === 2 && MAPS[m].stations.every(s => s.label));
+    for (const [i, s] of MAPS[m].stations.entries()) {
+      const x = Math.floor(s.x), z = Math.floor(s.z), surface = a.surface(x, z);
+      ok(`${name}: cache ${i + 1} has a dry stone pad and headroom`,
+        surface >= SEA && a.get(x, surface, z) === BLOCK.STONE
+          && a.get(x, surface + 1, z) === 0 && a.get(x, surface + 2, z) === 0,
+        `surface=${surface}`);
     }
     let bad = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] >= PALETTE.length) bad++;
@@ -235,6 +261,10 @@ function audioPaletteTests() {
   ok('air swings and voxel impacts are separate cues', sfx.swing !== sfx.dig);
   ok('grenades and predator missiles have separate impact cues',
     sfx.explosion !== sfx.airstrikeImpact);
+  ok('reload mechanics stay below the old piercing pitch range',
+    Math.max(...['rifle', 'smg', 'sniper'].map(reloadPitch)) <= 330);
+  ok('reload weight remains class-specific after the lower retune',
+    reloadPitch('sniper') < reloadPitch('rifle') && reloadPitch('rifle') < reloadPitch('smg'));
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +351,14 @@ function multiplayerRuleTests() {
   ok('bounded environmental damage feedback passes the server trust boundary',
     validServerMessage({ t: 'e', k: 'envdmg', cause: 'drowned' })
       && !validServerMessage({ t: 'e', k: 'envdmg', cause: 'laser' }));
+  ok('authoritative wave countdowns pass the death-event boundary',
+    validServerMessage({ t: 'e', k: 'died', rt: 6.4 })
+      && !validServerMessage({ t: 'e', k: 'died', rt: 90 }));
+  ok('expanded contribution scoreboard rows pass the trust boundary',
+    validServerMessage({ t: 'e', k: 'kd',
+      rows: [['p0', 'Player', 'green', 2, 1, 325, 1, 4]] })
+      && !validServerMessage({ t: 'e', k: 'kd',
+        rows: [['p0', 'Player', 'green', 2, 1, 'lots', 1, 4]] }));
   const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0,
     me: 2, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
     r: { p: [], b: [] } };
@@ -359,6 +397,270 @@ function botRuleTests() {
     botSeparation({ x: 10, z: 10 }, [
       { id: 2, x: 20, z: 10, alive: true }, { id: 3, x: 10.2, z: 10, alive: false },
     ], 1).x === 0);
+}
+
+// ---------------------------------------------------------------------------
+function pacingRuleTests() {
+  group('match pacing: waves, tactical spawns, regulation, and overtime');
+  ok('mode-specific regulation clocks match the pacing plan',
+    modeMatchSeconds('ctf') === 720 && modeMatchSeconds('tdm') === 540
+      && modeMatchSeconds('koth') === 600);
+  ok('deaths in one TDM wave share its six-second boundary',
+    Math.abs(respawnWaveDelay('tdm', 12.2) - 5.8) < 1e-9
+      && Math.abs(respawnWaveDelay('tdm', 14.5) - 3.5) < 1e-9);
+  ok('CTF and KOTH use distinct eight- and seven-second waves',
+    respawnWaveDelay('ctf', 8) === 8 && respawnWaveDelay('koth', 7) === 7);
+
+  const safe = tacticalSpawnScore({ x: 30, z: 0 }, {
+    enemies: [{ x: 70, z: 0 }], allies: [{ x: 18, z: 0 }],
+    objective: { x: 64, z: 0 }, visibleEnemies: 0,
+  });
+  const exposed = tacticalSpawnScore({ x: 30, z: 0 }, {
+    enemies: [{ x: 70, z: 0 }], allies: [{ x: 18, z: 0 }],
+    objective: { x: 64, z: 0 }, visibleEnemies: 1,
+  });
+  ok('spawn scoring strongly prefers covered approaches', safe > exposed + 40);
+  ok('spawn scoring rejects immediate enemy proximity',
+    tacticalSpawnScore({ x: 0, z: 0 }, { enemies: [{ x: 8, z: 0 }] }) === -Infinity);
+
+  ok('a regulation CTF lead waits for a live flag play to resolve',
+    regulationDecision('ctf', { green: 2, blue: 1 }, { flagsLive: true }).overtime);
+  ok('a settled CTF lead ends at regulation',
+    regulationDecision('ctf', { green: 2, blue: 1 }).winner === 'green');
+  ok('tied TDM enters sudden-death overtime',
+    regulationDecision('tdm', { green: 14, blue: 14 }).overtime);
+  ok('the trailing KOTH side extends regulation while on the point',
+    regulationDecision('koth', { green: 70, blue: 65 },
+      { losingTeamOnHill: true }).overtime);
+  ok('KOTH regulation ends when the trailing side is off the point',
+    regulationDecision('koth', { green: 70, blue: 65 }).winner === 'green');
+}
+
+// ---------------------------------------------------------------------------
+function contributionRuleTests() {
+  group('contribution scoring: assists, objectives, and ranking');
+  const killer = { name: 'Killer' }, recent = { name: 'Recent' };
+  const chip = { name: 'Chip' }, stale = { name: 'Stale' };
+  const ledger = new Map([
+    [killer, { damage: 60, at: 20 }],
+    [recent, { damage: 35, at: 18 }],
+    [chip, { damage: 5, at: 19 }],
+    [stale, { damage: 80, at: 5 }],
+  ]);
+  const assists = assistCreditors(ledger, killer, 21);
+  ok('assist attribution keeps recent meaningful contributors only',
+    assists.length === 1 && assists[0] === recent);
+  ok('the credited killer can never also receive an assist', !assists.includes(killer));
+  ok('objective actions outweigh incidental chip damage',
+    CONTRIBUTION.flagCapture > CONTRIBUTION.kill
+      && CONTRIBUTION.flagReturn > CONTRIBUTION.assist);
+  ok('a terrain-collapse takedown earns a skill bonus',
+    CONTRIBUTION.collapseKill > 0 && CONTRIBUTION.kill + CONTRIBUTION.collapseKill
+      < CONTRIBUTION.flagCapture);
+
+  const ranked = rankContributionRows([
+    ['fragger', { name: 'Fragger', score: 300, k: 3, d: 0, a: 0, objective: 0 }],
+    ['runner', { name: 'Runner', score: 425, k: 1, d: 2, a: 1, objective: 3 }],
+  ]);
+  ok('scoreboard ranking puts total contribution ahead of raw kills', ranked[0][0] === 'runner');
+}
+
+// ---------------------------------------------------------------------------
+function kothRuleTests() {
+  group('KOTH redesign: occupied scoring and rotating hills');
+  ok('an uncontested owner scores while physically on the hill',
+    occupiedScoringTeam('green', { green: 2, blue: 0 }) === 'green');
+  ok('an abandoned hill produces no hold score',
+    occupiedScoringTeam('green', { green: 0, blue: 0 }) === null);
+  ok('a contested hill produces no hold score',
+    occupiedScoringTeam('green', { green: 2, blue: 1 }) === null);
+  ok('an attacker cannot score the previous owner clock while flipping',
+    occupiedScoringTeam('green', { green: 0, blue: 2 }) === null);
+  const stolen = stepHillCapture({ owner: null, capTeam: 'green', progress: 5.9 },
+    'blue', false, 0.2);
+  ok('capture progress cannot transfer between opposing teams',
+    stolen.owner === null && stolen.capTeam === 'blue' && stolen.progress === 0.2);
+  const captured = stepHillCapture({ owner: null, capTeam: 'green', progress: 5.9 },
+    'green', false, 0.2);
+  ok('a team captures after completing its own uninterrupted bar',
+    captured.owner === 'green' && captured.captured === 'green' && captured.progress === 0);
+  ok('hill indices wrap through the full map rotation',
+    nextHillIndex(0, 3) === 1 && nextHillIndex(2, 3) === 0);
+
+  const warning = stepHillRotation(HILL_MOVE_WARNING + 0.1, 0.2);
+  ok('the relocation warning fires once when its threshold is crossed',
+    warning.warn && !warning.rotate && warning.remaining < HILL_MOVE_WARNING);
+  const moved = stepHillRotation(0.05, 0.1);
+  ok('an expired hill clock requests a move and starts a fresh cycle',
+    moved.rotate && moved.remaining === HILL_ACTIVE_TIME);
+  const frozen = stepHillRotation(3, 1, true);
+  ok('overtime freezes relocation on the deciding hill',
+    !frozen.rotate && !frozen.warn && frozen.remaining === 3);
+}
+
+// ---------------------------------------------------------------------------
+function streakRuleTests() {
+  group('scorestreak redesign: contribution economy and Overcharge');
+  ok('kills, assists, and objective score share one capped streak meter',
+    gainStreak(0, CONTRIBUTION.kill) === 100
+      && gainStreak(450, CONTRIBUTION.assist) === OVERCHARGE_COST
+      && gainStreak(990, 50) === AIRSTRIKE_COST);
+  ok('Overcharge unlocks before the airstrike and the stronger reward wins',
+    availableStreakAbility(OVERCHARGE_COST) === 'overcharge'
+      && availableStreakAbility(AIRSTRIKE_COST) === 'airstrike');
+  ok('an active or charging Overcharge prevents reward stacking',
+    availableStreakAbility(AIRSTRIKE_COST, 0.5, 0) === null
+      && availableStreakAbility(AIRSTRIKE_COST, 0, 5) === null);
+  ok('rewards spend a fixed cost and preserve legitimate overflow',
+    spendStreak(650, OVERCHARGE_COST) === 150
+      && spendStreak(AIRSTRIKE_COST, AIRSTRIKE_COST) === 0
+      && spendStreak(400, OVERCHARGE_COST) === null);
+
+  const charging = stepOvercharge(OVERCHARGE_WINDUP, 0, 0.5);
+  ok('Overcharge has a visible windup before damage changes',
+    charging.charging > 0 && charging.active === 0 && !charging.started);
+  const live = stepOvercharge(0.1, 0, 0.2);
+  ok('finishing the windup starts the bounded active window',
+    live.started && live.charging === 0 && live.active < OVERCHARGE_DURATION);
+  const expired = stepOvercharge(0, 0.1, 0.2);
+  ok('the active window reports its expiry', expired.ended && expired.active === 0);
+  ok('Overcharge is a readable advantage with retained incoming risk',
+    overchargeDamage(100, true, false) === 135
+      && overchargeDamage(100, false, true) === 125
+      && overchargeDamage(100, true, true) === 168.75);
+  const snapshot = { t: 's', p: [], b: [], c: [0, 0], g: [],
+    u: [[0, 650, 12, 0], [2, 0, 0, 120]] };
+  ok('momentum and Overcharge timers pass the snapshot trust boundary',
+    validServerMessage(snapshot)
+      && !validServerMessage({ ...snapshot, u: [[0, 1500, 0, 0]] })
+      && !validServerMessage({ ...snapshot, u: [[0, 500, 0, 999]] }));
+  ok('Overcharge phase telegraphs are bounded and attributable',
+    validServerMessage({ t: 'e', k: 'overcharge', owner: 2,
+      phase: 'windup', remaining: OVERCHARGE_WINDUP })
+      && !validServerMessage({ t: 'e', k: 'overcharge', owner: 2,
+        phase: 'forever', remaining: 99 }));
+  const avatar = new Avatar(scene(), 'green', 'Tester');
+  avatar.setOvercharge(true, false);
+  ok('the voxel soldier exposes a visible windup telegraph',
+    avatar.overchargeFx.visible && avatar.overchargeFx.children.length === 8);
+  avatar.setOvercharge(false, true);
+  ok('the same warning assembly carries into the active state',
+    avatar.overchargeFx.visible && avatar._overchargePhase === 2);
+  avatar.dispose();
+}
+
+// ---------------------------------------------------------------------------
+function fieldStationTests() {
+  group('voxel field stations: contest, resupply, and anti-farming');
+  const green = { alive: true, team: 'green', carrier: false, blocks: 4, grenades: 0 };
+  const blue = { alive: true, team: 'blue', carrier: false, blocks: 4, grenades: 0 };
+  const full = { alive: true, team: 'green', carrier: false,
+    blocks: FIELD_STATION_BLOCK_CAP, grenades: 3 };
+  ok('only a living, non-carrier soldier missing supplies can activate a cache',
+    stationCanSupply(green) && !stationCanSupply(full)
+      && !stationCanSupply({ ...green, carrier: true }));
+
+  const partial = stepFieldStation({}, [green], FIELD_STATION_CAPTURE_TIME - 0.1);
+  ok('an uncontested under-supplied team builds capture progress',
+    partial.team === 'green' && partial.progress > 0 && !partial.activated);
+  const contested = stepFieldStation(partial, [green, blue], 0.2);
+  ok('enemy presence contests and clears stockpiled capture progress',
+    contested.contested && contested.progress === 0 && contested.team === null);
+  const activated = stepFieldStation({}, [green], FIELD_STATION_CAPTURE_TIME);
+  ok('a completed hold starts one shared thirty-second cooldown',
+    activated.activated === 'green' && activated.cooldown === FIELD_STATION_COOLDOWN);
+  const cooling = stepFieldStation(activated, [blue], 1);
+  ok('the cooldown cannot be bypassed by changing teams',
+    !cooling.activated && cooling.cooldown === FIELD_STATION_COOLDOWN - 1);
+
+  const grant = applyFieldSupply(green);
+  ok('a cache grants bounded building stock and one grenade',
+    grant.blocks === 20 && grant.nades === 1 && green.blocks === 24 && green.grenades === 1);
+  const capped = { alive: true, team: 'green', blocks: 49, nades: 3 };
+  applyFieldSupply(capped);
+  ok('field supplies respect the shared player and bot caps',
+    capped.blocks === FIELD_STATION_BLOCK_CAP && capped.nades === 3);
+  const near = nearestFieldStation([{ index: 0, x: 10, z: 10 },
+    { index: 1, x: 30, z: 30 }], { x: 12, z: 11 }, 10);
+  ok('nearest-cache lookup is range-bounded and stable', near?.station.index === 0
+    && nearestFieldStation([{ x: 30, z: 30 }], { x: 0, z: 0 }, 10) === null);
+
+  const snap = { t: 's', p: [], b: [], c: [0, 0], g: [],
+    l: [[0, 300, 0, 0, 0], [1, 0, 12, 2, 1]] };
+  ok('cache state and personal supply notices pass bounded protocol validation',
+    validServerMessage(snap)
+      && validServerMessage({ t: 'e', k: 'supply', blocks: 20, nades: 1 })
+      && !validServerMessage({ ...snap, l: [[0, 9999, 0, 0, 0]] })
+      && !validServerMessage({ t: 'e', k: 'supply', blocks: 200, nades: 4 }));
+}
+
+// ---------------------------------------------------------------------------
+function matchReportTests() {
+  group('post-match report: ranks, medals, and personal bests');
+  const entries = [
+    ['me', { name: 'Me', team: 'green', score: 820, k: 6, d: 0, a: 3, objective: 7 }],
+    ['ally', { name: 'Ally', team: 'green', score: 450, k: 3, d: 2, a: 1, objective: 2 }],
+    ['foe', { name: 'Foe', team: 'blue', score: 600, k: 5, d: 3, a: 2, objective: 4 }],
+  ];
+  const report = buildMatchReport('me', entries);
+  ok('the report resolves overall and team placement from contribution order',
+    report.overallRank === 1 && report.overallSize === 3
+      && report.teamRank === 1 && report.teamSize === 2);
+  ok('the local report preserves the full authoritative K/D/A/OBJ row',
+    report.local.score === 820 && report.local.k === 6 && report.local.d === 0
+      && report.local.a === 3 && report.local.objective === 7);
+  ok('medals are thresholded, ordered, and capped at three',
+    report.medals.length === 3
+      && JSON.stringify(report.medals.map(m => m.id)) === '["mvp","objective","kills"]');
+  ok('a low-activity round earns no participation medals',
+    medalAwards({ team: 'green', score: 100, k: 1, d: 4, a: 0, objective: 0 }, [
+      ['low', { team: 'green', score: 100, k: 1, d: 4, a: 0, objective: 0 }],
+    ]).length === 0);
+
+  const first = updatePersonalBests({}, 'ctf', report.local);
+  ok('the first positive mode result establishes four personal records',
+    first.newBests.length === 4 && first.records.ctf.score === 820
+      && first.records.ctf.objective === 7);
+  const equal = updatePersonalBests(first.records, 'ctf', report.local);
+  ok('equal results do not masquerade as new personal bests', equal.newBests.length === 0);
+  const mixed = updatePersonalBests(first.records, 'ctf',
+    { score: 700, k: 8, a: 1, objective: 10 });
+  ok('a later round updates only records it actually beats',
+    JSON.stringify(mixed.newBests.map(b => b.field)) === '["k","objective"]'
+      && mixed.records.ctf.score === 820 && mixed.records.ctf.k === 8);
+  const otherMode = updatePersonalBests(mixed.records, 'koth',
+    { score: 500, k: 2, a: 4, objective: 30 });
+  ok('personal records remain separate between game modes',
+    otherMode.records.ctf.k === 8 && otherMode.records.koth.a === 4);
+}
+
+function socialProgressionTests() {
+  group('phase ten: squad signals, rematches, and cosmetic mastery');
+  ok('a solo rematch needs one vote', rematchVotesNeeded(1) === 1);
+  ok('two players must both agree to a rematch', rematchVotesNeeded(2) === 2);
+  ok('larger rooms use a strict majority', rematchVotesNeeded(3) === 2
+    && rematchVotesNeeded(10) === 6);
+  ok('unit-like tactical directions pass validation', validPingDirection([1, 0, 0]));
+  ok('zero and oversized tactical directions are rejected',
+    !validPingDirection([0, 0, 0]) && !validPingDirection([9, 0, 0]));
+  ok('tactical ping actions pass the client trust boundary',
+    validClientMessage({ t: 'a', k: 'mark', d: [0, 0, -1] })
+      && !validClientMessage({ t: 'a', k: 'mark', d: [0, 0, 0] }));
+  ok('team marks pass the server trust boundary with bounded kinds',
+    validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
+      x: 20, y: 12, z: 30, kind: 'ATTACK' })
+      && !validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
+        x: 20, y: 12, z: 30, kind: 'ENEMY_THROUGH_WALL' }));
+  ok('rematch votes are bounded on both sides of the wire',
+    validClientMessage({ t: 'a', k: 'rematch' })
+      && validServerMessage({ t: 'e', k: 'rematch', voters: ['p0', 'p2'], needed: 2 })
+      && !validServerMessage({ t: 'e', k: 'rematch', voters: ['p0'], needed: 0 }));
+  ok('mastery tier boundaries award only cosmetic band counts',
+    masteryProgress(999).tier.bands === 0
+      && masteryProgress(1000).tier.bands === 1
+      && masteryProgress(40000).tier.bands === 4);
+  ok('mastery reports progress to the next tier',
+    masteryProgress(4900).remaining === 100 && masteryProgress(5000).tier.name === 'VETERAN');
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +713,17 @@ function airstrikeDroneTests() {
   ok('invalid active-strike timers are rejected', !validServerMessage({
     ...strikeSnapshot, a: [[7, qx(100), qy(20), qx(120), qa(0), 9000, 2]],
   }));
+  ok('match clock and overtime snapshot state are bounded',
+    validServerMessage({ ...strikeSnapshot, m: [5399, 0, 1], w: null })
+      && validServerMessage({ ...strikeSnapshot, m: [0, 1, 5400], w: 'blue' })
+      && !validServerMessage({ ...strikeSnapshot, m: [-1, 0, 1] }));
+  ok('rotating-hill state and occupied presence pass validation',
+    validServerMessage({ ...strikeSnapshot,
+      h: ['green', 2.5, 0, 'blue', 2, 17.4, 1, 0] })
+      && !validServerMessage({ ...strikeSnapshot,
+        h: ['green', 2.5, 0, 'blue', 12, 17.4, 1, 0] })
+      && !validServerMessage({ ...strikeSnapshot,
+        h: ['green', 2.5, 0, 'blue', 2, 17.4, 99, 0] }));
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +1108,13 @@ export async function run() {
   hostileInputTests();
   multiplayerRuleTests();
   botRuleTests();
+  pacingRuleTests();
+  contributionRuleTests();
+  kothRuleTests();
+  streakRuleTests();
+  fieldStationTests();
+  matchReportTests();
+  socialProgressionTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

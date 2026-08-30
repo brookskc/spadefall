@@ -23,6 +23,22 @@ export class Avatar {
     this.deadAt = null;  // wall-clock time of death, while the corpse tumbles
     this.pos = new THREE.Vector3();
     this.yaw = 0;
+    // Hard-edged warning blocks, not a glow or particle aura. Windup blinks
+    // amber; the active state becomes orange/white and visibly orbits the
+    // silhouette in stepped increments so opponents can read the buff.
+    this.overchargeFx = new THREE.Group();
+    this.overchargeFx.visible = false;
+    const sparkMat = new THREE.MeshBasicMaterial({ color: 0xffd97a });
+    const sparkGeo = new THREE.BoxGeometry(0.09, 0.09, 0.09);
+    for (let i = 0; i < 8; i++) {
+      const spark = new THREE.Mesh(sparkGeo, sparkMat);
+      const a = i / 8 * Math.PI * 2;
+      spark.position.set(Math.cos(a) * 0.48, 0.45 + (i % 3) * 0.48,
+        Math.sin(a) * 0.48);
+      this.overchargeFx.add(spark);
+    }
+    this.group.add(this.overchargeFx);
+    this._overchargePhase = 0;
   }
 
   // ry is model-space rotation.y (soldier forward is -Z).
@@ -67,6 +83,10 @@ export class Avatar {
 
   setCrouch(on) { this.crouch = on; }
   setTool(tool) { setSoldierTool(this.parts, tool); }
+  setOvercharge(charging, active) {
+    this._overchargePhase = active ? 2 : charging ? 1 : 0;
+    this.overchargeFx.visible = this.alive && this._overchargePhase > 0;
+  }
 
   // Render just far enough in the past to bracket two snapshots: one
   // observed interval plus two jitter sigmas, clamped to sanity. A clean
@@ -118,6 +138,7 @@ export class Avatar {
     this._px = nx; this._pz = nz;
 
     if (!this.alive) { // corpse: tumble where it fell, then vanish
+      this.overchargeFx.visible = false;
       if (this.deadAt !== null) animateDeath(this.parts, performance.now() / 1000 - this.deadAt);
       return;
     }
@@ -125,6 +146,15 @@ export class Avatar {
     this.group.rotation.y = a[4] + dry * k;
     animateSoldier(this.parts, speed, gameT + this.pos.x);
     setCrouch(this.parts, this.crouch);
+    this.overchargeFx.visible = this._overchargePhase > 0;
+    if (this._overchargePhase > 0) {
+      const step = Math.floor(gameT * (this._overchargePhase === 1 ? 12 : 8));
+      this.overchargeFx.rotation.y = step * Math.PI / 4;
+      this.overchargeFx.children[0].material.color.setHex(
+        this._overchargePhase === 1 || step % 2 === 0 ? 0xffd97a : 0xff6b3d);
+      for (let i = 0; i < this.overchargeFx.children.length; i++)
+        this.overchargeFx.children[i].visible = this._overchargePhase === 2 || (i + step) % 2 === 0;
+    }
     if (world) placeShadow(this.parts, world, this.group.rotation.y);
   }
 

@@ -33,12 +33,12 @@ export class RemotePlayer {
     this.alive = false;
     this._mkCount = 0; this._mkT = null;
     this._streak = 0;
-    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._overchargeWindup = 0; this._overchargeT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);
-    this.game.net.sendTo(this.id, { t: 'e', k: 'died' });
-    this.game.onDeath(this, killer);
+    const redeploy = this.game.onDeath(this, killer);
+    this.game.net.sendTo(this.id, { t: 'e', k: 'died', rt: redeploy });
   }
 
   respawn(at = null, notify = true) {
@@ -63,7 +63,7 @@ export class RemotePlayer {
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this._mkCount = 0; this._mkT = null;
     this._streak = 0;
-    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._overchargeWindup = 0; this._overchargeT = 0;
     this._airMove = null;
     this._lastPosT = null;
     this.yaw = this.team === 'green' ? -Math.PI / 2 : Math.PI / 2;

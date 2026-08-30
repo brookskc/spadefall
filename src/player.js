@@ -6,6 +6,8 @@ import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
+import { availableStreakAbility } from './streaks.js';
+import { masteryProgress } from './mastery.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -100,6 +102,9 @@ export class Player {
     this.blocks = 50;
     this.grenades = 3;
     this.grenadeRegen = 0;
+    this._streak = 0;
+    this._overchargeWindup = 0;
+    this._overchargeT = 0;
     this.cooldown = 0;
     this.reloading = 0;
     this.bob = 0;
@@ -211,23 +216,21 @@ export class Player {
       if (e.code === 'KeyR' && TOOLS[this.tool].mag !== undefined
           && this.ammo[this.tool] < TOOLS[this.tool].mag)
         this._reload();
+      if (e.code === 'KeyG' && document.pointerLockElement === dom)
+        this.game.requestTeamPing(this);
       if (e.code === 'Space') { this.slideT = 0; this.body.jump(); } // hop out of a slide
-      // F: your strongest available streak ability, whichever that is
-      // right now — one key, not two, so there's never ambiguity about
-      // what pressing it does. Airstrike (10+) always wins if both are
-      // available: once you're strong enough for the capstone, the lesser
-      // buff isn't worth reaching for. An already-running Overcharge just
-      // finishes out its own duration on its own if the streak crosses 10
-      // mid-buff — F's behavior only matters at the instant it's pressed,
-      // it doesn't retroactively cancel something already active.
+      // F spends the strongest currently affordable contribution reward.
+      // Charging/active Overcharge blocks stacking either reward.
       if (e.code === 'KeyF') {
         if (this._piloting) {
           this._piloting = false;
-        } else if ((this._streak ?? 0) >= 10) {
+        } else if (availableStreakAbility(this._streak ?? 0,
+            this._overchargeWindup ?? 0, this._overchargeT ?? 0) === 'airstrike') {
           this._piloting = true;
           const eye = this.body.eye();
           this._pilotPos = new THREE.Vector3(eye.x, SY + 30, eye.z);
-        } else if ((this._streak ?? 0) - (this._overchargeAtStreak ?? 0) >= 5 && !(this._overchargeT > 0)) {
+        } else if (availableStreakAbility(this._streak ?? 0,
+            this._overchargeWindup ?? 0, this._overchargeT ?? 0) === 'overcharge') {
           this.game.requestOvercharge(this);
         }
       }
@@ -341,6 +344,7 @@ export class Player {
     // Sights, muzzle hardware, rails, and action pieces should look like
     // functional parts, not like one uninterrupted recolored cuboid.
     const metal = new THREE.MeshBasicMaterial({ color: 0x424952, vertexColors: true });
+    const masteryMetal = new THREE.MeshBasicMaterial({ color: 0xc9b878, vertexColors: true });
     const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
     const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
@@ -355,6 +359,7 @@ export class Player {
     };
     this.vm = {};
     this._magParts = {};
+    this._masteryMarks = [];
     const root = new THREE.Group();
     this.camera.add(root);
     this.vmRoot = root;
@@ -372,6 +377,12 @@ export class Player {
       mk(0.008, 0.02, 0.03, metal, -0.0085, 0.055, 0, rear);  // wing L
       mk(0.008, 0.02, 0.03, metal,  0.0085, 0.055, 0, rear);  // wing R
     };
+    const masteryBands = (g, startZ, y, width) => {
+      for (let i = 0; i < 4; i++) {
+        const band = mk(width, 0.012, 0.018, masteryMetal, 0, y, startZ + i * 0.032, g);
+        this._masteryMarks.push(band);
+      }
+    };
     const rifle = new THREE.Group();
     mk(0.05, 0.07, 0.85, dark, 0, 0, -0.5, rifle);       // barrel
     mk(0.06, 0.08, 0.07, metal, 0, 0, -0.955, rifle);    // muzzle cap
@@ -381,6 +392,7 @@ export class Player {
     this._magParts.rifle = { mesh: rifleMag, y: rifleMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.05, rifle);    // hand
     sights(rifle, -0.85, -0.12, 0.035);
+    masteryBands(rifle, -0.56, 0.046, 0.058);
     this.vm.rifle = rifle;
 
     const smg = new THREE.Group();
@@ -393,6 +405,7 @@ export class Player {
     this._magParts.smg = { mesh: smgMag, y: smgMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.1, 0.05, smg);
     sights(smg, -0.53, -0.1, 0.04);
+    masteryBands(smg, -0.41, 0.052, 0.068);
     this.vm.smg = smg;
 
     // Bolt-action, scoped — no iron sights; a scope box above the barrel
@@ -425,6 +438,7 @@ export class Player {
     // isn't in your view when you're looking through it either.
     this.vm.sniper = sniper;
     this._scopeParts = [scopeBody, scopeLens, scopeRingA, scopeRingB];
+    masteryBands(sniper, -0.76, 0.038, 0.052);
 
     const spade = new THREE.Group();
     mk(0.035, 0.035, 0.5, wood, 0, 0, -0.25, spade);     // handle
@@ -449,6 +463,7 @@ export class Player {
 
     for (const k in this.vm) root.add(this.vm[k]);
     this.vmRoot.position.set(0.28, -0.26, -0.25);
+    this.syncMastery();
     this._syncViewmodel();
   }
 
@@ -458,6 +473,12 @@ export class Player {
   // a mid-session choice actually show up.
   setGunColor(hex) {
     this._gunMat?.color.setHex(hex);
+  }
+
+  syncMastery() {
+    const bands = masteryProgress(stats.get().masteryPoints).tier.bands;
+    for (let i = 0; i < (this._masteryMarks?.length ?? 0); i++)
+      this._masteryMarks[i].visible = i % 4 < bands;
   }
 
   _syncViewmodel() {
@@ -470,16 +491,6 @@ export class Player {
   // ---------------- per-frame ----------------
   update(dt) {
     if (!this.alive) return;
-    // Runs before the piloting short-circuit below on purpose: an
-    // Overcharge activated while still under 10 streak has to keep
-    // counting down even after crossing into airstrike-eligible territory
-    // and entering piloting mode — it finishes on its own schedule, not
-    // interrupted by what F does next. Repeat-eligibility is governed by
-    // streak progress, not time: _overchargeAtStreak (set on activation,
-    // cleared only on death) tracks the streak value it was last used at,
-    // and the keydown gate above re-unlocks it once _streak has climbed
-    // 5 further than that.
-    if (this._overchargeT > 0) { this._overchargeT -= dt; if (this._overchargeT < 0) this._overchargeT = 0; }
     // Short-circuits everything below — no movement, no aiming, no firing,
     // completely different camera. The body itself never gets touched
     // here, which is exactly what leaves it standing still and fully
@@ -815,8 +826,8 @@ export class Player {
     this.swing = 0;
     this._reloadStage = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
-    this._streak = 0; // and the killstreak entirely, separately from the multi-kill chain above
-    this._overchargeT = 0; this._overchargeAtStreak = 0; // dying cancels an active buff and resets the repeat-eligibility tracker — a fresh life needs a fresh 5-kill streak, same as it always did for the FIRST use
+    this._streak = 0; // combat momentum resets on death
+    this._overchargeWindup = 0; this._overchargeT = 0;
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
     this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
     this._lingerT = 0; // die during the post-impact linger (caught in someone else's fight, or your own blast) and the death camera takes over immediately — no frozen overhead view fighting the ragdoll for control
@@ -1019,7 +1030,7 @@ export class Player {
     this.crouched = false;
     this.body.half.h = STAND_HEIGHT;
     resetEnvironmentalState(this);
-    // Killstreak and related perk state: die() already clears all of this
+    // Scorestreak and related perk state: die() already clears all of this
     // on a normal mid-match death, making this redundant (but harmless)
     // for that path. It's not redundant here: rebuild() (a new match
     // starting, or a map rotating) calls respawn() directly, with no
@@ -1029,7 +1040,7 @@ export class Player {
     // silently carry into the next match instead of starting clean.
     this._mkCount = 0; this._mkT = null;
     this._streak = 0;
-    this._overchargeT = 0; this._overchargeAtStreak = 0;
+    this._overchargeWindup = 0; this._overchargeT = 0;
     this._piloting = false; this._fallingT = 0; this._lingerT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;

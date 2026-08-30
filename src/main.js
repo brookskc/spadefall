@@ -18,6 +18,9 @@ const params = new URLSearchParams(location.search);
 const airstrikeQa = params.has('airstrikeqa');
 const soldierQa = params.has('soldierqa');
 const mapQa = params.has('mapqa');
+const stationQa = params.has('stationqa');
+const reportQa = params.has('reportqa');
+const pingQa = params.has('pingqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -55,7 +58,7 @@ if (params.has('scopeqa')) {
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
-if (airstrikeQa || soldierQa || mapQa) $('menu').style.display = 'none';
+if (airstrikeQa || soldierQa || mapQa || stationQa || reportQa || pingQa) $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
 // camera, excluded from fog so it keeps its glow at any distance.
@@ -107,6 +110,38 @@ function requireName() {
 }
 $('nameInput').addEventListener('input', () => $('nameInput').classList.remove('need'));
 function status(html) { $('lobbyStatus').innerHTML = html; }
+
+function inviteUrl() {
+  if (!roomCode) return null;
+  const url = new URL(location.href);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('code', roomCode);
+  return url.href;
+}
+function showInvite() { $('inviteRow').style.display = roomCode ? 'block' : 'none'; }
+async function copyInvite() {
+  const url = inviteUrl();
+  if (!url) return;
+  let copied = false;
+  try {
+    copied = await Promise.race([
+      navigator.clipboard.writeText(url).then(() => true, () => false),
+      new Promise(resolve => setTimeout(() => resolve(false), 400)),
+    ]);
+  } catch { /* fallback below */ }
+  if (!copied) {
+    const input = document.createElement('textarea');
+    input.value = url;
+    input.style.position = 'fixed'; input.style.opacity = '0';
+    document.body.appendChild(input); input.select();
+    try { copied = document.execCommand('copy'); } catch { /* best effort */ }
+    input.remove();
+  }
+  status(copied ? `invite copied — <b>${roomCode}</b>`
+    : `copy unavailable — share room code <b>${roomCode}</b>`);
+}
+$('inviteBtn').addEventListener('click', copyInvite);
 
 // The big DEPLOY/RESUME button only exists once there's a session to enter.
 function showPlay(label) {
@@ -165,6 +200,7 @@ function adoptHost(n, code, opts = {}) {
   net = n;
   window.__net = n;
   roomCode = code;
+  showInvite();
   game.net = n;
   n.handlers = {
     onOpen: () => {
@@ -228,6 +264,7 @@ function adoptMigratedHost(n, code, gen) {
   net = n;
   window.__net = n;
   roomCode = code;
+  showInvite();
   game.net = n;
   game.migGen = gen; // which baton pass we adopted (0 = original room)
   n.handlers = {
@@ -251,6 +288,7 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
   net = n;
   window.__net = n;
   roomCode = code;
+  showInvite();
   game.net = n;
   game.migGen = gen;
   n.handlers.onData = d => game.clientOnData(d);
@@ -330,6 +368,7 @@ function adoptJoin(n, code) {
   net = n;
   window.__net = n;
   roomCode = code;
+  showInvite();
   game.net = n;
   const pub = /^PUB(\d+)$/.exec(code); // public slots show as "PUBLIC n"
   $('roomcode').querySelector('b').textContent = pub ? `PUBLIC ${+pub[1] + 1}` : code;
@@ -399,12 +438,17 @@ const mapPref = $('mapPref'), modePref = $('modePref');
 // updated live from here, so a swatch click works the same whether it's
 // the first thing you do or the fiftieth.
 {
-  const statsLine = $('statsLine'), gunColors = $('gunColors');
+  const statsLine = $('statsLine'), masteryLine = $('masteryLine'), gunColors = $('gunColors');
   function renderStats() {
     const s = stats.get();
     const kd = (s.kills / Math.max(1, s.deaths)).toFixed(2);
     statsLine.textContent =
       `${s.kills} K · ${s.deaths} D · ${kd} K/D · ${s.matches} MATCHES · ${s.wins} WINS`;
+    const mastery = stats.mastery();
+    masteryLine.textContent = mastery.next
+      ? `${mastery.tier.name} MASTERY · ${mastery.points} / ${mastery.next.points} · `
+        + `${mastery.remaining} TO ${mastery.next.name}`
+      : `${mastery.tier.name} MASTERY · ${mastery.points} · ALL 4 BANDS EARNED`;
     gunColors.innerHTML = '';
     const unlockedHex = new Set(stats.unlocked().map(c => c.hex));
     const equipped = stats.gunColor();
@@ -429,6 +473,7 @@ const mapPref = $('mapPref'), modePref = $('modePref');
       gunColors.appendChild(sw);
     }
   }
+  game.onStatsChanged = renderStats;
   renderStats();
 }
 
@@ -618,7 +663,7 @@ $('hostBtn').addEventListener('click', () => {
 $('joinBtn').addEventListener('click', () => {
   if (net || matchmaking) return;
   const code = $('codeInput').value.trim().toUpperCase();
-  if (code.length !== 4) return status('enter the 4-letter room code');
+  if (!/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(code)) return status('enter a valid room code');
   migrationGen = 0;
   if (!requireName()) return;
   initAudio();
@@ -728,7 +773,7 @@ function roomRow(room) {
   const modeName = room.mode === 'tdm' ? 'team deathmatch'
     : room.mode === 'koth' ? 'king of the hill' : 'capture the flag';
   const clock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-  const score = room.mode === 'koth' ? `${clock(room.g)} — ${clock(room.b)} held`
+  const score = room.mode === 'koth' ? `${clock(room.g)} — ${clock(room.b)} occupied`
     : room.mode === 'tdm' ? `${room.g} — ${room.b} kills` : `${room.g} — ${room.b} captures`;
   meta.textContent = `${modeName} · ${score}`;
   const names = document.createElement('div');
@@ -819,6 +864,12 @@ $('browseRefresh').addEventListener('click', () => scanRooms());
 $('codeInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') $('joinBtn').click();
 });
+
+const invitedCode = (params.get('code') ?? '').trim().toUpperCase();
+if (/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(invitedCode) && !params.get('mp')) {
+  $('codeInput').value = invitedCode;
+  status(`squad invite ready — enter a callsign and join <b>${invitedCode}</b>`);
+}
 
 // Map rotation: the room moves to the next map after each match. The end
 // screen offers no choices while it turns — only once the new map is built
@@ -989,7 +1040,7 @@ function frame() {
 
   // The host is authoritative — the simulation must never pause, even while
   // the host's own menu is up, or every client freezes with it.
-  if (playing || game.mode === 'host') {
+  if (playing || game.mode === 'host' || game.over) {
     lastSimT = performance.now();
     game.update(dt);
   } else if (game.mode === 'client') {
@@ -1072,5 +1123,50 @@ function frame() {
     game.effects.update(dt);
   }
   renderer.render(scene, camera);
+}
+// Browser composition hook for the real field-cache loop. Automated browsers
+// cannot reliably grant pointer lock, so place a deliberately under-supplied
+// solo player on cache one and let the ordinary Game update secure it.
+if (stationQa) {
+  const station = game.fieldStations[Math.max(0, Math.min(game.fieldStations.length - 1,
+    Number.parseInt(params.get('stationqa') || '0', 10) || 0))];
+  if (station) {
+    game.player.body.pos.set(station.x, station.y, station.z);
+    game.player.body.vel.set(0, 0, 0);
+    game.player.yaw = Math.PI / 2;
+    game.player.blocks = 1;
+    game.player.grenades = 0;
+    game.player.protT = 999;
+    setPlaying(true);
+  }
+}
+// Tactical-ping composition hook. It uses the real host-side raycast,
+// context classification, world marker, minimap mark, HUD bearing, and TTL;
+// only the synthetic key press is skipped because automation cannot reliably
+// acquire browser pointer lock.
+if (pingQa) {
+  game.player.name = 'SCOUT';
+  game.player.protT = 999;
+  setPlaying(true);
+  game._hostPlaceTeamPing(game.player, [0.65, -0.25, -0.72]);
+}
+// Representative post-match composition without waiting through a full
+// automated round. Uses the real scoreboard rows, report rules, persistence,
+// and Game#_end path; only the seeded result is a browser QA fixture.
+if (reportQa) {
+  game.gameMode = 'ctf';
+  game.player.team = 'green';
+  game.captures = { green: 3, blue: 2 };
+  game.matchElapsed = 503;
+  const mine = game._kdKey(game.player);
+  let i = 0;
+  for (const [key, row] of game.kd) {
+    if (key === mine) Object.assign(row,
+      { team: 'green', score: 820, k: 6, d: 0, a: 3, objective: 7 });
+    else Object.assign(row, { score: Math.max(80, 600 - i * 55),
+      k: Math.max(0, 5 - i), d: 2 + i % 4, a: i % 3, objective: Math.max(0, 4 - i) });
+    i++;
+  }
+  game._end('green');
 }
 frame();

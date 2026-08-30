@@ -1,6 +1,6 @@
-// audio.js — a deliberately synthetic, "voxel-sized" WebAudio palette.
-// Short stepped envelopes and a small set of square/triangle voices keep the
-// sound language as chunky as the art. No sampled firearms or realistic foley.
+// audio.js — a synthetic, "voxel-sized" WebAudio palette. Filtered noise and
+// compact sine/triangle bodies keep it tactile and stylized without drifting
+// into either realistic sample-pack foley or thin chiptune square-wave chirps.
 let ctx = null, master = null;
 
 export function initAudio() {
@@ -69,6 +69,18 @@ function steppedEnvelope(param, t0, peak, dur, steps = 4, attack = 0.002) {
   param.exponentialRampToValueAtTime(0.0001, t0 + dur);
 }
 
+// Tonal layers use a rounded contour. The noise transients above retain a
+// handful of audible ledges for the voxel character, while pitch no longer
+// stair-steps in volume like an 8-bit sound effect.
+function roundedEnvelope(param, t0, peak, dur, attack = 0.004) {
+  const level = Math.max(0.0001, peak * _scale);
+  param.setValueAtTime(0.0001, t0);
+  param.linearRampToValueAtTime(level, t0 + Math.min(attack, dur * 0.25));
+  param.exponentialRampToValueAtTime(Math.max(0.0001, level * 0.42),
+    t0 + Math.max(attack + 0.001, dur * 0.52));
+  param.exponentialRampToValueAtTime(0.0001, t0 + dur);
+}
+
 function burst({ dur = 0.12, freq = 1100, q = 0.8, gain = 0.35,
   decaySteps = 4, filter = 'lowpass', delay = 0 }) {
   if (!ready()) return;
@@ -84,7 +96,7 @@ function burst({ dur = 0.12, freq = 1100, q = 0.8, gain = 0.35,
   src.stop(t0 + dur + 0.03);
 }
 
-function tone({ freq = 440, end = freq, dur = 0.1, type = 'square',
+function tone({ freq = 440, end = freq, dur = 0.1, type = 'triangle',
   gain = 0.16, steps = 3, delay = 0 }) {
   if (!ready()) return;
   const t0 = ctx.currentTime + delay;
@@ -93,15 +105,15 @@ function tone({ freq = 440, end = freq, dur = 0.1, type = 'square',
   o.frequency.setValueAtTime(Math.max(30, freq), t0);
   if (end !== freq) o.frequency.exponentialRampToValueAtTime(Math.max(30, end), t0 + dur);
   const g = ctx.createGain();
-  steppedEnvelope(g.gain, t0, gain, dur, steps);
+  roundedEnvelope(g.gain, t0, gain, dur, Math.min(0.006, dur * 0.18));
   o.connect(g); route(g);
   o.start(t0); o.stop(t0 + dur + 0.03);
 }
 
-function metalTick(freq = 760, gain = 0.1, delay = 0) {
-  tone({ freq, end: freq * 0.72, dur: 0.035, type: 'square', gain, steps: 2, delay });
-  tone({ freq: freq * 1.48, dur: 0.018, type: 'triangle', gain: gain * 0.55,
-    steps: 2, delay: delay + 0.012 });
+function metalTick(freq = 300, gain = 0.1, delay = 0) {
+  tone({ freq, end: freq * 0.62, dur: 0.052, type: 'triangle', gain, delay });
+  burst({ dur: 0.028, freq: Math.min(1450, freq * 3), q: 1.4,
+    gain: gain * 0.34, decaySteps: 3, filter: 'bandpass', delay: delay + 0.008 });
 }
 
 // Numeric values match world.js's stable block IDs. Keeping the mapping here
@@ -122,44 +134,54 @@ const SURFACE = {
   built: { noise: 1150, knock: 245, gain: 0.14 },
 };
 const profile = v => SURFACE[voxelSurface(v)];
-const reloadPitch = kind => kind === 'smg' ? 860 : kind === 'sniper' ? 610 : 720;
+// Mechanical pitch, not a musical note: the compact SMG is a little lighter,
+// the sniper bolt heavier, and none lives in the piercing 600–1200Hz range.
+export const reloadPitch = kind => kind === 'smg' ? 330 : kind === 'sniper' ? 235 : 275;
 
 export const sfx = {
   // Each gun shares a noise face, pitched body, and mechanical pixel. The
   // proportions—not realistic recordings—communicate weapon weight.
   rifle: () => {
-    burst({ dur: 0.18, freq: 980, gain: 0.58, decaySteps: 4 });
-    tone({ freq: 135, end: 72, dur: 0.11, type: 'square', gain: 0.2, steps: 3 });
-    metalTick(920, 0.065, 0.055);
+    burst({ dur: 0.19, freq: 760, gain: 0.57, decaySteps: 5 });
+    tone({ freq: 128, end: 68, dur: 0.13, type: 'sine', gain: 0.22 });
+    metalTick(365, 0.055, 0.06);
   },
   smg: () => {
-    burst({ dur: 0.075, freq: 1550, gain: 0.38, decaySteps: 3 });
-    tone({ freq: 205, end: 125, dur: 0.052, type: 'square', gain: 0.1, steps: 2 });
-    metalTick(1120, 0.04, 0.03);
+    burst({ dur: 0.085, freq: 1120, gain: 0.36, decaySteps: 4 });
+    tone({ freq: 185, end: 108, dur: 0.065, type: 'triangle', gain: 0.085 });
+    metalTick(410, 0.035, 0.035);
   },
   sniper: () => {
-    burst({ dur: 0.34, freq: 680, gain: 0.78, decaySteps: 5 });
-    burst({ dur: 0.075, freq: 2600, gain: 0.32, decaySteps: 2 });
-    tone({ freq: 92, end: 48, dur: 0.26, type: 'square', gain: 0.3, steps: 5 });
-    metalTick(650, 0.085, 0.14);
+    burst({ dur: 0.36, freq: 540, gain: 0.76, decaySteps: 6 });
+    burst({ dur: 0.085, freq: 1750, gain: 0.24, decaySteps: 3, filter: 'bandpass' });
+    tone({ freq: 88, end: 44, dur: 0.29, type: 'sine', gain: 0.32 });
+    metalTick(285, 0.075, 0.15);
   },
 
   // Animation-driven stages mean swapping tools or dying cancels the rest.
-  reloadStart: (kind) => metalTick(reloadPitch(kind) * 0.8, 0.07),
+  reloadStart: (kind) => {
+    const p = reloadPitch(kind);
+    burst({ dur: 0.055, freq: 620, q: 0.8, gain: 0.04, decaySteps: 4, filter: 'lowpass' });
+    metalTick(p * 0.82, 0.055, 0.008);
+  },
   reloadEject: (kind) => {
     const p = reloadPitch(kind);
-    metalTick(p, 0.1);
-    tone({ freq: p * 0.45, end: p * 0.32, dur: 0.065, type: 'triangle', gain: 0.07 });
+    metalTick(p, 0.075);
+    tone({ freq: p * 0.48, end: p * 0.34, dur: 0.085, type: 'sine', gain: 0.065 });
+    burst({ dur: 0.045, freq: 470, q: 0.7, gain: 0.04, decaySteps: 3,
+      filter: 'lowpass', delay: 0.025 });
   },
   reloadInsert: (kind) => {
     const p = reloadPitch(kind);
-    tone({ freq: p * 0.38, end: p * 0.66, dur: 0.075, type: 'square', gain: 0.085, steps: 2 });
-    metalTick(p * 1.08, 0.085, 0.045);
+    burst({ dur: 0.075, freq: 390, q: 0.7, gain: 0.085, decaySteps: 4,
+      filter: 'lowpass' });
+    tone({ freq: p * 0.42, end: p * 0.58, dur: 0.09, type: 'sine', gain: 0.075 });
+    metalTick(p * 0.96, 0.065, 0.05);
   },
   reloadChamber: (kind) => {
     const p = reloadPitch(kind);
-    metalTick(p * 1.35, 0.11);
-    metalTick(p * 0.82, 0.08, 0.055);
+    metalTick(p * 1.08, 0.08);
+    metalTick(p * 0.76, 0.065, 0.065);
   },
 
   // Air is a light whoosh; terrain adds a material crunch and low voxel knock.
@@ -171,7 +193,7 @@ export const sfx = {
     const p = profile(surface);
     burst({ dur: 0.1, freq: p.noise, gain: p.gain * 2.5, decaySteps: 3 });
     tone({ freq: p.knock, end: p.knock * 0.72, dur: 0.085, type: 'square', gain: 0.13, steps: 3 });
-    metalTick(p.knock * 3.2, 0.04, 0.025);
+    metalTick(p.knock * 1.75, 0.035, 0.025);
   },
   spadeHit: () => {
     burst({ dur: 0.095, freq: 360, gain: 0.32, decaySteps: 3 });
@@ -180,39 +202,39 @@ export const sfx = {
   crumble: () => {
     for (let i = 0; i < 4; i++) {
       burst({ dur: 0.16, freq: 260 + i * 90, gain: 0.22, decaySteps: 3, delay: i * 0.065 });
-      tone({ freq: 105 - i * 8, dur: 0.1, type: 'square', gain: 0.055, delay: i * 0.065 });
+      tone({ freq: 105 - i * 8, dur: 0.1, type: 'sine', gain: 0.055, delay: i * 0.065 });
     }
   },
   place: () => {
-    tone({ freq: 235, end: 360, dur: 0.07, type: 'square', gain: 0.13, steps: 2 });
-    metalTick(620, 0.06, 0.025);
+    tone({ freq: 190, end: 285, dur: 0.085, type: 'triangle', gain: 0.11 });
+    metalTick(280, 0.05, 0.03);
   },
 
-  hit: () => tone({ freq: 920, end: 760, dur: 0.045, type: 'square', gain: 0.16, steps: 2 }),
+  hit: () => tone({ freq: 760, end: 620, dur: 0.055, type: 'sine', gain: 0.15 }),
   kill: () => {
-    tone({ freq: 1040, dur: 0.09, type: 'triangle', gain: 0.2 });
-    tone({ freq: 1560, dur: 0.13, type: 'triangle', gain: 0.17, delay: 0.065 });
+    tone({ freq: 820, dur: 0.1, type: 'sine', gain: 0.19 });
+    tone({ freq: 1160, dur: 0.14, type: 'triangle', gain: 0.15, delay: 0.07 });
   },
   multiKill: (notes) => {
     for (let i = 0; i < notes; i++)
-      tone({ freq: 980 + i * 220, dur: 0.1, type: 'triangle', gain: 0.19, delay: i * 0.07 });
+      tone({ freq: 720 + i * 170, dur: 0.11, type: 'triangle', gain: 0.17, delay: i * 0.075 });
   },
   hurt: () => {
-    tone({ freq: 215, end: 82, dur: 0.16, type: 'square', gain: 0.24, steps: 4 });
+    tone({ freq: 190, end: 72, dur: 0.18, type: 'triangle', gain: 0.22 });
     burst({ dur: 0.08, freq: 420, gain: 0.16, decaySteps: 2 });
   },
   throw_: () => {
-    metalTick(1050, 0.08);
+    metalTick(390, 0.065);
     burst({ dur: 0.12, freq: 1800, gain: 0.09, decaySteps: 3, filter: 'bandpass', delay: 0.035 });
   },
   explosion: () => {
     burst({ dur: 0.62, freq: 580, gain: 0.8, decaySteps: 6 });
-    tone({ freq: 82, end: 43, dur: 0.5, type: 'square', gain: 0.4, steps: 6 });
+    tone({ freq: 82, end: 43, dur: 0.5, type: 'sine', gain: 0.4 });
     burst({ dur: 0.28, freq: 1500, gain: 0.22, decaySteps: 4, delay: 0.07 });
   },
   airstrikeImpact: () => {
     burst({ dur: 0.95, freq: 650, gain: 1.0, decaySteps: 8 });
-    tone({ freq: 68, end: 32, dur: 0.82, type: 'square', gain: 0.58, steps: 8 });
+    tone({ freq: 68, end: 32, dur: 0.82, type: 'sine', gain: 0.58 });
     for (let i = 0; i < 4; i++)
       burst({ dur: 0.18, freq: 1350 - i * 190, gain: 0.2, decaySteps: 3, delay: 0.08 + i * 0.09 });
   },
@@ -221,11 +243,11 @@ export const sfx = {
   // resolution as their models, without a realistic engine recording.
   drone: (progress = 0) => {
     const p = Math.max(0, Math.min(1, progress));
-    tone({ freq: 56 + p * 8, end: 48 + p * 7, dur: 0.14, type: 'square', gain: 0.09, steps: 3 });
+    tone({ freq: 56 + p * 8, end: 48 + p * 7, dur: 0.14, type: 'sine', gain: 0.09 });
     burst({ dur: 0.105, freq: 330, q: 1.4, gain: 0.075, decaySteps: 3, filter: 'bandpass' });
   },
   missileLaunch: () => {
-    metalTick(510, 0.11);
+    metalTick(260, 0.09);
     burst({ dur: 0.28, freq: 1450, q: 0.7, gain: 0.24, decaySteps: 5, filter: 'highpass', delay: 0.045 });
     tone({ freq: 260, end: 610, dur: 0.24, type: 'triangle', gain: 0.08, steps: 5, delay: 0.04 });
   },
@@ -238,15 +260,19 @@ export const sfx = {
   },
   telegraph: () => {
     for (let i = 0; i < 3; i++) {
-      tone({ freq: 1280, dur: 0.1, type: 'square', gain: 0.23, steps: 2, delay: i * 0.24 });
-      tone({ freq: 920, dur: 0.08, type: 'square', gain: 0.1, steps: 2, delay: i * 0.24 + 0.08 });
+      tone({ freq: 920, dur: 0.11, type: 'triangle', gain: 0.2, delay: i * 0.24 });
+      tone({ freq: 650, dur: 0.09, type: 'sine', gain: 0.09, delay: i * 0.24 + 0.08 });
     }
   },
 
-  overcharge: () => tone({ freq: 210, end: 620, dur: 0.52, type: 'square', gain: 0.25, steps: 7 }),
+  overcharge: () => tone({ freq: 190, end: 520, dur: 0.54, type: 'triangle', gain: 0.23 }),
   pickup: () => {
     tone({ freq: 520, dur: 0.08, type: 'triangle', gain: 0.19 });
     tone({ freq: 780, dur: 0.11, type: 'triangle', gain: 0.19, delay: 0.08 });
+  },
+  ping: () => {
+    tone({ freq: 420, dur: 0.075, type: 'triangle', gain: 0.11 });
+    tone({ freq: 630, dur: 0.1, type: 'sine', gain: 0.13, delay: 0.075 });
   },
   drop: () => {
     tone({ freq: 500, dur: 0.08, type: 'triangle', gain: 0.17 });
@@ -257,10 +283,10 @@ export const sfx = {
   lose: () => [392, 330, 262].forEach((f, i) =>
     tone({ freq: f, dur: 0.2, type: 'triangle', gain: 0.21, delay: i * 0.13 })),
   respawn: () => {
-    tone({ freq: 390, end: 620, dur: 0.12, type: 'square', gain: 0.13, steps: 3 });
-    metalTick(880, 0.055, 0.08);
+    tone({ freq: 330, end: 520, dur: 0.14, type: 'triangle', gain: 0.12 });
+    metalTick(340, 0.045, 0.09);
   },
-  click: () => metalTick(690, 0.065),
+  click: () => metalTick(280, 0.055),
   step: (scale = 1, surface = 1) => {
     const p = profile(surface);
     const jitter = 0.94 + Math.random() * 0.12;

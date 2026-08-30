@@ -30,7 +30,8 @@ function mulberry32(a) {
 // modes: which game modes the map supports. DUNES retired from the CTF
 // rotation (its long sniper lanes punish flag runs) but kept for deathmatch
 // and king of the hill, mirrored about midfield so the hill fight is fair.
-// hill: king-of-the-hill zone — center column and radius in blocks.
+// hills: rotating king-of-the-hill zones. Every point stays on the midfield
+// axis, so both bases travel the same distance even when the fight moves.
 // atmosphere: optional sky/fog/cloud/water tint for this map (see
 // applyAtmosphere below and Game#_applyMapAtmosphere) — every field is
 // optional and falls back to the neutral default (GREENBELT's own look,
@@ -43,23 +44,59 @@ function mulberry32(a) {
 // these later is just changing a hex value here, nothing structural.
 export const MAPS = [
   { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null,
+    stations: [
+      { x: 127.5, z: 86, label: 'NORTH WALL' },
+      { x: 127.5, z: 170, label: 'SOUTH SHELF' },
+    ],
     atmosphere: { sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
+    stations: [
+      { x: 127.5, z: 82, label: 'NORTH DUGOUT' },
+      { x: 127.5, z: 174, label: 'SOUTH DUGOUT' },
+    ],
     atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4,
       sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
+    stations: [
+      { x: 127.5, z: 82, label: 'NORTH FORD' },
+      { x: 127.5, z: 174, label: 'SOUTH FORD' },
+    ],
     atmosphere: { sky: ['#75a98d', '#b1c8b8', '#e3ebe0'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a,
       sun: [0.55, 1, -0.35], sunTint: [1.02, 1.05, 0.94] } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    stations: [
+      { x: 99, z: 127.5, label: 'WEST RUINS' },
+      { x: 156, z: 127.5, label: 'EAST RUINS' },
+    ],
+    hills: [
+      { x: SX / 2, z: SZ / 2, r: 8, label: 'CENTER' },
+      { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH' },
+      { x: SX / 2, z: SZ / 2 + 40, r: 8, label: 'SOUTH' },
+    ],
     atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae,
       sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    stations: [
+      { x: 127.5, z: 110, label: 'NORTH CAUSEWAY' },
+      { x: 127.5, z: 145, label: 'SOUTH CAUSEWAY' },
+    ],
+    hills: [
+      { x: SX / 2, z: SZ / 2, r: 8, label: 'CROWN' },
+      { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH GATE' },
+      { x: SX / 2, z: SZ / 2 + 40, r: 8, label: 'SOUTH GATE' },
+    ],
     atmosphere: { sky: ['#4a7fc4', '#a8c8e8', '#e0ecf5'], fog: 0xc5d8ea,
       sun: [0.35, 1, -0.55], sunTint: [1.02, 1.03, 1.0] } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
-    hill: { x: SX / 2, z: SZ / 2, r: 8 },
+    stations: [
+      { x: 104, z: 127.5, label: 'WEST SADDLE' },
+      { x: 151, z: 127.5, label: 'EAST SADDLE' },
+    ],
+    hills: [
+      { x: SX / 2, z: SZ / 2, r: 8, label: 'KNOLL' },
+      { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
+      { x: SX / 2, z: SZ / 2 + 28, r: 8, label: 'SOUTH BOWL' },
+    ],
     atmosphere: { sky: ['#c25a3a', '#e08a5a', '#f0c090'], fog: 0xd9a878, cloud: 0xe8c4a8, water: 0x6a5548,
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
     paletteOverrides: { stone: 0x6e4a42 } },
@@ -79,6 +116,40 @@ const put = (world, x, y, z, block) => {
   world.data[(y * SZ + z) * SX + x] = block;
 };
 const terrainY = (height, x, z) => Math.floor(height[at(Math.round(x), Math.round(z))]);
+
+// Every battlefield gets two authored neutral field caches. The same chunky
+// silhouette — stone pad, pallet boxes, four bollards, signal mast — makes
+// their function readable across themes without a texture, glowing pickup,
+// or prop mesh. They are ordinary terrain voxels, so a fight can chew the
+// shelter apart and players can rebuild cover around the still-marked site.
+function buildFieldStations(world, mapIndex) {
+  for (const station of MAPS[mapIndex % MAPS.length].stations ?? []) {
+    const cx = Math.floor(station.x), cz = Math.floor(station.z);
+    const y = world.surface(cx, cz);
+    station.y = y + 1;
+    // Level a compact pad and guarantee standing headroom. Fill only the
+    // three voxels immediately below it, enough to avoid a visibly floating
+    // slab without turning a small landmark into a buried retaining wall.
+    for (let dx = -3; dx <= 3; dx++)
+      for (let dz = -3; dz <= 3; dz++) {
+        for (let fy = Math.max(0, y - 3); fy <= y; fy++)
+          if (!world.get(cx + dx, fy, cz + dz)) put(world, cx + dx, fy, cz + dz, BLOCK.STONE);
+        put(world, cx + dx, y, cz + dz, BLOCK.STONE);
+        for (let fy = y + 1; fy <= y + 5; fy++) put(world, cx + dx, fy, cz + dz, 0);
+      }
+    // Corner bollards frame the capture footprint without walling it off.
+    for (const [dx, dz] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) {
+      put(world, cx + dx, y + 1, cz + dz, BLOCK.STONE);
+      put(world, cx + dx, y + 2, cz + dz, BLOCK.STONE);
+    }
+    // Low supply pallets: readable as crates, usable as crouch cover.
+    for (const dx of [-1, 0, 1]) put(world, cx + dx, y + 1, cz + 2, BLOCK.DIRT);
+    put(world, cx - 1, y + 2, cz + 2, BLOCK.DIRT);
+    // A five-block signal mast gives the site a long-distance silhouette.
+    for (let h = 1; h <= 5; h++) put(world, cx, y + h, cz - 3, BLOCK.STONE);
+    for (const dx of [-1, 1]) put(world, cx + dx, y + 4, cz - 3, BLOCK.STONE);
+  }
+}
 
 // Deterministic, unseeded 3D noise for moss placement within the deep
 // stone layer below — same summed-low-frequency-sines style as
@@ -759,6 +830,7 @@ export function generateMap(world, seed = 1979, mapIndex = 0) {
   setVoxelLight(atmosphere.sun, atmosphere.sunTint);
   world.data.fill(0);
   MAPS[mapIndex % MAPS.length].gen(world, seed);
+  buildFieldStations(world, mapIndex);
   world.buildAll();
   return mapIndex % MAPS.length;
 }

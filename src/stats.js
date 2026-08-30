@@ -2,6 +2,9 @@
 // localStorage, same as the tos.mode/tos.map lobby prefs main.js already
 // keeps. No account, no server, no sync between machines — this progress
 // lives on this browser, same as everything else about this game.
+import { RECORD_FIELDS, updatePersonalBests } from './match-report.js';
+import { masteryProgress } from './mastery.js';
+
 const KEY = 'tos.stats';
 
 // Kill-count thresholds for gun color unlocks (first-person viewmodel only
@@ -21,13 +24,23 @@ const DEFAULT_HEX = GUN_COLORS[0].hex;
 function load() {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? '{}');
+    const masteryPoints = Number(raw.masteryPoints);
+    const records = {};
+    for (const mode of ['ctf', 'tdm', 'koth']) {
+      records[mode] = {};
+      for (const field of RECORD_FIELDS)
+        records[mode][field.key] = Math.max(0, Number(raw.records?.[mode]?.[field.key]) || 0);
+    }
     return {
       kills: raw.kills | 0, deaths: raw.deaths | 0,
       matches: raw.matches | 0, wins: raw.wins | 0,
+      masteryPoints: Number.isFinite(masteryPoints) ? Math.max(0, Math.floor(masteryPoints)) : 0,
       gunColor: Number.isFinite(raw.gunColor) ? raw.gunColor : DEFAULT_HEX,
+      records,
     };
   } catch {
-    return { kills: 0, deaths: 0, matches: 0, wins: 0, gunColor: DEFAULT_HEX };
+    return { kills: 0, deaths: 0, matches: 0, wins: 0, masteryPoints: 0, gunColor: DEFAULT_HEX,
+      records: { ctf: {}, tdm: {}, koth: {} } };
   }
 }
 function save(s) {
@@ -39,11 +52,25 @@ function save(s) {
 let state = load();
 
 export const stats = {
-  get() { return { ...state }; },
+  get() { return { ...state, records: Object.fromEntries(
+    Object.entries(state.records).map(([mode, row]) => [mode, { ...row }])) }; },
   unlocked() { return GUN_COLORS.filter(c => state.kills >= c.kills); },
   addKill() { state.kills++; save(state); },
   addDeath() { state.deaths++; save(state); },
   addMatch(won) { state.matches++; if (won) state.wins++; save(state); },
+  finishMatch(won, mode, row) {
+    const beforeMastery = masteryProgress(state.masteryPoints);
+    state.matches++;
+    if (won) state.wins++;
+    state.masteryPoints += Math.max(0, Math.floor(Number(row?.score) || 0));
+    const update = updatePersonalBests(state.records, mode, row);
+    state.records = update.records;
+    save(state);
+    const mastery = masteryProgress(state.masteryPoints);
+    return { ...update, mastery,
+      newMasteryTier: mastery.index > beforeMastery.index ? mastery.tier : null };
+  },
+  mastery() { return masteryProgress(state.masteryPoints); },
   gunColor() { return state.gunColor; },
   // Refuses a color the kill count hasn't actually unlocked yet — the menu
   // never offers one, but this is the real gate regardless of what built

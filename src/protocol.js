@@ -6,7 +6,7 @@ import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -78,6 +78,10 @@ function validSnapshot(d) {
   if (d.m !== undefined && (!finiteArray(d.m, 3) || d.m[0] < 0 || d.m[0] > 36000
       || (d.m[1] !== 0 && d.m[1] !== 1) || d.m[2] < 0)) return false;
   if (d.op !== undefined && !operation(d.op)) return false;
+  if (d.mb !== undefined && (!finiteArray(d.mb, 3)
+      || (d.mb[0] !== 0 && d.mb[0] !== 1)
+      || !Number.isInteger(d.mb[1]) || d.mb[1] < 0 || d.mb[1] > 100
+      || !Number.isInteger(d.mb[2]) || d.mb[2] < 0 || d.mb[2] > 100)) return false;
   if (d.w !== undefined && d.w !== null && !team(d.w)) return false;
   if (!Array.isArray(d.g) || d.g.length > 16 || !d.g.every(v => finiteArray(v, 3))) return false;
   if (d.a !== undefined && (!Array.isArray(d.a) || d.a.length > 10
@@ -189,7 +193,11 @@ export function validServerMessage(d) {
     && (!d.reset || parseSpawnRow(d.spawn))
     && (d.wr === undefined || (Number.isSafeInteger(d.wr) && d.wr === d.log.length))
     && (d.wh === undefined || (Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff))
-    && (d.op === undefined || operation(d.op));
+    && (d.op === undefined || operation(d.op))
+    && (d.mb === undefined || (finiteArray(d.mb, 3)
+      && (d.mb[0] === 0 || d.mb[0] === 1)
+      && Number.isInteger(d.mb[1]) && d.mb[1] >= 0 && d.mb[1] <= 100
+      && Number.isInteger(d.mb[2]) && d.mb[2] >= 0 && d.mb[2] <= 100));
   if (d.t === 'sync') return finite(d.seed)
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && validEditLog(d.log)

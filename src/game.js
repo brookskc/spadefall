@@ -27,7 +27,8 @@ import { assistCreditors, CONTRIBUTION, contributionRow,
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from './koth.js';
 import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
-  OVERCHARGE_WINDUP, availableStreakAbility, gainStreak, overchargeDamage,
+  OVERCHARGE_WINDUP, availableStreakAbility, balancedMomentumGain,
+  dominantStreakTeam, gainStreak, overchargeDamage, retainedMomentum,
   spendStreak, stepOvercharge } from './streaks.js';
 import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
   applyFieldSupply, inFieldStation, nearestFieldStation, stationCanSupply,
@@ -361,7 +362,8 @@ const hud = {
     const ready = $('airstrikeReady');
     if (ready) {
       const points = Math.floor(p._streak ?? 0);
-      const ability = availableStreakAbility(points, p._overchargeWindup, p._overchargeT);
+      const ability = p.game.availableStreak(p);
+      const held = p.game.streakHeldFor(p.team);
       ready.classList.toggle('building', !ability);
       if (p._piloting || p._fallingT > 0 || p._lingerT > 0
           || p._overchargeWindup > 0 || p._overchargeT > 0) ready.style.display = 'none';
@@ -370,8 +372,11 @@ const hud = {
       } else if (ability === 'overcharge') {
         ready.textContent = `overcharge ready — [F] · ${points}/${AIRSTRIKE_COST} strike`;
         ready.style.display = 'block';
+      } else if (held && points >= OVERCHARGE_COST) {
+        ready.textContent = 'command reserve · rewards resume when the score tightens';
+        ready.style.display = 'block';
       } else if (points > 0) {
-        ready.textContent = `combat momentum ${points}/${OVERCHARGE_COST}`;
+        ready.textContent = `field momentum · combat + teamplay ${points}/${OVERCHARGE_COST}`;
         ready.style.display = 'block';
       } else ready.style.display = 'none';
     }
@@ -1163,6 +1168,10 @@ export class Game {
     this._lastStrikeRows = [];           // client: latest full strike state for migration
     this._lastAbilityRows = [];          // contribution meter + Overcharge migration state
     this._lastStationRows = [];          // field-cache cooldown/capture migration state
+    this._momentumHostEnabled = this.mode !== 'client'
+      && !!this.engagementFeatures.momentumBalance;
+    this._teamStreakUses = { green: 0, blue: 0 };
+    this._lastMomentumRow = [this._momentumHostEnabled ? 1 : 0, 0, 0];
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
     // resets every rebuild(), so this tracks "what was my own row's k/d the
     // last time I checked" to diff against, not a running lifetime total.
@@ -1324,6 +1333,8 @@ export class Game {
     this._lastStrikeRows = [];
     this._lastAbilityRows = [];
     this._lastStationRows = [];
+    this._teamStreakUses = { green: 0, blue: 0 };
+    this._lastMomentumRow = [this.momentumBalanceEnabled() ? 1 : 0, 0, 0];
     this.botOrders = { green: null, blue: null };
     this.navRevision = 0;
     this._botDirectorT = 0;
@@ -1374,6 +1385,7 @@ export class Game {
     // Start every human through a real new-round lifecycle. Mark guests dead
     // first so spawn scoring never treats stale old-map positions as enemies.
     for (const p of this.remote.values()) p.alive = false;
+    this.player._momentumCarry = null;
     this.player.respawn();
     if (this.mode !== 'client') {
       for (const p of this.remote.values()) p.resetForRound();
@@ -1466,9 +1478,56 @@ export class Game {
     // scoreboard. Kills still matter, but assists and playing the objective
     // now advance the meter too. Bots do not call rewards, so don't maintain
     // a meter they can never spend.
-    if (e === this.player || e.isRemote) e._streak = gainStreak(e._streak, earned);
+    if (e === this.player || e.isRemote) {
+      const momentum = balancedMomentumGain(earned, { assists, objective },
+        this.momentumBalanceEnabled());
+      e._streak = gainStreak(e._streak, momentum);
+    }
     this._scoreDirty = true;
     if (refresh) hud.statsRefresh(this);
+  }
+
+  momentumBalanceEnabled() {
+    return this.mode === 'client' ? !!this._momentumHostEnabled
+      : !!(this._momentumHostEnabled || this.engagementFeatures.momentumBalance);
+  }
+
+  _momentumRow() {
+    return [this.momentumBalanceEnabled() ? 1 : 0,
+      Math.max(0, this._teamStreakUses.green | 0),
+      Math.max(0, this._teamStreakUses.blue | 0)];
+  }
+
+  _applyMomentumRow(row) {
+    if (!Array.isArray(row) || row.length !== 3) return;
+    this._momentumHostEnabled = row[0] === 1;
+    this._teamStreakUses = {
+      green: Math.max(0, row[1] | 0),
+      blue: Math.max(0, row[2] | 0),
+    };
+    this._lastMomentumRow = row.slice();
+  }
+
+  streakHeldFor(team) {
+    return this.momentumBalanceEnabled()
+      && dominantStreakTeam(this.gameMode, this.captures, this._teamStreakUses) === team;
+  }
+
+  availableStreak(p) {
+    const ability = availableStreakAbility(p?._streak ?? 0,
+      p?._overchargeWindup ?? 0, p?._overchargeT ?? 0);
+    return ability && !this.streakHeldFor(p?.team) ? ability : null;
+  }
+
+  _rejectHeldStreak(p) {
+    if (!this.streakHeldFor(p?.team)) return false;
+    this.messageTo(p, 'COMMAND RESERVE — REWARD PAUSED WHILE YOUR TEAM LEADS', '#ffd97a');
+    return true;
+  }
+
+  _recordStreakUse(p) {
+    if (!this.momentumBalanceEnabled() || !p?.team) return;
+    this._teamStreakUses[p.team] = (this._teamStreakUses[p.team] | 0) + 1;
   }
   _scoreRows() {
     return [...this.kd].map(([key, r]) => [key, r.name, r.team, r.k, r.d,
@@ -2470,6 +2529,9 @@ export class Game {
       this.engagement?.combat('kill', engagementCause);
     if (victim === this.player)
       hud.deathRecap(this.engagementFeatures.deathRecap ? victim._lastDeathRecap : null);
+    if (this.momentumBalanceEnabled() && (victim === this.player || victim.isRemote)
+        && victim._momentumCarry > 0)
+      this.messageTo(victim, `FIELD MOMENTUM BANKED · ${victim._momentumCarry}`, '#ffd97a');
     // Flag drops where the carrier fell (capture-the-flag only).
     if (this.flags && victim.carrier) {
       victim.carrier = false;
@@ -2813,6 +2875,7 @@ export class Game {
   // Spends the streak HERE, not when piloting mode was entered — cancel
   // out of targeting with no shot fired and nothing was ever charged.
   _confirmAirstrike(attacker, x, z, yaw) {
+    if (this._rejectHeldStreak(attacker)) return;
     if (availableStreakAbility(attacker._streak ?? 0,
         attacker._overchargeWindup, attacker._overchargeT) !== 'airstrike') return;
     x = Math.max(0, Math.min(SX, x)); z = Math.max(0, Math.min(SZ, z));
@@ -2822,12 +2885,16 @@ export class Game {
     yaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw))
       : attacker === this.player ? attacker.yaw : attacker.yaw + Math.PI / 2;
     attacker._streak = spendStreak(attacker._streak, AIRSTRIKE_COST);
+    this._recordStreakUse(attacker);
     const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
     const id = this._nextStrikeId++;
     const owner = attacker === this.player ? this._hostIdx : attacker.ridx;
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph',
       id, x, y, z, yaw, remaining: AIRSTRIKE_TELEGRAPH_T, owner });
     this._telegraph(x, y, z);
+    this.messageTeam(attacker.team, 'ALLY AIRSTRIKE INBOUND — CLEAR THE TARGET', teamCss(attacker.team));
+    this.messageTeam(this.enemyOf(attacker.team),
+      'ENEMY AIRSTRIKE INBOUND — MOVE OFF THE TARGET', '#e05a4e');
     this._pendingStrikes.push({ id, pos: new THREE.Vector3(x, y, z), owner,
       attacker, yaw, t: AIRSTRIKE_TELEGRAPH_T });
     this._syncAirstrikeDrone(id, x, y, z, yaw, AIRSTRIKE_TELEGRAPH_T, owner);
@@ -2990,16 +3057,19 @@ export class Game {
   // visible windup. The damage modifiers do not begin until that telegraph
   // finishes, giving opponents a short but real reaction window.
   _activateOvercharge(p) {
+    if (this._rejectHeldStreak(p)) return;
     if (availableStreakAbility(p._streak ?? 0,
         p._overchargeWindup, p._overchargeT) !== 'overcharge') return;
     p._streak = spendStreak(p._streak, OVERCHARGE_COST);
+    this._recordStreakUse(p);
     p._overchargeWindup = OVERCHARGE_WINDUP;
     p._overchargeT = 0;
     p.avatar?.setOvercharge(true, false);
     this._broadcastOvercharge(p, 'windup', OVERCHARGE_WINDUP);
     this.feed(`${nameSpan(p)} is charging <b>OVERCHARGE</b>`);
     this.messageTeam(p.team, 'ALLY OVERCHARGE CHARGING', teamCss(p.team));
-    this.messageTeam(this.enemyOf(p.team), 'ENEMY OVERCHARGE CHARGING', '#e05a4e');
+    this.messageTeam(this.enemyOf(p.team),
+      'ENEMY OVERCHARGE CHARGING — BREAK CONTACT OR FOCUS FIRE', '#e05a4e');
   }
 
   _broadcastOvercharge(p, phase, remaining) {
@@ -3610,6 +3680,7 @@ export class Game {
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
           op: this._operationRow(),
+          mb: this._momentumRow(),
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
@@ -3897,6 +3968,7 @@ export class Game {
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
       op: this._operationRow(),
+      mb: this._momentumRow(),
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this.over) {
@@ -4184,6 +4256,7 @@ export class Game {
       a: this._pendingStrikes.map(s => [s.id, ...pos(s.pos), qa(s.yaw),
         Math.max(0, Math.round(s.t * 1000)), s.owner]),
       u: this._abilityRows(),
+      mb: this._momentumRow(),
       l: this._stationRows(),
       m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
         Math.max(0, Math.round(this.matchElapsed * 10))],
@@ -4239,7 +4312,8 @@ export class Game {
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
         f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, u: snap.u, l: snap.l, m: snap.m, op: snap.op, o: snap.o, w: snap.w };
+        a: snap.a, u: snap.u, mb: snap.mb, l: snap.l, m: snap.m,
+        op: snap.op, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
       out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
@@ -4366,6 +4440,7 @@ export class Game {
       this.myId = d.id;
       this.myIdx = d.me;
       this.player.team = d.team;
+      if (d.mb !== undefined) this._applyMomentumRow(d.mb);
       if (d.op !== undefined) this._applyOperationRow(d.op);
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
       if (d.migrated) {
@@ -4453,6 +4528,7 @@ export class Game {
     // promoteToHost rebuilds the match from exactly these.
     mergeSnapshot(this._fullP, this._fullB, d);
     this._syncAirstrikeRows(d.a ?? []);
+    if (d.mb !== undefined) this._applyMomentumRow(d.mb);
     if (d.op !== undefined) this._applyOperationRow(d.op);
     const want = new Set();
     for (const [idx, r] of this._fullP) {
@@ -4763,7 +4839,9 @@ export class Game {
     hud.air(BREATH_MAX, false);
     this.player.swing = 0;
     this.player._mkCount = 0; this.player._mkT = null;
-    this.player._streak = 0;
+    this.player._momentumCarry = retainedMomentum(this.player._streak,
+      this.momentumBalanceEnabled());
+    this.player._streak = this.player._momentumCarry;
     this.player._overchargeWindup = 0; this.player._overchargeT = 0;
     this.player._piloting = false;
     this.player._fallingT = 0;

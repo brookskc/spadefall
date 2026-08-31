@@ -40,7 +40,8 @@ import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scor
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
 import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
-  OVERCHARGE_WINDUP, availableStreakAbility, gainStreak, overchargeDamage,
+  OVERCHARGE_WINDUP, availableStreakAbility, balancedMomentumGain,
+  dominantStreakTeam, gainStreak, overchargeDamage, retainedMomentum,
   spendStreak, stepOvercharge } from '../src/streaks.js';
 import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
   FIELD_STATION_COOLDOWN, applyFieldSupply, nearestFieldStation,
@@ -691,6 +692,30 @@ function streakRuleTests() {
   ok('the same warning assembly carries into the active state',
     avatar.overchargeFx.visible && avatar._overchargePhase === 2);
   avatar.dispose();
+
+  group('phase seven: momentum balance without runaway streaks');
+  ok('death banks thirty-five percent only when momentum balance is enabled',
+    retainedMomentum(AIRSTRIKE_COST, true) === 350
+      && retainedMomentum(500, true) === 175
+      && retainedMomentum(AIRSTRIKE_COST, false) === 0);
+  ok('objectives and assists earn a teamplay premium without inflating kill momentum',
+    balancedMomentumGain(100, { objective: 1 }, true) === 125
+      && balancedMomentumGain(100, { assists: 1 }, true) === 125
+      && balancedMomentumGain(100, {}, true) === 100
+      && balancedMomentumGain(100, { objective: 1 }, false) === 100);
+  ok('a lopsided leader is held only after using more rewards than the trailing team',
+    dominantStreakTeam('ctf', { green: 2, blue: 0 }, { green: 1, blue: 0 }) === 'green'
+      && dominantStreakTeam('tdm', { green: 8, blue: 0 }, { green: 1, blue: 0 }) === 'green'
+      && dominantStreakTeam('koth', { green: 35, blue: 0 }, { green: 1, blue: 0 }) === 'green'
+      && dominantStreakTeam('ctf', { green: 2, blue: 0 }, { green: 0, blue: 0 }) === null);
+  ok('the streak hold lifts when the score tightens or reward use equalizes',
+    dominantStreakTeam('tdm', { green: 7, blue: 0 }, { green: 2, blue: 0 }) === null
+      && dominantStreakTeam('koth', { green: 60, blue: 10 }, { green: 2, blue: 2 }) === null);
+  const balancedSnapshot = { ...snapshot, mb: [1, 2, 1] };
+  ok('the host momentum policy and team reward counts cross a bounded trust boundary',
+    validServerMessage(balancedSnapshot)
+      && !validServerMessage({ ...balancedSnapshot, mb: [2, 0, 0] })
+      && !validServerMessage({ ...balancedSnapshot, mb: [1, -1, 0] }));
 }
 
 // ---------------------------------------------------------------------------

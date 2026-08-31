@@ -6,7 +6,7 @@ import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
-import { availableStreakAbility } from './streaks.js';
+import { retainedMomentum } from './streaks.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -223,13 +223,11 @@ export class Player {
       if (e.code === 'KeyF') {
         if (this._piloting) {
           this._piloting = false;
-        } else if (availableStreakAbility(this._streak ?? 0,
-            this._overchargeWindup ?? 0, this._overchargeT ?? 0) === 'airstrike') {
+        } else if (this.game.availableStreak(this) === 'airstrike') {
           this._piloting = true;
           const eye = this.body.eye();
           this._pilotPos = new THREE.Vector3(eye.x, SY + 30, eye.z);
-        } else if (availableStreakAbility(this._streak ?? 0,
-            this._overchargeWindup ?? 0, this._overchargeT ?? 0) === 'overcharge') {
+        } else if (this.game.availableStreak(this) === 'overcharge') {
           this.game.requestOvercharge(this);
         }
       }
@@ -803,7 +801,12 @@ export class Player {
     this.swing = 0;
     this._reloadStage = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
-    this._streak = 0; // combat momentum resets on death
+    // Phase 7 keeps a modest slice of field momentum through death. The
+    // feature is host-authored in multiplayer; guests mirror it from the
+    // synchronized policy rather than trusting their own URL flags.
+    this._momentumCarry = retainedMomentum(this._streak,
+      this.game.momentumBalanceEnabled());
+    this._streak = this._momentumCarry;
     this._overchargeWindup = 0; this._overchargeT = 0;
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
     this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
@@ -1007,16 +1010,11 @@ export class Player {
     this.crouched = false;
     this.body.half.h = STAND_HEIGHT;
     resetEnvironmentalState(this);
-    // Scorestreak and related perk state: die() already clears all of this
-    // on a normal mid-match death, making this redundant (but harmless)
-    // for that path. It's not redundant here: rebuild() (a new match
-    // starting, or a map rotating) calls respawn() directly, with no
-    // preceding death, whenever the previous match ended while this
-    // player was still alive. Without this, an active streak — or an
-    // in-progress Overcharge, or mid-fall airstrike piloting — would
-    // silently carry into the next match instead of starting clean.
+    // Normal redeploys consume the momentum retained by die(). rebuild()
+    // clears _momentumCarry first, so a new round still starts at zero.
     this._mkCount = 0; this._mkT = null;
-    this._streak = 0;
+    this._streak = Math.max(0, Number(this._momentumCarry) || 0);
+    this._momentumCarry = null;
     this._overchargeWindup = 0; this._overchargeT = 0;
     this._piloting = false; this._fallingT = 0; this._lingerT = 0;
     this._lastAimDir = null; this._lastAimT = null;

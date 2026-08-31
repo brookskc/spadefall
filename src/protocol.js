@@ -137,6 +137,8 @@ function validEvent(d) {
     case 'supply': return Number.isInteger(d.blocks) && d.blocks >= 0 && d.blocks <= 20
       && Number.isInteger(d.nades) && d.nades >= 0 && d.nades <= 1;
     case 'hit': return true;
+    case 'goal': return d.metric === 'terrain' && Number.isInteger(d.amount)
+      && d.amount >= 1 && d.amount <= 32;
     case 'dmgdir': return finite(d.x) && finite(d.z);
     case 'chat': return shortString(String(d.name ?? ''), 64)
       && shortString(String(d.text ?? ''), 512) && team(d.team);

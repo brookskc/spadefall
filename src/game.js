@@ -45,6 +45,7 @@ import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReloa
 import { FirstMinuteGuide } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
+import { SelectedGoalTracker } from './selected-goals.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -662,6 +663,24 @@ const hud = {
     $('deathRecapTitle').textContent = copy.title;
     $('deathRecapDetail').textContent = copy.detail;
   },
+  selectedGoal(view) {
+    const el = $('selectedGoal');
+    if (!el) return;
+    el.className = view ? `on${view.complete ? ' complete' : ''}` : '';
+    if (!view) return;
+    $('selectedGoalName').textContent = view.complete ? `${view.name} COMPLETE` : view.name;
+    $('selectedGoalProgress').textContent = `${view.progress} / ${view.target}`;
+    $('selectedGoalFill').style.width = `${Math.round(100 * view.progress / view.target)}%`;
+  },
+  selectedGoalResult(result) {
+    const el = $('endGoal');
+    if (!el) return;
+    el.className = result ? `on${result.complete ? ' complete' : ''}` : '';
+    if (!result) return;
+    $('endGoalName').textContent = result.name;
+    $('endGoalResult').textContent = result.complete
+      ? 'COMPLETE' : `${result.progress} / ${result.target}`;
+  },
   // Highlights which class is currently PENDING for the next life — called
   // once on death (to show the persisted/previous choice) and again each
   // time the player changes it.
@@ -1032,6 +1051,8 @@ export class Game {
       ? new FirstMinuteGuide() : null;
     this.voxelStory = this.engagementFeatures.voxelStories
       ? new VoxelStoryTracker() : null;
+    this.selectedGoal = this.engagementFeatures.selectedGoals
+      ? new SelectedGoalTracker() : null;
     this._roundSerial = 0;
     // Public/default rooms protect teammates. Kept as an instance policy so
     // private-room friendly fire can be added later without rewriting every
@@ -1220,7 +1241,10 @@ export class Game {
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
     this.voxelStory?.reset();
+    this.selectedGoal?.reset();
     hud.deathRecap(null);
+    hud.selectedGoal(null);
+    hud.selectedGoalResult(null);
     this._clearTeamPings();
     this._rematchVotes.clear();
     this._clearAirstrikeDrones();
@@ -1343,6 +1367,7 @@ export class Game {
     if (e === this.player) this.engagement?.contribution({
       points: earned, assists, objective,
     });
+    if (e === this.player) this._observeSelectedGoal();
     // Human streak rewards use the exact same contribution values as the
     // scoreboard. Kills still matter, but assists and playing the objective
     // now advance the meter too. Bots do not call rewards, so don't maintain
@@ -2121,6 +2146,44 @@ export class Game {
     }) ?? false;
   }
 
+  setSelectedGoal(selection) {
+    return this.selectedGoal?.select(selection) ?? false;
+  }
+
+  _selectedGoalTotals() {
+    const row = this.kd.get(this._kdKey(this.player));
+    return {
+      kills: row?.k ?? 0,
+      terrain: this.selectedGoal?.current?.terrain ?? 0,
+      teamplay: (row?.a ?? 0) + (row?.objective ?? 0),
+    };
+  }
+
+  beginSelectedGoal() {
+    if (!this.selectedGoal) return false;
+    const started = this.selectedGoal.start(this._selectedGoalTotals(), this.time);
+    hud.selectedGoal(this.selectedGoal.view(this.time));
+    return started;
+  }
+
+  _announceSelectedGoal(completed) {
+    if (completed) hud.message('FIELD GOAL COMPLETE', '#ffd97a');
+  }
+
+  _observeSelectedGoal() {
+    if (!this.selectedGoal) return;
+    this._announceSelectedGoal(this.selectedGoal.observe(this._selectedGoalTotals(), this.time));
+  }
+
+  _recordSelectedGoal(metric, amount, who) {
+    if (!this.selectedGoal || !who) return;
+    if (who === this.player) {
+      this._announceSelectedGoal(this.selectedGoal.record(metric, amount, this.time));
+    } else if (this.mode === 'host' && who.isRemote) {
+      this.net.sendTo(who.id, { t: 'e', k: 'goal', metric, amount });
+    }
+  }
+
   _recordLocalAction(p, action) {
     if (p !== this.player) return;
     this.engagement?.action(action, this.matchElapsed);
@@ -2397,7 +2460,9 @@ export class Game {
     this.blockHits.delete(x + ',' + y + ',' + z);  // fresh block / cleared cell: full HP
     const before = this.world.get(x, y, z);
     this.world.set(x, y, z, v);
-    this.voxelStory?.recordEdit(before, this.world.get(x, y, z));
+    const after = this.world.get(x, y, z);
+    this.voxelStory?.recordEdit(before, after);
+    if (before !== after) this._recordSelectedGoal('terrain', 1, who);
     this.navRevision++;
     if (this.mode === 'host') {
       this._appendWorldEdit([x, y, z, v]);
@@ -3190,6 +3255,7 @@ export class Game {
     $('endDetail').textContent = `${winner.toUpperCase()} ${score} · ${MAPS[this.mapIndex].name}`
       + ` · ${holdClock(this.matchElapsed)}`;
     hud.matchReport(this, report, recordUpdate);
+    hud.selectedGoalResult(this.selectedGoal?.result());
     hud.voxelStory(story);
     $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
     $('endNote').textContent = this.mode === 'client'
@@ -4432,6 +4498,9 @@ export class Game {
         if (d.tier) hud.killCallout(d.tier); // replaces the plain chime, same rule as the host-side path
         else d.kill ? sfx.kill() : sfx.hit();
         break;
+      case 'goal':
+        this._announceSelectedGoal(this.selectedGoal?.record(d.metric, d.amount, this.time));
+        break;
       case 'dmgdir': hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
       case 'envdmg': hud.damage(); sfx.hurt(); break;
       case 'chat':
@@ -4464,6 +4533,7 @@ export class Game {
             score: r[5] ?? (r[3] | 0) * CONTRIBUTION.kill,
             a: r[6] ?? 0, objective: r[7] ?? 0 })]));
         hud.statsRefresh(this);
+        this._observeSelectedGoal();
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
       case 'end': this._end(d.winner, d.story); break;
@@ -4646,6 +4716,10 @@ export class Game {
       z: this.player.body.pos.z,
       alive: this.player.alive && !this.player.aiming && !this.player._piloting
         && this.player._fallingT <= 0,
+      over: this.over,
+    }));
+    hud.selectedGoal(this.selectedGoal?.view(this.time, {
+      alive: this.player.alive && !this.player._piloting && this.player._fallingT <= 0,
       over: this.over,
     }));
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost

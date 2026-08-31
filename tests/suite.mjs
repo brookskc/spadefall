@@ -52,6 +52,8 @@ import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
+import { SELECTED_GOALS, SelectedGoalTracker,
+  validSelectedGoal } from '../src/selected-goals.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -993,6 +995,55 @@ function deathRecapTests() {
     deathRecapCopy({ cause: 'rifle', attacker: '<b>Injected</b>' }) === null);
 }
 
+function selectedGoalTests() {
+  group('phase four: player-selected match goals without reward pressure');
+  ok('the three choices cover combat, voxel fieldwork, and team impact',
+    validSelectedGoal('vanguard') && validSelectedGoal('sapper')
+      && validSelectedGoal('wingman') && !validSelectedGoal('daily_grind')
+      && new Set(Object.values(SELECTED_GOALS).map(goal => goal.metric)).size === 3);
+  ok('goal definitions contain no reward, currency, expiry, or streak fields',
+    Object.values(SELECTED_GOALS).every(goal =>
+      !['reward', 'xp', 'currency', 'expires', 'streak'].some(key => key in goal)));
+
+  const combat = new SelectedGoalTracker('vanguard');
+  ok('a match baseline prevents prior-round contribution from counting',
+    combat.start({ kills: 8, terrain: 20, teamplay: 4 }, 10)
+      && !combat.observe({ kills: 10, terrain: 200, teamplay: 40 }, 20)
+      && combat.progress === 2);
+  ok('authoritative totals cannot roll progress backward',
+    !combat.observe({ kills: 9, terrain: 0, teamplay: 0 }, 21)
+      && combat.progress === 2);
+  ok('completion fires once at the exact target',
+    combat.observe({ kills: 11 }, 22) && combat.completed
+      && !combat.observe({ kills: 20 }, 23));
+  ok('a completed HUD badge clears after five seconds but the result remains',
+    combat.view(27, { alive: true })?.complete
+      && combat.view(28, { alive: true }) === null
+      && combat.result().complete && combat.result().progress === 3);
+
+  combat.reset();
+  ok('round reset keeps the chosen style but clears all progress',
+    combat.selection === 'vanguard' && !combat.active && combat.progress === 0);
+  ok('selection can change before a round but not during one',
+    combat.select('sapper') && combat.start({}, 0) && !combat.select('wingman'));
+  for (let i = 0; i < 11; i++) combat.record('terrain', 1, i);
+  ok('direct voxel edits advance only the fieldwork goal',
+    combat.progress === 11 && combat.record('terrain', 1, 12) && combat.completed);
+
+  const wingman = new SelectedGoalTracker('wingman');
+  wingman.start({ teamplay: 6 }, 0);
+  wingman.observe({ teamplay: 8.9 }, 2);
+  ok('team progress combines bounded authoritative credit without rounding up',
+    wingman.progress === 2 && wingman.record('teamplay', 1, 3) && wingman.completed);
+  ok('death and post-match states suppress the live card without losing the result',
+    wingman.view(3, { alive: false }) === null
+      && wingman.view(3, { over: true }) === null && wingman.result().complete);
+  ok('terrain progress signals are bounded at the server trust boundary',
+    validServerMessage({ t: 'e', k: 'goal', metric: 'terrain', amount: 1 })
+      && !validServerMessage({ t: 'e', k: 'goal', metric: 'kills', amount: 1 })
+      && !validServerMessage({ t: 'e', k: 'goal', metric: 'terrain', amount: 1000 }));
+}
+
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
   group('damage direction: source bearing to screen edge');
@@ -1652,6 +1703,7 @@ export async function run() {
   firstMinuteTests();
   voxelStoryTests();
   deathRecapTests();
+  selectedGoalTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

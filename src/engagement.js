@@ -18,14 +18,28 @@ export const ENGAGEMENT_FEATURES = Object.freeze([
   'botDirector',
 ]);
 
+// These features have completed their isolated rollout and are now part of
+// ordinary matches. Operations and the adaptive bot director remain explicit
+// playtest opt-ins because they make broader changes to match structure and
+// opponent behavior.
+export const DEFAULT_ENGAGEMENT_FEATURES = Object.freeze([
+  'firstMinute',
+  'voxelStories',
+  'deathRecap',
+  'selectedGoals',
+  'stayAsSquad',
+  'momentumBalance',
+  'teamBalance',
+]);
+
 const FEATURE_BY_LOWER = new Map(ENGAGEMENT_FEATURES.map(name => [name.toLowerCase(), name]));
 
-// Later phases can be exercised independently with
-// ?features=firstMinute,voxelStories. Every flag defaults off, so landing the
-// foundation cannot silently alter ordinary matches.
+// Experimental phases can still be exercised independently with, for example,
+// ?features=operations,botDirector. Known query flags are additive to the
+// production defaults; unknown names are ignored.
 export function parseEngagementFeatures(search = '') {
   const params = new URLSearchParams(String(search).replace(/^\?/, ''));
-  const requested = new Set();
+  const requested = new Set(DEFAULT_ENGAGEMENT_FEATURES);
   for (const row of params.getAll('features'))
     for (const raw of row.split(',')) {
       const known = FEATURE_BY_LOWER.get(raw.trim().toLowerCase());

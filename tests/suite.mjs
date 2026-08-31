@@ -51,7 +51,7 @@ import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match
 import { masteryProgress } from '../src/mastery.js';
 import { rematchVotesNeeded, staySquadGroups, staySquadState,
   validPingDirection } from '../src/social.js';
-import { EngagementTracker, parseEngagementFeatures,
+import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
 import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
   operationComplete, operationFromRow, operationLeg, operationRow,
@@ -837,12 +837,13 @@ function socialProgressionTests() {
 }
 
 function engagementFoundationTests() {
-  group('phase zero: bounded local engagement diagnostics and dormant feature flags');
+  group('phase zero: bounded diagnostics and production feature rollout');
   const defaults = parseEngagementFeatures('');
   const selected = parseEngagementFeatures(
     '?features=FIRSTMINUTE,deathRecap&features=operations,notAFeature');
-  ok('engagement features default off and only known query flags opt in',
-    Object.values(defaults).every(value => value === false)
+  ok('completed engagement features default on while experiments remain opt-in',
+    DEFAULT_ENGAGEMENT_FEATURES.every(name => defaults[name] === true)
+      && !defaults.operations && !defaults.botDirector
       && selected.firstMinute && selected.deathRecap && selected.operations
       && !('notAFeature' in selected));
 
@@ -1234,8 +1235,7 @@ function botDirectorTests() {
 
   const flags = parseEngagementFeatures('?features=BOTDIRECTOR');
   ok('the adaptive director remains an explicit opt-in feature',
-    flags.botDirector && Object.entries(parseEngagementFeatures(''))
-      .every(([, enabled]) => !enabled));
+    flags.botDirector && !parseEngagementFeatures('').botDirector);
 }
 
 function operationTests() {

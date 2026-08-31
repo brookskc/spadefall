@@ -11,7 +11,8 @@ import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode } from '../src/mapg
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
-import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
+import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
+  unsupportedCollapseCells } from '../src/game.js';
 import { Avatar } from '../src/avatar.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
@@ -1050,9 +1051,9 @@ function timings() {
 }
 
 // ---------------------------------------------------------------------------
-// Grounding check for structural collapse, isolated from Game (which needs a
-// DOM). Mirrors _collapseFrom's BFS so the shipped algorithm can be fuzzed
-// against a straightforward per-component reference.
+// Grounding checks for the pure structural solver exported by game.js. The
+// shipped algorithm is fuzzed against a straightforward component reference,
+// then exercised against a bridge larger than the natural-terrain budget.
 const DIRS6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 const ckey = (x, y, z) => x + ',' + y + ',' + z;
 function seedsFor(solid, holes) {
@@ -1063,29 +1064,11 @@ function seedsFor(solid, holes) {
   }
   return seeds;
 }
-// The shipped algorithm: verdict map, early exit on reaching bedrock.
+// The shipped algorithm itself, with every fuzz voxel treated as natural
+// terrain so the original conservative proof budget remains under test.
 function collapseShipped(solid, holes, CAP = 4000) {
-  const verdict = new Map(), doomed = new Set();
-  for (const s of seedsFor(solid, holes)) {
-    const sk = ckey(s.x, s.y, s.z);
-    if (verdict.has(sk)) continue;
-    const comp = new Set([sk]), q = [s];
-    let grounded = false, settled = false;
-    for (let i = 0; i < q.length && !settled; i++) {
-      const c = q[i];
-      if (c.y === 0 || comp.size > CAP) { grounded = true; break; }
-      for (const d of DIRS6) {
-        const x = c.x + d[0], y = c.y + d[1], z = c.z + d[2], k = ckey(x, y, z);
-        if (comp.has(k) || !solid(x, y, z)) continue;
-        const known = verdict.get(k);
-        if (known !== undefined) { grounded = known; settled = true; break; }
-        comp.add(k); q.push({ x, y, z });
-      }
-    }
-    for (const k of comp) verdict.set(k, grounded);
-    if (!grounded) for (const k of comp) doomed.add(k);
-  }
-  return doomed;
+  return unsupportedCollapseCells((x, y, z) => solid(x, y, z) ? BLOCK.STONE : 0,
+    holes, { terrainCap: CAP });
 }
 // Reference: flood each component to completion with its own visited set.
 function collapseReference(solid, holes, CAP = 4000) {
@@ -1151,6 +1134,34 @@ function collapseTests() {
   cells.delete(ckey(0, 3, 0));
   const doomed = collapseShipped(solid, [{ x: 0, y: 3, z: 0 }]);
   ok('a severed L-beam still collapses (6 cells)', doomed.size === 6, `${doomed.size}`);
+
+  // Regression: a broad constructed bridge crosses the natural-terrain
+  // safety threshold. One anchor must hold it; removing the second must drop
+  // the full deck instead of misclassifying size alone as structural support.
+  const bridge = new Map(), WIDTH = 18, LENGTH = 230, DECK_Y = 4;
+  for (let z = 0; z < WIDTH; z++) {
+    for (let x = 0; x <= LENGTH + 1; x++)
+      bridge.set(ckey(x, DECK_Y, z), BLOCK.GREEN);
+    for (let y = 0; y < DECK_Y; y++) {
+      bridge.set(ckey(0, y, z), BLOCK.GREEN);
+      bridge.set(ckey(LENGTH + 1, y, z), BLOCK.GREEN);
+    }
+  }
+  const left = [], right = [];
+  for (let z = 0; z < WIDTH; z++) {
+    bridge.delete(ckey(0, DECK_Y, z)); left.push({ x: 0, y: DECK_Y, z });
+  }
+  const blockAt = (x, y, z) => bridge.get(ckey(x, y, z)) ?? 0;
+  ok('one surviving bridge anchor still carries a deck wider than the terrain cap',
+    unsupportedCollapseCells(blockAt, left).size === 0);
+  for (let z = 0; z < WIDTH; z++) {
+    bridge.delete(ckey(LENGTH + 1, DECK_Y, z));
+    right.push({ x: LENGTH + 1, y: DECK_Y, z });
+  }
+  const fallenBridge = unsupportedCollapseCells(blockAt, right);
+  ok('destroying both ends collapses the entire wide constructed bridge',
+    fallenBridge.size === WIDTH * LENGTH,
+    `${fallenBridge.size}/${WIDTH * LENGTH} deck cells`);
 }
 
 // ---------------------------------------------------------------------------

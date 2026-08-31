@@ -904,6 +904,59 @@ const holdClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padSt
 
 // The six face-neighbor offsets, for the structural-support flood fill.
 const DIRS6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const COLLAPSE_TERRAIN_CAP = 4000;
+const COLLAPSE_BUILT_CAP = 12000;
+const COLLAPSE_PACKET_CELLS = 4000;
+const collapseKey = (x, y, z) => x + ',' + y + ',' + z;
+const isBuiltBlock = v => v === BLOCK.GREEN || v === BLOCK.BLUE;
+
+// Find every newly unsupported component touching a removed voxel. Natural
+// terrain keeps the conservative 4k proof budget that prevents a crater from
+// taking half a map with it. A component made entirely from placed team
+// blocks gets a larger budget: wide bridges can legitimately cross the old
+// threshold, and treating that threshold as proof of support left them
+// floating after both anchors were destroyed.
+export function unsupportedCollapseCells(blockAt, holes, {
+  terrainCap = COLLAPSE_TERRAIN_CAP, builtCap = COLLAPSE_BUILT_CAP,
+} = {}) {
+  const seeded = new Set(); // dedupe only — seeds must NOT count as visited
+  const seeds = [];
+  for (const h of holes ?? [])
+    for (const d of DIRS6) {
+      const x = h.x + d[0], y = h.y + d[1], z = h.z + d[2];
+      const k = collapseKey(x, y, z), v = blockAt(x, y, z);
+      if (!seeded.has(k) && v) { seeded.add(k); seeds.push({ x, y, z, v }); }
+    }
+
+  const verdict = new Map(); // cell -> grounded?
+  const doomed = new Set();
+  for (const s of seeds) {
+    const sk = collapseKey(s.x, s.y, s.z);
+    if (verdict.has(sk)) continue;
+    const comp = new Set([sk]);
+    const q = [s];
+    let grounded = false, settled = false, builtOnly = isBuiltBlock(s.v);
+    for (let i = 0; i < q.length && !settled; i++) {
+      const c = q[i];
+      if (c.y === 0) { grounded = true; break; }
+      if (comp.size > (builtOnly ? builtCap : terrainCap)) { grounded = true; break; }
+      for (const d of DIRS6) {
+        const x = c.x + d[0], y = c.y + d[1], z = c.z + d[2];
+        const k = collapseKey(x, y, z);
+        if (comp.has(k)) continue;
+        const v = blockAt(x, y, z);
+        if (!v) continue;
+        const known = verdict.get(k);
+        if (known !== undefined) { grounded = known; settled = true; break; }
+        if (!isBuiltBlock(v)) builtOnly = false;
+        comp.add(k); q.push({ x, y, z, v });
+      }
+    }
+    for (const k of comp) verdict.set(k, grounded);
+    if (!grounded) for (const k of comp) doomed.add(k);
+  }
+  return doomed;
+}
 
 const nameSpan = e => `<span style="color:${teamCss(e.team)}">${e.name}</span>`;
 
@@ -2280,21 +2333,12 @@ export class Game {
 
   // Structural support: whatever isn't connected to bedrock comes down.
   // Multi-source BFS from every solid face of the void a removal left. A
-  // clump that can't reach y=0 within the proof budget collapses; one bigger
-  // than the budget is assumed terrain and stays (collapses are for towers,
-  // bridges and bunkers — not for half the map). Host/solo only: clients
-  // replay the 'col' event so every world converges on the host's.
+  // clump that can't reach y=0 within its proof budget collapses. Natural
+  // terrain stays conservatively bounded; placed structures get enough room
+  // for broad bridges. Host/solo only: clients replay the 'col' event so
+  // every world converges on the host's.
   _collapseFrom(holes, who = null) {
     if (this.mode === 'client' || !holes.length) return;
-    const CAP = 4000;
-    const key = (x, y, z) => x + ',' + y + ',' + z;
-    const seeded = new Set(); // dedupe only — seeds must NOT count as visited
-    const seeds = [];
-    for (const h of holes)
-      for (const d of DIRS6) {
-        const x = h.x + d[0], y = h.y + d[1], z = h.z + d[2], k = key(x, y, z);
-        if (!seeded.has(k) && this.world.solid(x, y, z)) { seeded.add(k); seeds.push({ x, y, z }); }
-      }
     // Per connected component: a dig at a tower's base touches BOTH the
     // terrain and the tower — the grounded dirt must not vouch for the
     // severed tower. Each clump has to find its own way to bedrock.
@@ -2306,28 +2350,7 @@ export class Game {
     // Fuzzing found this on ~3% of digs, always in the "drops what should
     // stand" direction. Reaching an already-resolved cell means same clump,
     // same answer: inherit it and stop.
-    const verdict = new Map(); // cell -> grounded?
-    const doomed = new Set();
-    for (const s of seeds) {
-      const sk = key(s.x, s.y, s.z);
-      if (verdict.has(sk)) continue;
-      const comp = new Set([sk]);
-      const q = [s];
-      let grounded = false, settled = false;
-      for (let i = 0; i < q.length && !settled; i++) {
-        const c = q[i];
-        if (c.y === 0 || comp.size > CAP) { grounded = true; break; }
-        for (const d of DIRS6) {
-          const x = c.x + d[0], y = c.y + d[1], z = c.z + d[2], k = key(x, y, z);
-          if (comp.has(k) || !this.world.solid(x, y, z)) continue;
-          const known = verdict.get(k);
-          if (known !== undefined) { grounded = known; settled = true; break; }
-          comp.add(k); q.push({ x, y, z });
-        }
-      }
-      for (const k of comp) verdict.set(k, grounded);
-      if (!grounded) for (const k of comp) doomed.add(k);
-    }
+    const doomed = unsupportedCollapseCells((x, y, z) => this.world.get(x, y, z), holes);
     if (!doomed.size) return;
     // Down it comes: remove the clump, dust it, and hurt anyone standing in
     // it or directly under it — a falling tower should kill.
@@ -2348,11 +2371,11 @@ export class Game {
       for (let x = x0; x <= x1 && hit < 55; x++)
         for (let z = z0; z <= z1 && hit < 55; z++) {
           for (let y = y0; y <= y1; y++)
-            if (doomed.has(key(x, y, z))) {
+            if (doomed.has(collapseKey(x, y, z))) {
               hit = 55; source = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5); break;
             }
           for (let y = y1 + 1; !hit && y <= y1 + 3; y++)
-            if (doomed.has(key(x, y, z))) {
+            if (doomed.has(collapseKey(x, y, z))) {
               hit = 30; source = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
             }
         }
@@ -2361,9 +2384,15 @@ export class Game {
       if (hit) this.damage(e, hit, who, source, { cause: 'collapse' });
     }
     if (this.mode === 'host') {
-      for (const c of cells) this._appendWorldEdit([c.x, c.y, c.z, 0]); // late joiners
-      this.net.broadcast(this._worldStamp({ t: 'e', k: 'col',
-        cells: cells.flatMap(c => [c.x, c.y, c.z]) }));
+      // Keep each event within protocol.js's existing 4,000-cell trust
+      // boundary. Larger built bridges arrive as a short ordered sequence;
+      // every packet advances the edit revision by exactly its own payload.
+      for (let i = 0; i < cells.length; i += COLLAPSE_PACKET_CELLS) {
+        const batch = cells.slice(i, i + COLLAPSE_PACKET_CELLS);
+        for (const c of batch) this._appendWorldEdit([c.x, c.y, c.z, 0]); // late joiners
+        this.net.broadcast(this._worldStamp({ t: 'e', k: 'col',
+          cells: batch.flatMap(c => [c.x, c.y, c.z]) }));
+      }
     }
   }
 

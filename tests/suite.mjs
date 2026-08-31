@@ -7,7 +7,9 @@
 import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
-import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode } from '../src/mapgen.js';
+import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
+  PINEFALL_RAVINE_HALF_WIDTH, pinefallRavineCenter,
+  pinefallRavineHeight } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
@@ -45,7 +47,8 @@ import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
   stationCanSupply, stepFieldStation } from '../src/field-stations.js';
 import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
 import { masteryProgress } from '../src/mastery.js';
-import { rematchVotesNeeded, validPingDirection } from '../src/social.js';
+import { rematchVotesNeeded, staySquadGroups, staySquadState,
+  validPingDirection } from '../src/social.js';
 import { EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
@@ -140,6 +143,25 @@ function mapgenTests() {
     new Set(MAPS.map((_, i) => mapAtmosphere(i).sky.join(','))).size === MAPS.length);
   ok('PINEFALL uses a warm lavender sky that preserves blue-team contrast',
     mapAtmosphere(2).sky[0] === '#aaa3d2' && mapAtmosphere(2).fog === 0xc9c1d6);
+  ok('CROWN uses a stronger blue atmosphere and separated terrain values',
+    mapAtmosphere(4).sky[0] === '#365b91'
+      && MAPS[4].paletteOverrides.grass === 0x567447
+      && MAPS[4].paletteOverrides.stone === 0x515d69);
+  ok('CALDERA uses a contrasting volcanic-twilight sky',
+    mapAtmosphere(5).sky[0] === '#40334f'
+      && mapAtmosphere(5).sky[1] === '#76556a'
+      && mapAtmosphere(5).fog === 0xa47770);
+  const ravineOriginal = SEA + 14;
+  const ravineSamples = Array.from({ length: PINEFALL_RAVINE_HALF_WIDTH + 1 }, (_, d) =>
+    pinefallRavineHeight(ravineOriginal, d));
+  ok('PINEFALL ravine is broad, shallow, and smoothly walkable',
+    PINEFALL_RAVINE_HALF_WIDTH === 13
+      && ravineSamples[0] > SEA - 1 && ravineSamples[0] < SEA
+      && ravineSamples.every((h, i) => i === 0 || h >= ravineSamples[i - 1])
+      && ravineSamples.slice(1).every((h, i) => h - ravineSamples[i] < 2));
+  const seededFord = SX / 2 + ((4242 % 5) - 2) * 6;
+  ok('PINEFALL ravine still crosses midfield at its seeded ford',
+    pinefallRavineCenter(4242, seededFord) === SZ / 2);
 
   const greenPlaced = PALETTE[BLOCK.GREEN].color, bluePlaced = PALETTE[BLOCK.BLUE].color;
   PALETTE[BLOCK.GREEN].color = 0x123456;
@@ -1044,6 +1066,39 @@ function selectedGoalTests() {
       && !validServerMessage({ t: 'e', k: 'goal', metric: 'terrain', amount: 1000 }));
 }
 
+function stayAsSquadTests() {
+  group('phase five: explicit same-team continuation signals');
+  const roster = [['p0', 'green'], ['p1', 'green'], ['p2', 'green'],
+    ['p3', 'blue'], ['p4', 'blue']];
+  const empty = staySquadState(roster, [], 'p0');
+  ok('a multiplayer teammate group is available without implying a vote',
+    empty.available && !empty.voted && !empty.formed
+      && empty.teammates === 3 && empty.ready === 0);
+  const waiting = staySquadState(roster, ['p0', 'p3', 'missing'], 'p0');
+  ok('opponents and unknown ids never inflate local squad readiness',
+    waiting.voted && !waiting.formed && waiting.ready === 1);
+  const formed = staySquadState(roster, ['p0', 'p1', 'p3', 'p4'], 'p0');
+  ok('two mutual same-team signals form a squad without requiring opponents',
+    formed.formed && formed.ready === 2 && formed.teammates === 3);
+  ok('a viewer who did not opt in is not silently drafted into a squad',
+    !staySquadState(roster, ['p1', 'p2'], 'p0').formed);
+  ok('solo and missing viewers never expose the continuation control',
+    !staySquadState([['p0', 'green']], ['p0'], 'p0').available
+      && !staySquadState(roster, ['p0'], 'missing').available);
+
+  const groups = staySquadGroups(roster, ['p4', 'p1', 'p0', 'p3', 'p3', 'missing']);
+  ok('host handoff produces stable same-team atomic groups only',
+    groups.length === 2 && groups[0].join(',') === 'p0,p1'
+      && groups[1].join(',') === 'p3,p4');
+  ok('a lone readiness signal does not create a one-person squad',
+    staySquadGroups(roster, ['p0', 'p3', 'missing']).length === 0);
+  ok('squad signals are bounded and deduplicated at both trust boundaries',
+    validClientMessage({ t: 'a', k: 'squad' })
+      && validServerMessage({ t: 'e', k: 'squad', voters: ['p0', 'p1'] })
+      && !validServerMessage({ t: 'e', k: 'squad', voters: ['p0', 'p0'] })
+      && !validServerMessage({ t: 'e', k: 'squad', voters: Array(11).fill(0).map((_, i) => `p${i}`) }));
+}
+
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
   group('damage direction: source bearing to screen edge');
@@ -1704,6 +1759,7 @@ export async function run() {
   voxelStoryTests();
   deathRecapTests();
   selectedGoalTests();
+  stayAsSquadTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

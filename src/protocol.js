@@ -55,6 +55,7 @@ export function validClientMessage(d) {
   if (d.k === 'overcharge') return true;
   if (d.k === 'mark') return validPingDirection(d.d);
   if (d.k === 'rematch') return true;
+  if (d.k === 'squad') return true;
   if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
   if (d.k === 'reload') return true;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)
@@ -151,6 +152,9 @@ function validEvent(d) {
       && d.voters.every(v => shortString(v, 16))
       && new Set(d.voters).size === d.voters.length
       && Number.isInteger(d.needed) && d.needed >= 1 && d.needed <= 10;
+    case 'squad': return Array.isArray(d.voters) && d.voters.length <= 10
+      && d.voters.every(v => shortString(v, 16))
+      && new Set(d.voters).size === d.voters.length;
     case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw));
     case 'corr': return [d.x, d.y, d.z].every(finite);
     case 'kick': return d.reason === 'integrity';

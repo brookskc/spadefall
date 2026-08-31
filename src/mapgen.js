@@ -90,9 +90,9 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH GATE' },
       { x: SX / 2, z: SZ / 2 + 40, r: 8, label: 'SOUTH GATE' },
     ],
-    atmosphere: { sky: ['#607da9', '#aebcd1', '#dfe2e7'], fog: 0xbfc7d1, cloud: 0xe9ebed, water: 0x496c86,
-      sun: [0.35, 1, -0.55], sunTint: [1.02, 1.03, 1.0] },
-    paletteOverrides: { grass: 0x71866a, dirt: 0x665f55, sand: 0xa8a18c, stone: 0x68727d, moss: 0x4f6659 } },
+    atmosphere: { sky: ['#365b91', '#7899bf', '#c9d7df'], fog: 0xa6b4bf, cloud: 0xe7edf0, water: 0x2f5e78,
+      sun: [0.35, 1, -0.55], sunTint: [1.08, 1.04, 0.94] },
+    paletteOverrides: { grass: 0x567447, dirt: 0x604636, sand: 0xb29a68, stone: 0x515d69, moss: 0x334f3c } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
     stations: [
       { x: 104, z: 127.5, label: 'WEST SADDLE' },
@@ -103,7 +103,7 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
       { x: SX / 2, z: SZ / 2 + 28, r: 8, label: 'SOUTH BOWL' },
     ],
-    atmosphere: { sky: ['#a75547', '#cf8069', '#e6b99a'], fog: 0xc99e8e, cloud: 0xdac7ba, water: 0x595866,
+    atmosphere: { sky: ['#40334f', '#76556a', '#c38a73'], fog: 0xa47770, cloud: 0xc7b1ae, water: 0x595866,
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
     paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
 ];
@@ -445,6 +445,20 @@ function genBeach(world, seed) {
 // ---------------------------------------------------------------- forest
 // Rolling inland hills under a dense voxel canopy, a creek cutting the
 // midfield — short sightlines, ambushes, and trees you can fell for cover.
+export const PINEFALL_RAVINE_HALF_WIDTH = 13;
+export function pinefallRavineCenter(seed, x) {
+  const ford = SX / 2 + ((seed % 5) - 2) * 6;
+  return SZ / 2 + 58 * Math.sin((x - ford) * 0.022);
+}
+export function pinefallRavineHeight(originalHeight, distance) {
+  if (distance >= PINEFALL_RAVINE_HALF_WIDTH) return originalHeight;
+  // Smoothly blend the original hillside into a one-block-deep creek bed.
+  // This produces broad, walkable banks instead of a narrow vertical cut.
+  const t = Math.max(0, distance) / PINEFALL_RAVINE_HALF_WIDTH;
+  const edge = t * t * (3 - 2 * t);
+  return (SEA - 0.25) * (1 - edge) + originalHeight * edge;
+}
+
 function genForest(world, seed) {
   const noise = makeNoise(seed);
   const height = new Float32Array(SX * SZ);
@@ -456,15 +470,16 @@ function genForest(world, seed) {
       let h = SEA + 4
         + rim * 18 * (0.6 * noise(x * 0.016, z * 0.016)
                     + 0.4 * noise(x * 0.05,  z * 0.05));
-      // A winding creek carved just below the waterline — wide enough to
-      // matter as a midfield obstacle (and to fight along). The meander is
+      // A broad, shallow ravine with a narrow creek bed. Its sloped banks are
+      // a traversable low route and natural firing edge, rather than the old
+      // eleven-block-wide hard cut players could mostly ignore. The meander is
       // pinned to ford midfield: the old phase (seed % 7 in absolute x)
       // could push every zero crossing outside the creek's x-range, so the
       // base-to-base path never got wet. Now it always fords near x=128.
-      const ford = SX / 2 + ((seed % 5) - 2) * 6; // 116..140, varies by seed
-      const creekZ = SZ / 2 + 58 * Math.sin((x - ford) * 0.022);
-      const cd = Math.abs(z - creekZ);
-      if (cd < 5.5 && x > 60 && x < SX - 60) h = Math.min(h, SEA - 1);
+      const ravineZ = pinefallRavineCenter(seed, x);
+      const distance = Math.abs(z - ravineZ);
+      if (x > 50 && x < SX - 50)
+        h = Math.min(h, pinefallRavineHeight(h, distance));
       height[at(x, z)] = Math.min(SY - 8, h);
     }
 

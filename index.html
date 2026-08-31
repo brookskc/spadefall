@@ -209,6 +209,15 @@
     font-family:inherit; font-size:11px; font-weight:700; letter-spacing:1.8px; cursor:pointer; }
   #rematchBtn:hover { background:rgba(255,217,122,.14); }
   #rematchBtn.voted, #rematchBtn:disabled { color:#e8ecf2; opacity:.55; cursor:default; }
+  #squadReady { display:none; margin-top:9px; align-items:center; gap:10px; }
+  #squadReady.on { display:flex; }
+  #squadBtn { padding:8px 16px; color:#8fd98f; background:rgba(143,217,143,.07);
+    border:1px solid rgba(143,217,143,.45); font-family:inherit; font-size:11px;
+    font-weight:700; letter-spacing:1.8px; cursor:pointer; }
+  #squadBtn:hover { background:rgba(143,217,143,.14); }
+  #squadBtn.voted, #squadBtn:disabled { color:#e8ecf2; opacity:.62; cursor:default; }
+  #squadReady small { max-width:310px; text-align:left; font-size:9px;
+    line-height:1.35; letter-spacing:1px; opacity:.42; }
   @media (max-width:650px) {
     #endStats { grid-template-columns:repeat(2,1fr); }
     #endTitle { font-size:40px; }
@@ -830,6 +839,10 @@
     <div id="endBoardLabel">MATCH SCOREBOARD</div>
     <div id="endBoard"></div>
     <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
+    <div id="squadReady">
+      <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
+      <small>Your current teammates already carry into the next round. Signal that you’re staying.</small>
+    </div>
     <div id="endNote">rotating to the next map…</div>
   </div>
 

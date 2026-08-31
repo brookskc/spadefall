@@ -33,8 +33,8 @@ import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
   applyFieldSupply, inFieldStation, nearestFieldStation, stationCanSupply,
   stepFieldStation } from './field-stations.js';
 import { buildMatchReport } from './match-report.js';
-import { rematchVotesNeeded, TEAM_PING_COOLDOWN, TEAM_PING_LIMIT,
-  TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
+import { rematchVotesNeeded, staySquadGroups, staySquadState,
+  TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
 import { assignBotRoles, botsForSquadOrder, botTelemetrySummary,
   scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
@@ -467,6 +467,23 @@ const hud = {
     btn.disabled = voted;
     btn.classList.toggle('voted', voted);
     btn.textContent = `${voted ? 'REMATCH VOTED' : 'VOTE REMATCH'} · ${voters.length}/${needed}`;
+  },
+  staySquad(g, voters = []) {
+    const wrap = $('squadReady');
+    const btn = $('squadBtn');
+    if (!wrap || !btn) return;
+    const state = g.staySquadState(voters);
+    const supported = g.engagementFeatures.stayAsSquad
+      && (g.mode !== 'client' || g._squadHostEnabled);
+    wrap.classList.toggle('on', supported && state.available);
+    if (!supported || !state.available) return;
+    btn.disabled = state.voted;
+    btn.classList.toggle('voted', state.voted);
+    btn.textContent = state.formed
+      ? `SQUAD READY · ${state.ready}/${state.teammates}`
+      : state.voted
+        ? `WAITING FOR TEAM · ${state.ready}/${state.teammates}`
+        : `STAY AS SQUAD · ${state.ready}/${state.teammates}`;
   },
   fieldStation(g) {
     const el = $('fieldStation');
@@ -1089,6 +1106,9 @@ export class Game {
     this._botBrainCursor = 0;
     this._botThinkSet = null;
     this._rematchVotes = new Set();
+    this._squadVotes = new Set();
+    this._activeSquads = [];
+    this._squadHostEnabled = false;
     this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
     this._pendingStrikes = [];           // host/solo authoritative impact timers
     this._airstrikeDrones = new Map();   // every mode: local visual replicas by strike id
@@ -1128,6 +1148,7 @@ export class Game {
     this.hud = hud;
     this.chat = new Chat(this);
     $('rematchBtn')?.addEventListener('click', () => this.requestRematch());
+    $('squadBtn')?.addEventListener('click', () => this.requestStayAsSquad());
 
     if (this.mode !== 'client') this._spawnBots();
 
@@ -1247,6 +1268,9 @@ export class Game {
     hud.selectedGoalResult(null);
     this._clearTeamPings();
     this._rematchVotes.clear();
+    this._squadVotes.clear();
+    if (this.mode === 'client') this._squadHostEnabled = false;
+    hud.staySquad(this, []);
     this._clearAirstrikeDrones();
     this._pendingStrikes = [];
     this._lastStrikeRows = [];
@@ -3226,6 +3250,7 @@ export class Game {
     this.over = true;
     this.winner = winner;
     this._rematchVotes.clear();
+    this._squadVotes.clear();
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     if (this.mode === 'host') {
@@ -3263,6 +3288,7 @@ export class Game {
       : `next up: ${next} · ${POST_MATCH_TIME}s`;
     $('end').classList.remove('hidden');
     this._publishRematchState();
+    this._publishSquadState();
     if (!won) sfx.lose();
     // The room rotates maps on its own a few seconds after the final capture.
     if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
@@ -3284,6 +3310,8 @@ export class Game {
   }
 
   _restartRound(map, seed) {
+    this._activeSquads = this.engagementFeatures.stayAsSquad
+      ? staySquadGroups(this._humanSquadRows(), [...this._squadVotes]) : [];
     // Swap green<->blue for everyone before the next map generates. Team
     // COMPOSITION doesn't change — who's grouped with whom stays put — only
     // which color/side that group is called. Bases and flag stands never
@@ -3314,6 +3342,41 @@ export class Game {
     const needed = rematchVotesNeeded(humans);
     hud.rematch(this, voters, needed);
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'rematch', voters, needed });
+  }
+
+  _humanSquadRows() {
+    if (this.mode === 'client') return [...(this._rosterP ?? new Map())]
+      .map(([idx, meta]) => ['p' + idx, meta.team]);
+    return [['p' + this._hostIdx, this.player.team],
+      ...[...this.remote.values()].map(p => ['p' + p.ridx, p.team])];
+  }
+
+  staySquadState(voters = [...this._squadVotes]) {
+    return staySquadState(this._humanSquadRows(), voters, this._kdKey(this.player));
+  }
+
+  _publishSquadState() {
+    const voters = [...this._squadVotes];
+    hud.staySquad(this, voters);
+    if (this.mode === 'host' && this.engagementFeatures.stayAsSquad)
+      this.net.broadcast({ t: 'e', k: 'squad', voters });
+  }
+
+  requestStayAsSquad() {
+    if (!this.over || !this.engagementFeatures.stayAsSquad) return;
+    if (this.mode === 'client') {
+      this.net?.send({ t: 'a', k: 'squad' });
+      return;
+    }
+    this._hostSquadVote(this.player);
+  }
+
+  _hostSquadVote(e) {
+    if (!this.over || !e || !this.engagementFeatures.stayAsSquad) return;
+    const key = this._kdKey(e);
+    if (!this._humanKeys().includes(key) || this._squadVotes.has(key)) return;
+    this._squadVotes.add(key);
+    this._publishSquadState();
   }
 
   requestRematch() {
@@ -3469,6 +3532,10 @@ export class Game {
     }
     if (d.t === 'a' && d.k === 'rematch') {
       this._hostRematchVote(p);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'squad') {
+      this._hostSquadVote(p);
       return;
     }
     // Class pick: sent while dead, so it must NOT require p.alive the way
@@ -3733,6 +3800,8 @@ export class Game {
       this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
       this.net.sendTo(id, { t: 'e', k: 'rematch', voters: [...this._rematchVotes],
         needed: rematchVotesNeeded(this.remote.size + 1) });
+      if (this.engagementFeatures.stayAsSquad)
+        this.net.sendTo(id, { t: 'e', k: 'squad', voters: [...this._squadVotes] });
     }
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
     this._broadcastScoreboard(true);
@@ -3934,10 +4003,15 @@ export class Game {
     p.avatar.dispose();
     this.remote.delete(id);
     this._rematchVotes.delete('p' + p.ridx);
+    this._squadVotes.delete('p' + p.ridx);
     this.respawnTimers.delete(p);
     if (!this.over) this.bots.push(new Bot(this, p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
-    if (this.over) { this._publishRematchState(); this._maybeStartRematch(); }
+    if (this.over) {
+      this._publishRematchState();
+      this._publishSquadState();
+      this._maybeStartRematch();
+    }
     this._checkAbandoned();
   }
 
@@ -4518,6 +4592,11 @@ export class Game {
       case 'rematch':
         this._rematchVotes = new Set(d.voters);
         hud.rematch(this, d.voters, d.needed);
+        break;
+      case 'squad':
+        this._squadHostEnabled = true;
+        this._squadVotes = new Set(d.voters);
+        hud.staySquad(this, d.voters);
         break;
       case 'corr':
         if ([d.x, d.y, d.z].every(Number.isFinite)) {

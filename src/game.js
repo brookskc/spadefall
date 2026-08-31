@@ -36,8 +36,8 @@ import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
 import { buildMatchReport } from './match-report.js';
 import { rematchVotesNeeded, staySquadGroups, staySquadState,
   TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
-import { assignBotRoles, botsForSquadOrder, botTelemetrySummary,
-  scheduleBotBrains } from './bot-rules.js';
+import { assignBotRoles, botsForSquadOrder, botDifficultyCode, botDifficultyKey,
+  botTelemetrySummary, scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
   worldEventDisposition, worldLogHash } from './network-sync.js';
 import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -51,7 +51,7 @@ import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors
   operationComplete, operationFromRow, operationLeg, operationRow,
   operationSideForColor, operationSideLabel, operationWinner,
   recordOperationResult } from './operations.js';
-import { balanceHumanTeams } from './team-balance.js';
+import { balanceHumanTeams, planBotDirector } from './team-balance.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -201,13 +201,14 @@ const rowsEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 // from. Decoded row shapes:
   //   player: [x, y, z, ry, hp, alive, carrier, tool, blocks, crouch, nades,
   //            authoritative gun ammo, reload milliseconds, gun class]
-//   bot:    [x, y, z, ry, hp, alive, carrier, crouch]
+//   bot:    [x, y, z, ry, hp, alive, carrier, crouch, difficulty code]
 export function mergeSnapshot(fullP, fullB, d) {
   for (const r of d.p ?? [])
     fullP.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7],
       r[8], r[9], r[10], r[11], r[12], r[13], r[14]]);
   for (const r of d.b ?? [])
-    fullB.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7], r[8]]);
+    fullB.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7],
+      r[8], r[9]]);
   for (const i of d.rm?.p ?? []) fullP.delete(i);
   for (const i of d.rm?.b ?? []) fullB.delete(i);
 }
@@ -1173,6 +1174,9 @@ export class Game {
       && !!this.engagementFeatures.momentumBalance;
     this._teamBalanceHostEnabled = this.mode !== 'client'
       && !!this.engagementFeatures.teamBalance;
+    this._botDirectorHostEnabled = this.mode !== 'client'
+      && !!this.engagementFeatures.botDirector;
+    this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
     this._teamStreakUses = { green: 0, blue: 0 };
     this._lastMomentumRow = [this._momentumHostEnabled ? 1 : 0, 0, 0];
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
@@ -1430,6 +1434,7 @@ export class Game {
 
   startOperation(plan = 0) {
     this.operation = createOperation(plan);
+    this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
     this.mapLock = null;
     const leg = operationLeg(this.operation);
     this.gameMode = leg.mode;
@@ -1577,8 +1582,14 @@ export class Game {
     const bots = { green: 0, blue: 0 };
     for (const b of this.bots) bots[b.team] = (bots[b.team] ?? 0) + 1;
     const target = teamSizeForMode(this.gameMode);
-    for (let i = bots.green; i < target - humans.green; i++) this.bots.push(new Bot(this, 'green'));
-    for (let i = bots.blue; i < target - humans.blue; i++) this.bots.push(new Bot(this, 'blue'));
+    for (let i = bots.green; i < target - humans.green; i++) this.bots.push(this._newBot('green'));
+    for (let i = bots.blue; i < target - humans.blue; i++) this.bots.push(this._newBot('blue'));
+  }
+
+  _newBot(team, name = null, difficultyKey = null) {
+    const key = difficultyKey ?? (this.botDirectorEnabled()
+      ? this._botDifficultyPlan[team] : null);
+    return new Bot(this, team, name, key);
   }
 
   _humanCap() { return Math.min(MAX_HUMANS, teamSizeForMode(this.gameMode) * 2); }
@@ -3490,6 +3501,7 @@ export class Game {
       this.player.team = flip(this.player.team);
       for (const p of this.remote.values()) p.team = flip(p.team);
     }
+    const botPlan = this._planNextRoundBots();
     if (this.operation) this.operation = flipOperationColors(this.operation);
     if (this.mode === 'host')
       this.net.broadcast({ t: 'e', k: 'restart', map, seed,
@@ -3500,12 +3512,52 @@ export class Game {
     if (this.mode === 'host') this.net.broadcast(this._rosterMsg());
     if (balance.adjusted)
       this.message('TEAMS BALANCED FOR THE NEXT ROUND · CONFIRMED SQUADS KEPT TOGETHER', '#ffd97a');
+    if (botPlan.adjusted)
+      this.message(`BOT DIRECTOR · GREEN ${botPlan.green.toUpperCase()} · BLUE ${botPlan.blue.toUpperCase()} · COGNITION ONLY`, '#ffd97a');
     this.onRestart?.(MAPS[map].name);
   }
 
   teamBalanceEnabled() {
     return this.mode === 'client' ? !!this._teamBalanceHostEnabled
       : !!(this._teamBalanceHostEnabled || this.engagementFeatures.teamBalance);
+  }
+
+  botDirectorEnabled() {
+    return this.mode === 'client' ? !!this._botDirectorHostEnabled
+      : !!(this._botDirectorHostEnabled || this.engagementFeatures.botDirector);
+  }
+
+  _botDirectorRow() {
+    return [this.botDirectorEnabled() ? 1 : 0,
+      botDifficultyCode(this._botDifficultyPlan.green),
+      botDifficultyCode(this._botDifficultyPlan.blue)];
+  }
+
+  _applyBotDirectorRow(row) {
+    if (!Array.isArray(row) || row.length !== 3) return;
+    this._botDirectorHostEnabled = row[0] === 1;
+    this._botDifficultyPlan = {
+      green: botDifficultyKey(row[1]), blue: botDifficultyKey(row[2]),
+    };
+  }
+
+  _planNextRoundBots() {
+    if (!this.botDirectorEnabled() || this.operation) {
+      if (!this.operation) this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
+      return { green: this._botDifficultyPlan.green,
+        blue: this._botDifficultyPlan.blue, adjusted: false };
+    }
+    const humans = [this.player, ...this.remote.values()].map(p => ({
+      key: this._kdKey(p), team: p.team,
+      rating: this.kd.get(this._kdKey(p))?.score ?? 0,
+    }));
+    const botScores = this.bots.map(b => this.kd.get(this._kdKey(b))?.score)
+      .filter(Number.isFinite);
+    const botRating = botScores.length
+      ? botScores.reduce((sum, score) => sum + score, 0) / botScores.length : 0;
+    const result = planBotDirector(humans, teamSizeForMode(this.gameMode), botRating);
+    this._botDifficultyPlan = { green: result.green, blue: result.blue };
+    return result;
   }
 
   _balanceNextRoundTeams() {
@@ -3715,6 +3767,7 @@ export class Game {
           op: this._operationRow(),
           mb: this._momentumRow(),
           tb: this.teamBalanceEnabled() ? 1 : 0,
+          bd: this._botDirectorRow(),
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
@@ -4004,6 +4057,7 @@ export class Game {
       op: this._operationRow(),
       mb: this._momentumRow(),
       tb: this.teamBalanceEnabled() ? 1 : 0,
+      bd: this._botDirectorRow(),
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this.over) {
@@ -4076,8 +4130,9 @@ export class Game {
     this._nextPIdx = maxIdx + 1;
     for (const [idx, row] of this._fullB) {
       const meta = this._rosterB?.get(idx);
-      const [x, y, z, ry, health, alive, carrier] = row;
-      const bot = new Bot(this, meta?.team ?? 'green', meta?.name ?? null);
+      const [x, y, z, ry, health, alive, carrier, , difficultyCode] = row;
+      const bot = this._newBot(meta?.team ?? 'green', meta?.name ?? null,
+        botDifficultyKey(difficultyCode));
       bot.id = idx;          // survivors key bot avatars by it — keep it stable
       reserveBotId(idx);     // and never hand it to a future spawn
       bot.body.pos.set(x, y, z);
@@ -4167,7 +4222,7 @@ export class Game {
         p.avatar.dispose();
         this.remote.delete(id);
         this.respawnTimers.delete(p);
-        if (!this.over) this.bots.push(new Bot(this, p.team));
+        if (!this.over) this.bots.push(this._newBot(p.team));
         this.feed(`${nameSpan(p)} never made it back`);
       }
       if (stale.length) this.net.broadcast(this._rosterMsg());
@@ -4216,7 +4271,7 @@ export class Game {
     this._rematchVotes.delete('p' + p.ridx);
     this._squadVotes.delete('p' + p.ridx);
     this.respawnTimers.delete(p);
-    if (!this.over) this.bots.push(new Bot(this, p.team));
+    if (!this.over) this.bots.push(this._newBot(p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
     if (this.over) {
       this._publishRematchState();
@@ -4274,7 +4329,9 @@ export class Game {
       p: P,
       b: this.bots.map(b => [b.id, ...pos(b.body.pos), qa(b.parts.group.rotation.y),
         Math.round(b.health), b.alive ? 1 : 0, b.carrier ? 1 : 0,
-        b.parts.crouched ? 1 : 0]), // crouch bit: clients drew ducking bots standing
+        b.parts.crouched ? 1 : 0, botDifficultyCode(b.difficulty?.key)]),
+        // Crouch and cognitive profile both survive client reconstruction and
+        // host migration. Neither changes bot health, damage, or weapon stats.
       f: this.flags && {
         g: [FLAG_CODE[this.flags.green.state], ...pos(this.flags.green.pos), Math.ceil(this.flags.green.dropTimer)],
         b: [FLAG_CODE[this.flags.blue.state], ...pos(this.flags.blue.pos), Math.ceil(this.flags.blue.dropTimer)],
@@ -4293,6 +4350,7 @@ export class Game {
       u: this._abilityRows(),
       mb: this._momentumRow(),
       tb: this.teamBalanceEnabled() ? 1 : 0,
+      bd: this._botDirectorRow(),
       l: this._stationRows(),
       m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
         Math.max(0, Math.round(this.matchElapsed * 10))],
@@ -4348,7 +4406,8 @@ export class Game {
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
         f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, u: snap.u, mb: snap.mb, tb: snap.tb, l: snap.l, m: snap.m,
+        a: snap.a, u: snap.u, mb: snap.mb, tb: snap.tb, bd: snap.bd,
+        l: snap.l, m: snap.m,
         op: snap.op, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
@@ -4478,6 +4537,7 @@ export class Game {
       this.player.team = d.team;
       if (d.mb !== undefined) this._applyMomentumRow(d.mb);
       if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
+      if (d.bd !== undefined) this._applyBotDirectorRow(d.bd);
       if (d.op !== undefined) this._applyOperationRow(d.op);
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
       if (d.migrated) {
@@ -4567,6 +4627,7 @@ export class Game {
     this._syncAirstrikeRows(d.a ?? []);
     if (d.mb !== undefined) this._applyMomentumRow(d.mb);
     if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
+    if (d.bd !== undefined) this._applyBotDirectorRow(d.bd);
     if (d.op !== undefined) this._applyOperationRow(d.op);
     const want = new Set();
     for (const [idx, r] of this._fullP) {

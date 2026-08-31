@@ -68,6 +68,15 @@ export function botDifficulty(key) {
   return BOT_DIFFICULTY[key] ?? BOT_DIFFICULTY.normal;
 }
 
+export const BOT_DIFFICULTY_CODES = Object.freeze(['easy', 'normal', 'hard']);
+export function botDifficultyCode(key) {
+  const code = BOT_DIFFICULTY_CODES.indexOf(botDifficulty(key).key);
+  return code < 0 ? 1 : code;
+}
+export function botDifficultyKey(code) {
+  return Number.isInteger(code) ? (BOT_DIFFICULTY_CODES[code] ?? 'normal') : 'normal';
+}
+
 const finitePoint = p => p && Number.isFinite(p.x) && Number.isFinite(p.z);
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2;
 

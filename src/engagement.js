@@ -15,6 +15,7 @@ export const ENGAGEMENT_FEATURES = Object.freeze([
   'operations',
   'momentumBalance',
   'teamBalance',
+  'botDirector',
 ]);
 
 const FEATURE_BY_LOWER = new Map(ENGAGEMENT_FEATURES.map(name => [name.toLowerCase(), name]));

@@ -6,7 +6,7 @@ import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -69,6 +69,8 @@ function validSnapshot(d) {
   if (!d.p.every(r => (r[12] === undefined || (Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30))
       && (r[13] === undefined || (Number.isInteger(r[13]) && r[13] >= 0 && r[13] <= 3000))
       && (r[14] === undefined || r[14] === 0 || r[14] === 1 || r[14] === 5))) return false;
+  if (!d.b.every(r => r[9] === undefined
+      || (Number.isInteger(r[9]) && r[9] >= 0 && r[9] <= 2))) return false;
   if ((d.q !== undefined && (!Number.isSafeInteger(d.q) || d.q < 1))
       || (d.full !== undefined && d.full !== 0 && d.full !== 1)
       || (d.ack !== undefined && (!Number.isSafeInteger(d.ack) || d.ack < 0))
@@ -83,6 +85,10 @@ function validSnapshot(d) {
       || !Number.isInteger(d.mb[1]) || d.mb[1] < 0 || d.mb[1] > 100
       || !Number.isInteger(d.mb[2]) || d.mb[2] < 0 || d.mb[2] > 100)) return false;
   if (d.tb !== undefined && d.tb !== 0 && d.tb !== 1) return false;
+  if (d.bd !== undefined && (!finiteArray(d.bd, 3)
+      || (d.bd[0] !== 0 && d.bd[0] !== 1)
+      || !Number.isInteger(d.bd[1]) || d.bd[1] < 0 || d.bd[1] > 2
+      || !Number.isInteger(d.bd[2]) || d.bd[2] < 0 || d.bd[2] > 2)) return false;
   if (d.w !== undefined && d.w !== null && !team(d.w)) return false;
   if (!Array.isArray(d.g) || d.g.length > 16 || !d.g.every(v => finiteArray(v, 3))) return false;
   if (d.a !== undefined && (!Array.isArray(d.a) || d.a.length > 10
@@ -199,7 +205,11 @@ export function validServerMessage(d) {
       && (d.mb[0] === 0 || d.mb[0] === 1)
       && Number.isInteger(d.mb[1]) && d.mb[1] >= 0 && d.mb[1] <= 100
       && Number.isInteger(d.mb[2]) && d.mb[2] >= 0 && d.mb[2] <= 100))
-    && (d.tb === undefined || d.tb === 0 || d.tb === 1);
+    && (d.tb === undefined || d.tb === 0 || d.tb === 1)
+    && (d.bd === undefined || (finiteArray(d.bd, 3)
+      && (d.bd[0] === 0 || d.bd[0] === 1)
+      && Number.isInteger(d.bd[1]) && d.bd[1] >= 0 && d.bd[1] <= 2
+      && Number.isInteger(d.bd[2]) && d.bd[2] >= 0 && d.bd[2] <= 2));
   if (d.t === 'sync') return finite(d.seed)
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && validEditLog(d.log)

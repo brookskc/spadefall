@@ -67,7 +67,7 @@ let nextId = 0;   // stable identity for network snapshots
 export function reserveBotId(idx) { if (idx >= nextId) nextId = idx + 1; }
 
 export class Bot {
-  constructor(game, team, name = null) {
+  constructor(game, team, name = null, difficultyKey = null) {
     this.game = game;
     this.team = team;
     this.id = nextId++;
@@ -117,10 +117,10 @@ export class Bot {
     this.targetVisible = false;
     this.responding = false;   // rushing to recover our dropped flag?
     this.deadT = -1;           // corpse tumble timer, while dead
-    this.difficulty = BOTQ;
+    this.difficulty = difficultyKey == null ? BOTQ : botDifficulty(difficultyKey);
     this.skill = 0.9 + Math.random() * 0.2; // mild individual variation only
     this._reactJitter = 0.8 + Math.random() * 0.5; // re-rolled per engagement (see update()); initialized here too so reactT is never NaN before the first target acquisition
-    this.nextThink = game.time + (this.id % 5) * BOTQ.thinkInterval / 5;
+    this.nextThink = game.time + (this.id % 5) * this.difficulty.thinkInterval / 5;
     this.cachedGoal = null;
     this.navRevision = game.navRevision ?? 0;
     this.tacticalRole = 'attack';

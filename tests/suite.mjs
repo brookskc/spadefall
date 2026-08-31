@@ -31,9 +31,10 @@ import { RuntimeHealth, evaluateReleaseBudgets, percentile,
 import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
-import { BOT_DIFFICULTY, assignBotRoles, botDifficulty, botSeparation,
-  botsForSquadOrder, botTargetScore, botTelemetrySummary, chooseLocalRoute,
-  hillPost, rememberedEnemyPosition, scheduleBotBrains } from '../src/bot-rules.js';
+import { BOT_DIFFICULTY, assignBotRoles, botDifficulty, botDifficultyCode,
+  botDifficultyKey, botSeparation, botsForSquadOrder, botTargetScore,
+  botTelemetrySummary, chooseLocalRoute, hillPost, rememberedEnemyPosition,
+  scheduleBotBrains } from '../src/bot-rules.js';
 import { modeMatchSeconds, regulationDecision, respawnWaveDelay,
   tacticalSpawnScore } from '../src/pacing.js';
 import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
@@ -56,7 +57,8 @@ import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors
   operationComplete, operationFromRow, operationLeg, operationRow,
   operationSideForColor, operationWinner, recordOperationResult,
   validOperationRow } from '../src/operations.js';
-import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
+import { balanceHumanTeams, planBotDirector,
+  TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
@@ -1178,6 +1180,64 @@ function teamBalanceTests() {
       && !validServerMessage({ ...phaseEightSnapshot, tb: 2 }));
 }
 
+function botDirectorTests() {
+  group('phase nine: transparent between-round bot director');
+  ok('bot cognition profiles have stable bounded wire codes',
+    ['easy', 'normal', 'hard'].every(key =>
+      botDifficultyKey(botDifficultyCode(key)) === key)
+      && botDifficultyKey(-1) === 'normal'
+      && botDifficultyKey(99) === 'normal');
+
+  const stacked = planBotDirector([
+    { key: 'p0', team: 'green', rating: 1000 },
+    { key: 'p1', team: 'green', rating: 900 },
+    { key: 'p2', team: 'blue', rating: 100 },
+    { key: 'p3', team: 'blue', rating: 50 },
+  ], 5, 400);
+  ok('a clear human imbalance gives weaker cognition to the stronger side',
+    stacked.green === 'easy' && stacked.blue === 'hard'
+      && stacked.adjusted && stacked.slots.green === 3 && stacked.slots.blue === 3);
+
+  const close = planBotDirector([
+    { key: 'p0', team: 'green', rating: 500 },
+    { key: 'p1', team: 'blue', rating: 480 },
+  ], 5, 490);
+  ok('small projected differences stay on normal to prevent difficulty churn',
+    close.green === 'normal' && close.blue === 'normal' && !close.adjusted);
+
+  const full = planBotDirector([
+    { key: 'p0', team: 'green', rating: 900 },
+    { key: 'p1', team: 'green', rating: 800 },
+    { key: 'p2', team: 'blue', rating: 200 },
+    { key: 'p3', team: 'blue', rating: 100 },
+  ], 2, 400);
+  ok('full-human rooms never advertise meaningless adaptive bot profiles',
+    full.slots.green === 0 && full.slots.blue === 0
+      && full.green === 'normal' && full.blue === 'normal' && !full.adjusted);
+
+  ok('director profiles cannot alter health, damage, movement, or weapons',
+    Object.values(BOT_DIFFICULTY).every(profile =>
+      !['health', 'damage', 'speed', 'movement', 'weapon'].some(key => key in profile)));
+
+  const snapshot = { t: 's', p: [],
+    b: [[4, 0, 0, 0, 0, 100, 1, 0, 0, 2]], c: [0, 0], g: [],
+    bd: [1, 0, 2] };
+  ok('bot profiles survive bounded snapshot and migration synchronization',
+    validServerMessage(snapshot)
+      && !validServerMessage({ ...snapshot, bd: [1, 0, 3] })
+      && !validServerMessage({ ...snapshot,
+        b: [[4, 0, 0, 0, 0, 100, 1, 0, 0, 3]] }));
+  const players = new Map(), bots = new Map();
+  mergeSnapshot(players, bots, snapshot);
+  ok('snapshot reconstruction retains the active bot cognition profile',
+    bots.get(4)?.[8] === 2);
+
+  const flags = parseEngagementFeatures('?features=BOTDIRECTOR');
+  ok('the adaptive director remains an explicit opt-in feature',
+    flags.botDirector && Object.entries(parseEngagementFeatures(''))
+      .every(([, enabled]) => !enabled));
+}
+
 function operationTests() {
   group('phase six: optional three-match operations');
   ok('every operation is a mode-compatible KOTH → CTF → TDM arc',
@@ -1884,6 +1944,7 @@ export async function run() {
   selectedGoalTests();
   stayAsSquadTests();
   teamBalanceTests();
+  botDirectorTests();
   operationTests();
   damageDirectionTests();
   airstrikeDroneTests();

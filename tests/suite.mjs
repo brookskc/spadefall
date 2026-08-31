@@ -51,6 +51,7 @@ import { EngagementTracker, parseEngagementFeatures,
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
+import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -940,6 +941,58 @@ function voxelStoryTests() {
     Object.values(tracker.metrics()).every(value => value === 0));
 }
 
+function deathRecapTests() {
+  group('phase three: optional authoritative death recap');
+  const rifle = makeDeathRecap({ cause: 'rifle', attacker: 'Birch', team: 'blue',
+    distance: 37.6, health: 18.4, headshot: true });
+  ok('combat facts are normalized into one bounded recap record',
+    validDeathRecap(rifle) && rifle.distance === 38 && rifle.health === 18
+      && rifle.headshot && rifle.attacker === 'Birch');
+  const rifleCopy = deathRecapCopy(rifle);
+  ok('fixed local copy identifies attacker, weapon, range, health, and headshot',
+    rifleCopy.label === 'KILLED BY' && rifleCopy.title === 'Birch'
+      && rifleCopy.team === 'blue'
+      && rifleCopy.detail === 'RIFLE · HEADSHOT · 38m · 18 HP LEFT');
+
+  const fall = makeDeathRecap({ cause: 'fell' });
+  const drowned = makeDeathRecap({ cause: 'drowned' });
+  ok('environmental deaths produce concise actionable fixed wording',
+    deathRecapCopy(fall).title === 'FALL DAMAGE'
+      && deathRecapCopy(drowned).detail.includes('SURFACE'));
+
+  const self = makeDeathRecap({ cause: 'grenade', attacker: 'Ignored', team: 'green',
+    distance: 1.2, health: 100, self: true });
+  ok('self damage cannot masquerade as another attacker',
+    self.attacker === null && self.team === null && self.health === null
+      && deathRecapCopy(self).title === 'SELF-INFLICTED');
+
+  const collapse = makeDeathRecap({ cause: 'collapse', attacker: 'Digger',
+    team: 'green', distance: 7, health: 64, headshot: true });
+  ok('non-firearm causes cannot claim a headshot',
+    !collapse.headshot && deathRecapCopy(collapse).detail.startsWith('FALLING VOXELS'));
+
+  ok('valid recaps pass as an optional died-event field',
+    validServerMessage({ t: 'e', k: 'died', rt: 5.2, recap: rifle })
+      && validServerMessage({ t: 'e', k: 'died', rt: 5.2 }));
+  ok('malformed recap names, teams, health, and headshots fail the trust boundary',
+    !validServerMessage({ t: 'e', k: 'died', rt: 5.2,
+      recap: { ...rifle, attacker: 'X'.repeat(25) } })
+      && !validServerMessage({ t: 'e', k: 'died', rt: 5.2,
+        recap: { ...rifle, team: 'red' } })
+      && !validServerMessage({ t: 'e', k: 'died', rt: 5.2,
+        recap: { ...rifle, health: 101 } })
+      && !validServerMessage({ t: 'e', k: 'died', rt: 5.2,
+        recap: { ...collapse, headshot: true } }));
+
+  const clamped = makeDeathRecap({ cause: 'laser', attacker: '\u0000Long Name',
+    team: 'blue', distance: 900, health: -40 });
+  ok('construction strips controls, clamps numbers, and falls back unknown causes',
+    clamped.cause === 'unknown' && clamped.attacker === 'Long Name'
+      && clamped.distance === 256 && clamped.health === 0);
+  ok('invalid objects never produce display copy',
+    deathRecapCopy({ cause: 'rifle', attacker: '<b>Injected</b>' }) === null);
+}
+
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
   group('damage direction: source bearing to screen edge');
@@ -1598,6 +1651,7 @@ export async function run() {
   engagementFoundationTests();
   firstMinuteTests();
   voxelStoryTests();
+  deathRecapTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

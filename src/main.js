@@ -39,6 +39,7 @@ const mapQa = params.has('mapqa');
 const stationQa = params.has('stationqa');
 const reportQa = params.has('reportqa');
 const pingQa = params.has('pingqa');
+const deathRecapQa = params.has('deathrecapqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -1258,6 +1259,22 @@ if (pingQa) {
   game.player.protT = 999;
   setPlaying(true);
   game._hostPlaceTeamPing(game.player, [0.65, -0.25, -0.72]);
+}
+// Death-recap composition hook. The fixture enters through authoritative
+// Game#damage and the ordinary Player#die/Game#onDeath route so browser QA
+// covers fact capture and HUD presentation together, not a hand-filled card.
+if (deathRecapQa) {
+  const attacker = game.bots.find(b => b.team !== game.player.team);
+  if (attacker) {
+    attacker.name = 'BIRCH';
+    attacker.health = 18;
+    attacker.body.pos.set(game.player.body.pos.x + 24, game.player.body.pos.y,
+      game.player.body.pos.z + 29);
+    game.player.protT = 0;
+    setPlaying(true);
+    game.damage(game.player, 120, attacker, attacker.body.pos,
+      { cause: 'rifle', headshot: true });
+  }
 }
 // Representative post-match composition without waiting through a full
 // automated round. Uses the real scoreboard rows, report rules, persistence,

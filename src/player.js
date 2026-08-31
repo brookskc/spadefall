@@ -1021,6 +1021,7 @@ export class Player {
     this._piloting = false; this._fallingT = 0; this._lingerT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
+    this._lastDeathRecap = null;
     this.vmRoot.visible = true;
     this._syncViewmodel(); // full belt: the hand holds a frag again
     sfx.respawn();

@@ -3,6 +3,7 @@ import { finiteVector, isRecord, parseSpawnRow } from './multiplayer.js';
 import { TEAM_PING_KINDS, validPingDirection } from './social.js';
 import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
+import { validDeathRecap } from './death-recap.js';
 
 export const PROTOCOL_VERSION = 3;
 
@@ -123,7 +124,8 @@ function validEvent(d) {
     case 'overcharge': return Number.isInteger(d.owner) && d.owner >= 0
       && ['windup', 'active', 'end'].includes(d.phase)
       && finite(d.remaining) && d.remaining >= 0 && d.remaining <= 15;
-    case 'died': return d.rt === undefined || (finite(d.rt) && d.rt >= 0 && d.rt <= 9);
+    case 'died': return (d.rt === undefined || (finite(d.rt) && d.rt >= 0 && d.rt <= 9))
+      && (d.recap === undefined || validDeathRecap(d.recap));
     case 'envdmg': return d.cause === 'fell' || d.cause === 'drowned';
     case 'col': return Array.isArray(d.cells) && d.cells.length % 3 === 0
       && d.cells.length <= 12000 && d.cells.every(finite);

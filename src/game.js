@@ -44,6 +44,7 @@ import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReloa
   settleReload } from './security.js';
 import { FirstMinuteGuide } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
+import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -649,6 +650,17 @@ const hud = {
     $('respawn').style.opacity = t > 0 ? 1 : 0;
     if (t > 0) $('respawn').textContent = `TEAM WAVE IN ${Math.ceil(t)}…`;
     $('classPick').style.opacity = t > 0 ? 1 : 0;
+    if (!(t > 0)) this.deathRecap(null);
+  },
+  deathRecap(recap) {
+    const el = $('deathRecap');
+    if (!el) return;
+    const copy = deathRecapCopy(recap);
+    el.className = copy ? `on${copy.team ? ` ${copy.team}` : ''}` : '';
+    if (!copy) return;
+    $('deathRecapLabel').textContent = copy.label;
+    $('deathRecapTitle').textContent = copy.title;
+    $('deathRecapDetail').textContent = copy.detail;
   },
   // Highlights which class is currently PENDING for the next life — called
   // once on death (to show the persisted/previous choice) and again each
@@ -1208,6 +1220,7 @@ export class Game {
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
     this.voxelStory?.reset();
+    hud.deathRecap(null);
     this._clearTeamPings();
     this._rematchVotes.clear();
     this._clearAirstrikeDrones();
@@ -1736,7 +1749,8 @@ export class Game {
       // 3rd hit up close, which the slow interval makes genuinely costly).
       const closeMul = spec.key === 'sniper' ? Math.min(1, 0.5 + 0.5 * (hitT / 15)) : 1;
       const dmg = spec.damage * (head ? (spec.headMult ?? 1.5) : 1) * closeMul;
-      const damaged = this.damage(hit, dmg, shooter);
+      const damaged = this.damage(hit, dmg, shooter, null,
+        { cause: spec.key, headshot: head });
       // hit was drawn from alive-only foes above, so !hit.alive here means
       // THIS shot is what did it — not just "they happen to be dead."
       if (damaged) this._hitFeedback(shooter, !hit.alive);
@@ -2241,6 +2255,17 @@ export class Game {
     }
     if (victim.health <= 0) {
       victim._deathCause = options.cause ?? null;
+      const self = attacker === victim;
+      victim._lastDeathRecap = makeDeathRecap({
+        cause: options.cause,
+        attacker: attacker && !self ? cleanName(attacker.name) : null,
+        team: attacker && !self ? attacker.team : null,
+        distance: src && victim.body?.pos ? src.distanceTo?.(victim.body.pos)
+          ?? Math.hypot(src.x - victim.body.pos.x, src.z - victim.body.pos.z) : null,
+        health: attacker && !self ? attacker.health : null,
+        headshot: options.headshot,
+        self,
+      });
       victim.die(attacker);
       if (victim === this.player) hud.air(BREATH_MAX, false);
     }
@@ -2286,6 +2311,8 @@ export class Game {
     if (victim === this.player) this.engagement?.combat('death', engagementCause);
     if (killer === this.player && killer !== victim)
       this.engagement?.combat('kill', engagementCause);
+    if (victim === this.player)
+      hud.deathRecap(this.engagementFeatures.deathRecap ? victim._lastDeathRecap : null);
     // Flag drops where the carrier fell (capture-the-flag only).
     if (this.flags && victim.carrier) {
       victim.carrier = false;
@@ -2473,7 +2500,7 @@ export class Game {
         this.effects.burst(e.body.eye(), 10, 0xc0392b, 4);
         if (p === this.player) sfx.spadeHit();
         else sfx.at('spadeHit', e.body.eye());
-        if (this.damage(e, 45, p))
+        if (this.damage(e, 45, p, null, { cause: 'spade' }))
           this._hitFeedback(p, !e.alive); // e was drawn from the alive-only loop above
         return;
       }
@@ -2582,7 +2609,7 @@ export class Game {
       this.net.broadcast(this._worldStamp(
         { t: 'e', k: 'boom', x: g.pos.x, y: g.pos.y, z: g.pos.z, r: R }));
     }
-    this._blastDamage(g.pos, g.owner, R, 9, 150, 15);
+    this._blastDamage(g.pos, g.owner, R, 9, 150, 15, R, 'grenade');
   }
 
   // Extracted from the original grenade-only version of _explode so
@@ -2597,7 +2624,8 @@ export class Game {
   // "cover doesn't matter here" radius don't have to be the same number,
   // they just always were for grenades because nobody had a reason to
   // pull them apart until now.
-  _blastDamage(pos, owner, craterR, dmgRadius, baseDamage, minDamage, noCoverR = craterR) {
+  _blastDamage(pos, owner, craterR, dmgRadius, baseDamage, minDamage,
+      noCoverR = craterR, cause = 'grenade') {
     for (const e of this.entities()) {
       if (!e.alive) continue;
       // Measured to center mass, not the eye — a shot to the ground under
@@ -2609,7 +2637,7 @@ export class Game {
       // it never breached still dealt damage through solid stone.
       if (d > noCoverR && !this.losClear(pos, center)) continue;
       const damaged = this.damage(e,
-        Math.max(minDamage, baseDamage * (1 - d / dmgRadius)), owner, pos);
+        Math.max(minDamage, baseDamage * (1 - d / dmgRadius)), owner, pos, { cause });
       // Grenades can catch their own thrower (this loop is entities(), no
       // team filter, unlike gunfire/melee which only ever loop foesOf) —
       // self-damage still applies, it just shouldn't ring a "kill
@@ -2881,7 +2909,7 @@ export class Game {
     // regardless, so a wider radius would just ignore cover for hits
     // that were never going to be lethal anyway, achieving nothing.
     const NO_COVER_R = 14 * (1 - 100 / 180); // ≈ 6.222
-    this._blastDamage(pos, owner, R, 14, 180, 20, NO_COVER_R);
+    this._blastDamage(pos, owner, R, 14, 180, 20, NO_COVER_R, 'airstrike');
   }
 
   // Visual + terrain side of an explosion — identical on host and clients.
@@ -4410,7 +4438,7 @@ export class Game {
         hud.chatMsg({ name: cleanName(d.name), team: d.team === 'blue' ? 'blue' : 'green',
                       text: String(d.text ?? '').slice(0, 120), scope: d.scope });
         break;
-      case 'died': this._clientDied(d.rt); break;
+      case 'died': this._clientDied(d.rt, d.recap); break;
       case 'spawn':
         this.player.respawn({ x: d.x, y: d.y, z: d.z });
         if (Number.isFinite(d.yaw)) this.player.yaw = d.yaw;
@@ -4448,7 +4476,13 @@ export class Game {
         && (d.wh >>> 0) !== (this._worldHash >>> 0)) this._requestResync('world');
   }
 
-  _clientDied(redeploy) {
+  _clientDied(redeploy, recap = null) {
+    const firstTransition = this.player.alive;
+    if (!firstTransition) {
+      if (Number.isFinite(redeploy)) this._respawnT = redeploy;
+      if (this.engagementFeatures.deathRecap && recap) hud.deathRecap(recap);
+      return;
+    }
     this.engagement?.combat('death', 'other');
     this.player.alive = false;
     // A guest's own death never goes through Player.die() at all — the
@@ -4484,6 +4518,7 @@ export class Game {
     sfx.hurt();
     hud.damage();
     hud.respawn(this._respawnT);
+    hud.deathRecap(this.engagementFeatures.deathRecap ? recap : null);
     hud.classPick(this.player._pendingClass); // show the current pick before any key is pressed
   }
 

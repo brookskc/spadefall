@@ -458,6 +458,21 @@
     background:radial-gradient(ellipse at center, transparent 62%, rgba(10,18,30,.20)); }
   #respawn { position:absolute; left:50%; top:58%; transform:translateX(-50%);
     font-size:15px; letter-spacing:2px; opacity:0; }
+  #deathRecap { display:none; position:absolute; left:50%; top:42%;
+    transform:translateX(-50%); min-width:300px; padding:12px 18px 11px;
+    box-sizing:border-box; text-align:center; text-transform:uppercase;
+    background:rgba(10,15,22,.82); border:1px solid rgba(255,217,122,.55);
+    box-shadow:inset 4px 0 rgba(255,217,122,.28), inset -4px 0 rgba(255,217,122,.28),
+      0 5px 18px rgba(0,0,0,.32); }
+  #deathRecap.on { display:block; }
+  #deathRecapLabel { color:#ffd97a; opacity:.72; font-size:9px;
+    letter-spacing:2.8px; }
+  #deathRecapTitle { margin-top:4px; font-size:19px; font-weight:800;
+    letter-spacing:2.2px; color:#fff; }
+  #deathRecap.green #deathRecapTitle { color:var(--green); }
+  #deathRecap.blue #deathRecapTitle { color:var(--blue); }
+  #deathRecapDetail { margin-top:5px; color:rgba(255,255,255,.74);
+    font-size:10px; letter-spacing:1.25px; }
   /* Class picker: press 1/2/3 while dead to choose your gun for next life —
      the other two guns simply aren't in the belt this spawn. Shared .opt/
      .picked styling with #startClassPick below (same look, mouse-clickable
@@ -612,6 +627,11 @@
     </div>
     <div id="feed"></div>
     <div id="msg"></div>
+    <div id="deathRecap">
+      <div id="deathRecapLabel">DEATH RECAP</div>
+      <div id="deathRecapTitle">ELIMINATED</div>
+      <div id="deathRecapDetail"></div>
+    </div>
     <div id="respawn"></div>
     <div id="classPick">
       <div class="opt" data-cls="0">1 RIFLE</div>

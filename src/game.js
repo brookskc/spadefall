@@ -42,6 +42,8 @@ import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
 import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
   authorizeWeaponFire, integritySummary, recordIntegrityViolation,
   settleReload } from './security.js';
+import { FirstMinuteGuide } from './first-minute.js';
+import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -388,6 +390,25 @@ const hud = {
       else active.style.display = 'none';
     }
   },
+  firstMinute(view) {
+    const el = $('firstMinute');
+    if (!el) return;
+    const key = view?.visible
+      ? [view.prompt, view.hint, view.objective,
+          ...Object.values(view.progress).map(Number)].join('|') : 'off';
+    if (key === this._firstMinuteKey) return;
+    this._firstMinuteKey = key;
+    el.classList.toggle('on', !!view?.visible);
+    if (!view?.visible) return;
+    $('firstMinutePrompt').textContent = view.prompt;
+    $('firstMinuteHint').textContent = view.hint;
+    $('firstMinuteObjective').textContent = `OBJECTIVE · ${view.objective}`;
+    const mark = done => done ? '■' : '□';
+    $('firstMinuteProgress').textContent = [
+      `${mark(view.progress.move)} MOVE`, `${mark(view.progress.fire)} FIRE`,
+      `${mark(view.progress.terrain)} TERRAIN`, `${mark(view.progress.ping)} PING`,
+    ].join('  ·  ');
+  },
   score(g) {
     const next = g.hill
       ? `<span class="g">GREEN ${holdClock(g.captures.green)}</span><span style="opacity:.4">—</span><span class="b">${holdClock(g.captures.blue)} BLUE</span>`
@@ -545,6 +566,14 @@ const hud = {
       : mastery.next
         ? `${mastery.tier.name} MASTERY · ${mastery.remaining} SCORE TO ${mastery.next.name}`
         : `${mastery.tier.name} MASTERY · MAXIMUM RANK`;
+  },
+  voxelStory(story) {
+    const el = $('endStory');
+    if (!el) return;
+    el.className = story ? `on ${story.kind}` : '';
+    if (!story) return;
+    $('endStoryTitle').textContent = story.title;
+    $('endStoryDetail').textContent = story.detail;
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);
@@ -985,6 +1014,13 @@ export class Game {
     this.over = false;
     this.mode = opts.mode ?? 'solo';       // solo | host | client
     this.net = opts.net ?? null;
+    this.engagement = opts.engagement ?? null;
+    this.engagementFeatures = opts.engagementFeatures ?? {};
+    this.firstMinuteGuide = this.engagementFeatures.firstMinute
+      ? new FirstMinuteGuide() : null;
+    this.voxelStory = this.engagementFeatures.voxelStories
+      ? new VoxelStoryTracker() : null;
+    this._roundSerial = 0;
     // Public/default rooms protect teammates. Kept as an instance policy so
     // private-room friendly fire can be added later without rewriting every
     // damage source; no UI exposes it yet.
@@ -1170,6 +1206,8 @@ export class Game {
   }
 
   rebuild(seed, map = this.mapIndex) {
+    this._roundSerial++;
+    this.voxelStory?.reset();
     this._clearTeamPings();
     this._rematchVotes.clear();
     this._clearAirstrikeDrones();
@@ -1289,6 +1327,9 @@ export class Game {
     r.score += earned;
     r.a += Math.max(0, Number(assists) || 0);
     r.objective += Math.max(0, Number(objective) || 0);
+    if (e === this.player) this.engagement?.contribution({
+      points: earned, assists, objective,
+    });
     // Human streak rewards use the exact same contribution values as the
     // scoreboard. Kills still matter, but assists and playing the objective
     // now advance the meter too. Bots do not call rewards, so don't maintain
@@ -1316,6 +1357,9 @@ export class Game {
   _syncPersistentStats() {
     const row = this.kd.get(this._kdKey(this.player));
     if (!row) return;
+    if (this.mode === 'client')
+      for (let i = row.k - this._statsSeen.k; i > 0; i--)
+        this.engagement?.combat('kill', 'other');
     for (let i = row.k - this._statsSeen.k; i > 0; i--) stats.addKill();
     for (let i = row.d - this._statsSeen.d; i > 0; i--) stats.addDeath();
     this._statsSeen = { k: row.k, d: row.d };
@@ -1750,6 +1794,7 @@ export class Game {
   }
 
   requestShoot(p, t) {
+    this._recordLocalAction(p, 'shoot');
     if (this.mode !== 'client') return this.fireHitscan(p, p.body.eye(), p.lookDir(), t);
     p.protT = 0; // firing drops spawn protection (the host drops its copy too)
     const from = p.body.eye(), dir = p.lookDir();
@@ -1777,6 +1822,7 @@ export class Game {
   // directly; a guest never touches its own _streak here at all, since
   // the host's copy (the RemotePlayer) is the only one that counts.
   requestAirstrike(p, x, z, yaw = p.yaw) {
+    this._recordLocalAction(p, 'airstrike');
     if (this.mode !== 'client') return this._confirmAirstrike(p, x, z, yaw);
     this._sendAction('strike', { x, z, yaw });
   }
@@ -1786,6 +1832,7 @@ export class Game {
   // a guest's own _overchargeT is never touched locally, only the host's
   // authoritative copy (its RemotePlayer) is what damage() ever checks.
   requestOvercharge(p) {
+    this._recordLocalAction(p, 'overcharge');
     if (this.mode !== 'client') return this._activateOvercharge(p);
     this._sendAction('overcharge');
   }
@@ -1794,15 +1841,18 @@ export class Game {
       this._lastWeaponActionSeq = this._sendAction('reload');
   }
   requestDig(p) {
+    this._recordLocalAction(p, 'dig');
     if (this.mode !== 'client') return this.playerDig(p);
     this._sendAction('dig', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
   requestPlace(p) {
+    this._recordLocalAction(p, 'place');
     if (this.mode !== 'client') return this.playerPlace(p);
     if (p.blocks <= 0) { sfx.click(); return; }
     this._sendAction('place', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
   requestNade(p) {
+    this._recordLocalAction(p, 'grenade');
     p.protT = 0; // throwing is firing, as far as spawn protection is concerned
     if (this.mode !== 'client') return this.throwGrenade(p, p.body.eye(), p.lookDir(), 13);
     this._sendAction('nade', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
@@ -1875,6 +1925,7 @@ export class Game {
   // ---------------- squad pings ----------------
   requestTeamPing(e = this.player) {
     if (!e?.alive || this.over) return;
+    this._recordLocalAction(e, 'ping');
     const d = arr(e.lookDir());
     if (this.mode === 'client') this.net?.send({ t: 'a', k: 'mark', d });
     else this._hostPlaceTeamPing(e, d);
@@ -1973,19 +2024,9 @@ export class Game {
   // ---------------- chat ----------------
   // Local echo is immediate; in a room the host is the relay (and the spam
   // filter), so a message reaches every screen exactly once.
-  // Gameplay-changing dev commands are host/solo only; /netstats is a local
-  // readout available to guests too. Checked before anything else, including
-  // the chat rate limit below, since these aren't real
-  // chat messages at all (never relayed, never worth rate-limiting the
-  // way spamming enter would be) and testing benefits from rapid
-  // iteration, not a 1.2s cooldown between each streak change. Never
-  // reaches a guest's own chat send path at all: theirs runs this exact
-  // same function, but their own this.mode is structurally 'client' on
-  // their own machine, so this branch can't fire for them regardless of
-  // what text they type — not gated behind a "secret" phrase (there's no
-  // such thing in unminified, fully-readable source), the only real
-  // boundary is "must be host or solo," which this.mode already
-  // guarantees on its own.
+  // Host/solo diagnostics and the harmless local /netstats readout are
+  // checked before the chat rate limit because they are never real chat
+  // messages and are never relayed.
   sendChat(text, scope) {
     // Network telemetry is local and harmless on guests too; gameplay state
     // commands remain host/solo-only as described above.
@@ -1999,36 +2040,10 @@ export class Game {
     else if (this.mode === 'host') this._hostRelayChat(null, p.team, text, scope);
   }
 
-  // Sets this.player's own state directly — for host/solo, this.player
-  // IS the authoritative copy the real activation flow already checks
-  // (KeyF -> requestOvercharge/requestAirstrike ->
-  // _activateOvercharge/_confirmAirstrike), unlike a guest's own local
-  // player object, which is never authoritative for anything. Feedback
-  // goes through hud.feed directly, not this.feed — this.feed broadcasts
-  // to every connected guest, and a quiet dev tool shouldn't announce
-  // itself to anyone but whoever's actually using it. Returns true if
-  // `text` was a recognized command (caller stops, never sends it as a
-  // real chat message); false otherwise, so ordinary chat is unaffected.
+  // Returns true if `text` was a recognized local diagnostic command, so
+  // the caller never forwards it as ordinary chat.
   _devCommand(text) {
     const t = text.trim();
-    const streakMatch = /^\/streak(?:\s+(-?\d+))?$/.exec(t);
-    if (streakMatch) {
-      this.player._streak = streakMatch[1] !== undefined
-        ? Math.min(AIRSTRIKE_COST, Math.max(0, parseInt(streakMatch[1], 10)))
-        : AIRSTRIKE_COST;
-      hud.feed(`DEV: momentum set to ${this.player._streak}`);
-      return true;
-    }
-    if (t === '/streakreset') {
-      this.player._streak = 0;
-      this.player._overchargeWindup = 0;
-      this.player._overchargeT = 0;
-      this.player._piloting = false;
-      this.player._fallingT = 0;
-      this.player._lingerT = 0;
-      hud.feed('DEV: streak/perk state cleared');
-      return true;
-    }
     if (t === '/botstats') {
       const s = this.botTelemetry();
       hud.feed(`BOTS: ${s.samples} active · ${s.averageThinkMs.toFixed(2)}ms avg · `
@@ -2071,6 +2086,31 @@ export class Game {
       strikes: this._pendingStrikes.length, editLog: this.editLog.length,
       respawnTimers: this.respawnTimers.size,
     };
+  }
+
+  engagementContext(source = 'resume') {
+    const humans = this.mode === 'client'
+      ? Math.max(1, this._rosterP?.size ?? 1) : this.remote.size + 1;
+    const bots = this.mode === 'client'
+      ? (this._rosterB?.size ?? this.bots.length) : this.bots.length;
+    return {
+      mode: this.gameMode, map: this.mapIndex, network: this.mode, source,
+      humans, bots, round: this._roundSerial,
+    };
+  }
+
+  beginFirstMinute() {
+    const p = this.player?.body?.pos;
+    if (!p) return false;
+    return this.firstMinuteGuide?.start({
+      mode: this.gameMode, matchSecond: this.matchElapsed, x: p.x, z: p.z,
+    }) ?? false;
+  }
+
+  _recordLocalAction(p, action) {
+    if (p !== this.player) return;
+    this.engagement?.action(action, this.matchElapsed);
+    this.firstMinuteGuide?.mark(action);
   }
 
   // Host side: show it here, then forward to everyone the message is for —
@@ -2240,6 +2280,12 @@ export class Game {
   onDeath(victim, killer) {
     const wasCarrier = !!victim.carrier;
     const deathCause = victim._deathCause;
+    if (deathCause === 'collapse') this.voxelStory?.recordCollapseKill();
+    const engagementCause = deathCause
+      ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
+    if (victim === this.player) this.engagement?.combat('death', engagementCause);
+    if (killer === this.player && killer !== victim)
+      this.engagement?.combat('kill', engagementCause);
     // Flag drops where the carrier fell (capture-the-flag only).
     if (this.flags && victim.carrier) {
       victim.carrier = false;
@@ -2322,7 +2368,9 @@ export class Game {
 
   applyEdit(x, y, z, v, who = null) {
     this.blockHits.delete(x + ',' + y + ',' + z);  // fresh block / cleared cell: full HP
+    const before = this.world.get(x, y, z);
     this.world.set(x, y, z, v);
+    this.voxelStory?.recordEdit(before, this.world.get(x, y, z));
     this.navRevision++;
     if (this.mode === 'host') {
       this._appendWorldEdit([x, y, z, v]);
@@ -2359,6 +2407,7 @@ export class Game {
       return { x, y, z, v: this.world.get(x, y, z) };
     });
     for (const c of cells) this.world.set(c.x, c.y, c.z, 0);
+    this.voxelStory?.recordCollapse(cells.length);
     this.effects.blockBurst(cells.filter((_, i) => i % Math.ceil(cells.length / 48) === 0));
     sfx.crumble();
     for (const e of this.entities()) {
@@ -2841,6 +2890,7 @@ export class Game {
     this.effects.explode(pos);
     sfx.at(sound, pos);
     const removed = this.world.carve(Math.floor(x), Math.floor(y), Math.floor(z), r);
+    this.voxelStory?.recordBlast(removed.length, { airstrike: sound === 'airstrikeImpact' });
     this.effects.blockBurst(removed);
     this.effects.addShake(Math.max(0, 0.5 - pos.distanceTo(this.player.body.pos) * 0.012));
     this.pingIntel(pos, owner?.team); // explosions echo on the intel feed
@@ -3070,13 +3120,26 @@ export class Game {
     hud.clock(this);
   }
 
-  _end(winner) {
-    if (this.over) return;
+  _end(winner, authoritativeStory = null) {
+    if (this.over) {
+      // A snapshot can announce game-over just ahead of the reliable end
+      // event. Let that later event replace the locally reconstructed story
+      // with the host's complete bounded counters.
+      if (this.voxelStory && authoritativeStory)
+        hud.voxelStory(voxelBattleStory(authoritativeStory));
+      return;
+    }
     this._broadcastScoreboard(true);
     this.over = true;
     this.winner = winner;
     this._rematchVotes.clear();
-    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'end', winner });
+    const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
+    const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
+    if (this.mode === 'host') {
+      const event = { t: 'e', k: 'end', winner };
+      if (storyMetrics) event.story = storyMetrics;
+      this.net.broadcast(event);
+    }
     const report = buildMatchReport(this._kdKey(this.player), this.kd.entries());
     const recordUpdate = stats.finishMatch(winner === this.player.team,
       this.gameMode, report.local);
@@ -3085,6 +3148,11 @@ export class Game {
     hud.statsHide(); // the summary board replaces the overlay
     $('hud').classList.remove('on');
     const won = winner === this.player.team;
+    this.engagement?.finishMatch({
+      outcome: 'complete', won, duration: this.matchElapsed, overtime: this.overtime,
+      scoreMargin: Math.abs((this.captures.green ?? 0) - (this.captures.blue ?? 0)),
+      points: report.local.score, objective: report.local.objective, assists: report.local.a,
+    });
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
     $('endTitle').style.color = won ? '#8fd98f' : '#e74c3c';
     const next = MAPS[this._nextMap()].name;
@@ -3094,6 +3162,7 @@ export class Game {
     $('endDetail').textContent = `${winner.toUpperCase()} ${score} · ${MAPS[this.mapIndex].name}`
       + ` · ${holdClock(this.matchElapsed)}`;
     hud.matchReport(this, report, recordUpdate);
+    hud.voxelStory(story);
     $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
     $('endNote').textContent = this.mode === 'client'
       ? `next up: ${next} · waiting for host`
@@ -3155,6 +3224,7 @@ export class Game {
 
   requestRematch() {
     if (!this.over) return;
+    this.engagement?.record('rematch', { action: 'vote' });
     if (this.mode === 'client') {
       this.net?.send({ t: 'a', k: 'rematch' });
       return;
@@ -3957,14 +4027,21 @@ export class Game {
   }
 
   _applyWorldEntry(e) {
-    if (e[0] === 'b') this.world.carve(Math.floor(e[1]), Math.floor(e[2]), Math.floor(e[3]),
-      Math.min(Math.max(e[4] ?? 0, 0), 6));
-    else this.world.set(e[0], e[1], e[2], e[3]);
+    if (e[0] === 'b') {
+      const removed = this.world.carve(Math.floor(e[1]), Math.floor(e[2]), Math.floor(e[3]),
+        Math.min(Math.max(e[4] ?? 0, 0), 6));
+      this.voxelStory?.recordBlast(removed.length);
+    } else {
+      const before = this.world.get(e[0], e[1], e[2]);
+      this.world.set(e[0], e[1], e[2], e[3]);
+      this.voxelStory?.recordEdit(before, this.world.get(e[0], e[1], e[2]));
+    }
   }
 
   _replayEdits(log) {
     this.editLog = [];
     this._worldHash = WORLD_HASH_SEED;
+    this.voxelStory?.reset();
     for (const e of log ?? []) {
       this._applyWorldEntry(e);
       this._appendWorldEdit(e);
@@ -4250,6 +4327,7 @@ export class Game {
         // screen but the one that caused it.
         const before = this.world.get(d.x, d.y, d.z);
         this.world.set(d.x, d.y, d.z, d.v);
+        this.voxelStory?.recordEdit(before, this.world.get(d.x, d.y, d.z));
         this._appendWorldEdit([d.x, d.y, d.z, d.v]); // migration: late joiners get it from us
         if (!d.v && before) this.effects.blockBurst([{ x: d.x, y: d.y, z: d.z, v: before }]);
         break;
@@ -4304,6 +4382,7 @@ export class Game {
           cells.push({ x, y, z, v });
         }
         if (cells.length) {
+          this.voxelStory?.recordCollapse(cells.length);
           this.effects.blockBurst(cells.filter((_, i) => i % Math.ceil(cells.length / 48) === 0));
           sfx.crumble();
         }
@@ -4359,7 +4438,7 @@ export class Game {
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
-      case 'end': this._end(d.winner); break;
+      case 'end': this._end(d.winner, d.story); break;
       case 'restart':
         this.rebuild(d.seed, d.map);
         this.onRestart?.(MAPS[d.map].name);
@@ -4370,6 +4449,7 @@ export class Game {
   }
 
   _clientDied(redeploy) {
+    this.engagement?.combat('death', 'other');
     this.player.alive = false;
     // A guest's own death never goes through Player.die() at all — the
     // host tells us we're dead over the wire and we land here instead.
@@ -4525,6 +4605,14 @@ export class Game {
     hud.fieldStation(this);
     hud.ping(this);
     hud.streakStatus(this.player);
+    hud.firstMinute(this.firstMinuteGuide?.update({
+      matchSecond: this.matchElapsed,
+      x: this.player.body.pos.x,
+      z: this.player.body.pos.z,
+      alive: this.player.alive && !this.player.aiming && !this.player._piloting
+        && this.player._fallingT <= 0,
+      over: this.over,
+    }));
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost
     // to a pointer-lock hiccup or a window switch, the overlay can never
     // strand itself over the screen. Runs while dead too (TAB works there).

@@ -14,12 +14,17 @@ import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getColorMode, setColorMode } from './settings.js';
 import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
+import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const engagementFeatures = parseEngagementFeatures(location.search);
+const engagement = new EngagementTracker();
+engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
   protocol: PROTOCOL_VERSION, startedAt: new Date().toISOString(), faults: [],
-  metrics: null, soakCycles: 0,
+  metrics: null, soakCycles: 0, features: engagementFeatures,
+  engagement: engagement.snapshot(),
 };
 const rememberFault = (kind, value) => {
   diagnostics.faults.push({ kind, at: new Date().toISOString(),
@@ -48,7 +53,7 @@ const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0
 scene.add(camera); // so the viewmodel renders
 
 // Boots as a solo game — it doubles as the menu's orbiting backdrop.
-const game = new Game(scene, camera, renderer.domElement);
+const game = new Game(scene, camera, renderer.domElement, { engagement, engagementFeatures });
 window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
 game.player.vmRoot.visible = false; // hidden until first deploy
@@ -107,7 +112,11 @@ scene.add(makeSun());
 let playing = false;
 let net = null;
 let roomCode = null;
-window.addEventListener('pagehide', e => { if (!e.persisted) net?.destroy(); });
+window.addEventListener('pagehide', e => {
+  if (e.persisted) return;
+  engagement.abandon('pagehide');
+  net?.destroy();
+});
 const CALLSIGNS = ['Ace', 'Deuce', 'Trey', 'Joker', 'King', 'Queen', 'Jack', 'Ten'];
 
 function rawName() {
@@ -167,9 +176,18 @@ function showPlay(label) {
 }
 
 let sessionLive = false; // a match was entered: pause shows the slim screen
+let engagementSource = 'solo';
 function setPlaying(v) {
   playing = v;
-  if (v) sessionLive = true;
+  if (v) {
+    sessionLive = true;
+    // A client can obtain pointer lock while its welcome is still in flight.
+    // Wait for a roster identity before counting that as a playable match.
+    if (game.mode !== 'client' || game.myId) {
+      const started = engagement.beginMatch(game.engagementContext(engagementSource));
+      if (started) game.beginFirstMinute();
+    }
+  } else if (engagement.pauseMatch('menu')) engagementSource = 'resume';
   // Dropping in with the callsign box still focused (a click on a
   // non-focusable lobby link doesn't blur it in every browser) leaves the
   // hidden input eating every WASD press — a frozen soldier with a working
@@ -203,6 +221,7 @@ $('playBtn').addEventListener('click', () => {
   if (netDead) return location.reload();
   if (matchmaking) return;
   if (game.mode === 'client' && !game.myId) return; // still connecting
+  engagement.record('lobby_action', { action: 'deploy' });
   deploy();
 });
 
@@ -270,6 +289,7 @@ function abandonedNotice() {
 
 function failMigration(guest) {
   guest?.destroy();
+  engagement.abandon('network');
   netDead = true;
   $('end').classList.add('hidden'); // a dead room ends the rotation wait too
   status('connection lost — the host left, and nobody could pick up the baton');
@@ -279,6 +299,7 @@ function failMigration(guest) {
 
 function rejectClientSession(n, message) {
   if (net !== n) return;
+  engagement.abandon('network');
   n.handlers.onClose = null;
   game.onHostSilent = null;
   game.onVersion = null;
@@ -682,6 +703,8 @@ $('hostBtn').addEventListener('click', () => {
   if (net || matchmaking) return;
   migrationGen = 0; // a fresh room starts the baton count over
   if (!requireName()) return;
+  engagementSource = 'host';
+  engagement.record('lobby_action', { action: 'host' });
   initAudio();
   game.mode = 'host';
   game.player.name = callsign();
@@ -705,6 +728,8 @@ $('joinBtn').addEventListener('click', () => {
   if (!/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(code)) return status('enter a valid room code');
   migrationGen = 0;
   if (!requireName()) return;
+  engagementSource = 'join';
+  engagement.record('lobby_action', { action: 'join' });
   initAudio();
   game.mode = 'client';
   game.player.name = callsign();
@@ -746,6 +771,8 @@ function bailToMenu() {
 $('quickBtn').addEventListener('click', async () => {
   if (net || matchmaking) return;
   if (!requireName()) return;
+  engagementSource = 'quick';
+  engagement.record('lobby_action', { action: 'quick' });
   matchmaking = true;
   searchCanceled = false;
   initAudio();
@@ -858,6 +885,8 @@ async function joinFromBrowser(room) {
   if (net || scanning) return;
   const guest = browseGuest; browseGuest = null;
   if (!guest) { scanRooms(); return; } // stale rows: rescan, pick again
+  engagementSource = 'browse';
+  engagement.record('lobby_action', { action: 'browse_join' });
   initAudio();
   game.player.name = callsign();
   const lock = renderer.domElement.requestPointerLock(); // gesture-valid only now
@@ -891,6 +920,8 @@ async function joinFromBrowser(room) {
 $('browseBtn').addEventListener('click', () => {
   if (net || matchmaking || scanning) return;
   if (!requireName()) return;
+  engagementSource = 'browse';
+  engagement.record('lobby_action', { action: 'browse' });
   initAudio();
   $('menu').classList.add('hidden');
   browserEl.classList.remove('hidden');
@@ -919,6 +950,7 @@ if (/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(invitedCode) && !params.get('mp')) {
 // click anyway). The old PLAY AGAIN reloaded the page, which for the host
 // tore the whole room down mid-rotation.
 game.onRestart = mapName => {
+  engagementSource = 'rotation';
   $('end').classList.add('hidden');
   $('pausedTitle').textContent = '— MATCH OVER —';
   if (playing) setPlaying(false);
@@ -1086,6 +1118,7 @@ function frame() {
     game.runtimeHealth = report;
     diagnostics.metrics = { ...report, ...game.runtimeCounts(), resources,
       resourceDrift: resourceBaseline ? resourceDrift(resourceBaseline, resources) : null };
+    diagnostics.engagement = engagement.snapshot();
     if (perfOn && perfCount) {
       const sorted = Array.from(perfSamples.slice(0, perfCount)).sort((a, b) => a - b);
       const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
@@ -1242,6 +1275,11 @@ if (reportQa) {
     else Object.assign(row, { score: Math.max(80, 600 - i * 55),
       k: Math.max(0, 5 - i), d: 2 + i % 4, a: i % 3, objective: Math.max(0, 4 - i) });
     i++;
+  }
+  if (game.voxelStory) {
+    game.voxelStory.recordBlast(18, { airstrike: true });
+    game.voxelStory.recordCollapse(34);
+    game.voxelStory.recordCollapseKill();
   }
   game._end('green');
 }

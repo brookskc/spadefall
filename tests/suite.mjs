@@ -46,6 +46,11 @@ import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
 import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
 import { masteryProgress } from '../src/mastery.js';
 import { rematchVotesNeeded, validPingDirection } from '../src/social.js';
+import { EngagementTracker, parseEngagementFeatures,
+  sanitizeEngagementEvent } from '../src/engagement.js';
+import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
+import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
+  voxelBattleStory } from '../src/voxel-stories.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -774,6 +779,167 @@ function socialProgressionTests() {
     masteryProgress(4900).remaining === 100 && masteryProgress(5000).tier.name === 'VETERAN');
 }
 
+function engagementFoundationTests() {
+  group('phase zero: bounded local engagement diagnostics and dormant feature flags');
+  const defaults = parseEngagementFeatures('');
+  const selected = parseEngagementFeatures(
+    '?features=FIRSTMINUTE,deathRecap&features=operations,notAFeature');
+  ok('engagement features default off and only known query flags opt in',
+    Object.values(defaults).every(value => value === false)
+      && selected.firstMinute && selected.deathRecap && selected.operations
+      && !('notAFeature' in selected));
+
+  const clean = sanitizeEngagementEvent('match_start', {
+    mode: 'ctf', map: 2, network: 'host', source: 'quick', humans: 4, bots: 6,
+    round: 3, name: 'private callsign', chat: 'private chat', roomCode: 'ABCD',
+    x: 42, z: 19,
+  });
+  ok('event sanitizer drops identity, chat, room, and position fields',
+    clean.mode === 'ctf' && clean.map === 2 && clean.humans === 4
+      && !('name' in clean) && !('chat' in clean) && !('roomCode' in clean)
+      && !('x' in clean) && !('z' in clean));
+  ok('unknown event types are refused instead of accepting free-form data',
+    sanitizeEngagementEvent('custom_event', { anything: 'goes' }) === null);
+
+  let now = 0;
+  const tracker = new EngagementTracker({ now: () => now,
+    eventCapacity: 16, matchCapacity: 4 });
+  const context = { mode: 'koth', map: 1, network: 'client', source: 'browse',
+    humans: 8, bots: 0, round: 7 };
+  ok('one round start is counted once across duplicate play-state updates',
+    tracker.beginMatch(context) && !tracker.beginMatch(context)
+      && tracker.snapshot().counts.match_start === 1);
+  now = 1000;
+  tracker.action('shoot', 2.5);
+  tracker.action('dig', 3);
+  tracker.contribution({ points: 100, objective: 1, assists: 1 });
+  tracker.combat('kill', 'weapon');
+  tracker.combat('death', 'grenade');
+  tracker.pauseMatch('menu');
+  now = 1500;
+  tracker.beginMatch(context);
+  const live = tracker.snapshot();
+  ok('first meaningful action is immutable while aggregate actions continue',
+    live.active.firstAction.action === 'shoot'
+      && live.active.firstAction.matchSecond === 2.5
+      && live.active.actions.shoot === 1 && live.active.actions.dig === 1
+      && live.active.actions.objective === 1);
+  ok('pause and resume stay within one match record',
+    live.counts.match_pause === 1 && live.counts.match_resume === 1
+      && live.counts.match_start === 1);
+  const finished = tracker.finishMatch({ outcome: 'complete', won: true,
+    duration: 90, overtime: true, scoreMargin: 4,
+    points: 250, objective: 4, assists: 2 });
+  ok('authoritative finish totals replace partial local contribution observations',
+    finished.contribution.points === 250 && finished.contribution.objective === 4
+      && finished.contribution.assists === 2 && finished.kills === 1
+      && finished.deaths === 1 && finished.duration === 90);
+
+  const bounded = new EngagementTracker({ now: () => now,
+    eventCapacity: 16, matchCapacity: 4 });
+  for (let i = 0; i < 24; i++) bounded.record('page_ready', { protocol: i });
+  for (let round = 0; round < 6; round++) {
+    bounded.beginMatch({ ...context, round });
+    bounded.finishMatch({ duration: round + 1 });
+  }
+  const boundedSnapshot = bounded.snapshot();
+  ok('recent event and match histories stay at their fixed memory bounds',
+    boundedSnapshot.events.length === 16 && boundedSnapshot.matches.length === 4
+      && boundedSnapshot.counts.page_ready === 24);
+  boundedSnapshot.matches[0].actions.injected = 1;
+  ok('diagnostic snapshots are defensive copies',
+    bounded.snapshot().matches[0].actions.injected === undefined);
+}
+
+function firstMinuteTests() {
+  group('phase one: optional first-minute field orientation');
+  ok('each mode receives a direct objective briefing',
+    firstMinuteObjective('ctf').includes('FLAG')
+      && firstMinuteObjective('tdm').includes('OUTSCORE')
+      && firstMinuteObjective('koth').includes('HILL'));
+
+  const guide = new FirstMinuteGuide();
+  ok('orientation starts once per page and never restarts on another round',
+    guide.start({ mode: 'ctf', matchSecond: 100, x: 10, z: 10 })
+      && !guide.start({ mode: 'tdm', matchSecond: 0, x: 0, z: 0 }));
+  guide.mark('shoot'); // natural play can satisfy steps before their cue appears
+  let view = guide.update({ matchSecond: 101, x: 11, z: 10 });
+  ok('sub-threshold movement keeps the first actionable cue visible',
+    view.visible && view.prompt === 'MOVE TO CONTACT' && !view.progress.move
+      && view.progress.fire);
+  view = guide.update({ matchSecond: 102, x: 13, z: 10 });
+  ok('completed actions are skipped rather than forcing a rigid tutorial order',
+    view.progress.move && view.progress.fire && view.prompt === 'RESHAPE THE FIGHT');
+  guide.mark('place');
+  view = guide.update({ matchSecond: 103, x: 13, z: 10 });
+  ok('either digging or building satisfies the signature voxel interaction',
+    view.progress.terrain && view.prompt === 'MARK FOR YOUR SQUAD');
+  ok('unknown inputs cannot advance the guide', !guide.mark('open-menu'));
+  guide.mark('ping');
+  view = guide.update({ matchSecond: 104, x: 13, z: 10 });
+  ok('all fundamentals produce a short field-ready confirmation',
+    view.complete && view.prompt === 'FIELD READY');
+  view = guide.update({ matchSecond: 108, x: 13, z: 10 });
+  ok('the completed card clears itself after four seconds', !view.visible && !guide.active);
+
+  const joinedLate = new FirstMinuteGuide();
+  joinedLate.start({ mode: 'koth', matchSecond: 300, x: 0, z: 0 });
+  const hiddenWhileDead = joinedLate.update({ matchSecond: 320, x: 0, z: 0, alive: false });
+  const backAfterSpawn = joinedLate.update({ matchSecond: 321, x: 0, z: 0, alive: true });
+  ok('death hides orientation without discarding remaining first-minute guidance',
+    !hiddenWhileDead.visible && backAfterSpawn.visible);
+  ok('the timeout is measured from deployment, even in a match joined late',
+    joinedLate.update({ matchSecond: 359, x: 0, z: 0 }).visible
+      && !joinedLate.update({ matchSecond: 360, x: 0, z: 0 }).visible);
+}
+
+function voxelStoryTests() {
+  group('phase two: factual voxel battlefield stories');
+  const tracker = new VoxelStoryTracker();
+  ok('an unchanged or barely touched map does not manufacture a battle story',
+    tracker.story() === null && voxelBattleStory({ built: 2, removed: 3 }) === null);
+  ok('successful edit observations distinguish construction, removal, and no-ops',
+    tracker.recordEdit(0, BLOCK.GREEN) && tracker.recordEdit(BLOCK.DIRT, 0)
+      && !tracker.recordEdit(BLOCK.STONE, BLOCK.STONE)
+      && tracker.metrics().built === 1 && tracker.metrics().removed === 1);
+  tracker.recordBlast(9, { airstrike: true });
+  ok('blast metrics count actual removed voxels and airstrikes without free-form data',
+    tracker.metrics().blasts === 1 && tracker.metrics().blastRemoved === 9
+      && tracker.metrics().airstrikes === 1 && tracker.metrics().removed === 10);
+  const airstrike = tracker.story();
+  ok('a terrain-changing airstrike earns a specific fixed-copy highlight',
+    airstrike.kind === 'airstrike' && airstrike.title === 'AIRSTRIKE SCAR'
+      && airstrike.detail.includes('9 VOXELS'));
+  tracker.recordCollapse(24);
+  const collapse = tracker.story();
+  ok('a major structural collapse outranks a generic crater story',
+    collapse.kind === 'collapse' && collapse.detail.includes('24 VOXELS'));
+  tracker.recordCollapseKill();
+  const terrainKill = tracker.story();
+  ok('a collapse kill is the highest-priority terrain-authored memory',
+    terrainKill.kind === 'collapse-kill' && terrainKill.detail.includes('1 SOLDIER'));
+
+  const rewritten = voxelBattleStory({ built: 22, removed: 31 });
+  ok('balanced construction and destruction produce a battlefield rewrite story',
+    rewritten.kind === 'rewritten' && rewritten.detail === '22 BUILT · 31 REMOVED');
+  const metrics = tracker.metrics();
+  ok('wire metrics are complete bounded integers and pass the end-event trust boundary',
+    validVoxelStoryMetrics(metrics)
+      && validServerMessage({ t: 'e', k: 'end', winner: 'green', story: metrics }));
+  ok('malformed or oversized story payloads are rejected at the trust boundary',
+    !validVoxelStoryMetrics({ built: 1 })
+      && !validServerMessage({ t: 'e', k: 'end', winner: 'green',
+        story: { ...metrics, removed: -1 } })
+      && !validServerMessage({ t: 'e', k: 'end', winner: 'green',
+        story: { ...metrics, built: 1_000_001 } }));
+  ok('normalization clamps untrusted counters before fixed-copy selection',
+    normalizeVoxelStoryMetrics({ built: -8, removed: 2e9 }).built === 0
+      && normalizeVoxelStoryMetrics({ built: -8, removed: 2e9 }).removed === 1_000_000);
+  tracker.reset();
+  ok('round reset clears every story counter',
+    Object.values(tracker.metrics()).every(value => value === 0));
+}
+
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
   group('damage direction: source bearing to screen edge');
@@ -1429,6 +1595,9 @@ export async function run() {
   fieldStationTests();
   matchReportTests();
   socialProgressionTests();
+  engagementFoundationTests();
+  firstMinuteTests();
+  voxelStoryTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

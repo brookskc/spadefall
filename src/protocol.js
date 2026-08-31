@@ -2,6 +2,7 @@
 import { finiteVector, isRecord, parseSpawnRow } from './multiplayer.js';
 import { TEAM_PING_KINDS, validPingDirection } from './social.js';
 import { SECURED_ACTIONS } from './security.js';
+import { validVoxelStoryMetrics } from './voxel-stories.js';
 
 export const PROTOCOL_VERSION = 3;
 
@@ -153,7 +154,8 @@ function validEvent(d) {
       && d.rows.every(r => Array.isArray(r) && r.length >= 5 && shortString(String(r[0] ?? ''), 16)
         && shortString(String(r[1] ?? ''), 64) && team(r[2]) && finite(r[3]) && finite(r[4])
         && r.slice(5, 8).every(finite));
-    case 'end': return team(d.winner);
+    case 'end': return team(d.winner)
+      && (d.story === undefined || validVoxelStoryMetrics(d.story));
     case 'restart': return finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6;
     default: return false;
   }

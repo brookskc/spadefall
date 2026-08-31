@@ -3,6 +3,7 @@ import { Avatar } from './avatar.js';
 import { Body, STAND_HEIGHT } from './entities.js';
 import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
+import { TOOLS } from './player.js';
 
 export class RemotePlayer {
   constructor(game, id, name, team) {
@@ -25,6 +26,9 @@ export class RemotePlayer {
     this.nades = 3;
     this.nadeRegen = 0;
     this._actT = {};
+    this.ammo = TOOLS.map(t => t.mag ?? 0);
+    this._reloadUntil = 0;
+    this._lastActionSeq = 0;
     this.avatar = new Avatar(game.scene, team, name, team === game.player.team);
     this.avatar.push(p.x, p.y, p.z, this.yaw);
   }
@@ -36,6 +40,7 @@ export class RemotePlayer {
     this._overchargeWindup = 0; this._overchargeT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
+    this._reloadUntil = 0;
     this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);
     const redeploy = this.game.onDeath(this, killer);
     this.game.net.sendTo(this.id, { t: 'e', k: 'died', rt: redeploy });
@@ -59,6 +64,8 @@ export class RemotePlayer {
     this.gunClass = this._pendingClass;
     this.tool = this.gunClass;
     this._actT = {};
+    this.ammo = TOOLS.map(t => t.mag ?? 0);
+    this._reloadUntil = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this._mkCount = 0; this._mkT = null;

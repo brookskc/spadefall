@@ -300,6 +300,7 @@ export class Player {
     const spec = TOOLS[this.tool];
     this.reloading = spec.reload;
     this._reloadStage = 1;
+    this.game.requestReload(this);
     sfx.reloadStart(spec.key);
     this.game.hud.refreshTool(this);
   }

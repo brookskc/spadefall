@@ -13,11 +13,17 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '../src/game.js';
 import { Avatar } from '../src/avatar.js';
-import { placedBlockColor } from '../src/player.js';
+import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
   parseSpawnRow, protectedBuildReason, spawnRow, validateMovementReport } from '../src/multiplayer.js';
-import { validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, shouldSend } from '../src/net.js';
+import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
+import { allowInbound, Net, shouldSend, wireBytes } from '../src/net.js';
+import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
+  worldEventDisposition, worldLogHash } from '../src/network-sync.js';
+import { actionSequenceDisposition, aimYawDelta, authorizeReload,
+  authorizeWeaponFire, recordIntegrityViolation, settleReload } from '../src/security.js';
+import { RuntimeHealth, evaluateReleaseBudgets, percentile,
+  resourceDrift } from '../src/runtime-health.js';
 import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
@@ -344,7 +350,7 @@ function multiplayerRuleTests() {
   ok('action direction is normalized at the trust boundary',
     Math.abs(dir[0] - 0.6) < 1e-9 && Math.abs(dir[2] - 0.8) < 1e-9);
   ok('transported AUTO team preferences are accepted',
-    validClientMessage({ t: 'hi', name: 'Ada', team: null }));
+    validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada', team: null }));
   ok('null client messages are rejected without dispatch', !validClientMessage(null));
   ok('malformed state reports are rejected', !validClientMessage({ t: 's', x: NaN }));
   ok('oversized collapse events are rejected', !validServerMessage({
@@ -784,8 +790,8 @@ function airstrikeDroneTests() {
   disposeObject(mq9.group);
 
   ok('strike requests require a finite captured yaw',
-    validClientMessage({ t: 'a', k: 'strike', x: 100, z: 120, yaw: 0 })
-      && !validClientMessage({ t: 'a', k: 'strike', x: 100, z: 120 }));
+    validClientMessage({ t: 'a', k: 'strike', n: 1, x: 100, z: 120, yaw: 0 })
+      && !validClientMessage({ t: 'a', k: 'strike', n: 2, x: 100, z: 120 }));
   ok('airstrike telegraph metadata passes the server trust boundary', validServerMessage({
     t: 'e', k: 'telegraph', id: 7, x: 100, y: 20, z: 120,
     yaw: 0, remaining: 3, owner: 2,
@@ -1181,9 +1187,201 @@ function wireTests() {
     `${fullP.size}/${truthP.size} players, ${fullB.size}/${truthB.size} bots`);
 }
 
+function networkSyncTests() {
+  group('phase twelve: ordered snapshots, terrain repair, and packet budgets');
+  ok('a client starts only from a self-contained checkpoint',
+    snapshotDisposition(null, 1, false).resync === true
+      && snapshotDisposition(null, 1, true).accept === true);
+  ok('duplicate and out-of-order state cannot roll a replica backward',
+    snapshotDisposition(8, 8, false).reason === 'stale'
+      && snapshotDisposition(8, 7, true).reason === 'stale');
+  ok('a missing delta requests repair while a later full packet heals it',
+    snapshotDisposition(8, 10, false).resync === true
+      && snapshotDisposition(8, 10, true).accept === true);
+
+  const log = [[10, 11, 12, 0], ['b', 20.5, 7, 9.25, 2.4], [1, 2, 3, 4]];
+  let rolling = WORLD_HASH_SEED;
+  for (const e of log) rolling = advanceWorldHash(rolling, e);
+  ok('incremental and from-scratch terrain digests agree', rolling === worldLogHash(log));
+  ok('terrain digest changes when an edit changes',
+    worldLogHash(log) !== worldLogHash([[10, 11, 12, 1], ...log.slice(1)]));
+  ok('world-event revisions accept exact appends and detect gaps',
+    worldEventDisposition(4, 7, 3).accept
+      && worldEventDisposition(4, 8, 3).resync);
+  ok('duplicate world edits are idempotently rejected',
+    worldEventDisposition(7, 7, 1).reason === 'stale');
+
+  const packets = Array.from({ length: 20 }, (_, q) => ({ q: q + 1 }));
+  const impairedA = impairPackets(packets,
+    { seed: 99, dropRate: 0.2, duplicateRate: 0.25, reorderWindow: 4 });
+  const impairedB = impairPackets(packets,
+    { seed: 99, dropRate: 0.2, duplicateRate: 0.25, reorderWindow: 4 });
+  ok('packet impairment is deterministic for reproducible soak failures',
+    JSON.stringify(impairedA) === JSON.stringify(impairedB));
+  ok('the impairment harness exercises loss, duplication, or reordering',
+    JSON.stringify(impairedA) !== JSON.stringify(packets));
+
+  // Two independent client replicas: B receives every delta; A loses q2,
+  // refuses unsafe q3, then converges through q4's full checkpoint.
+  const full = row => ({ t: 's', p: [row], b: [], c: [0, 0], g: [],
+    q: 1, full: 1, wr: 0, wh: WORLD_HASH_SEED });
+  const row1 = [0, qx(10), qy(4), qx(10), qa(0), 100, 1, 0, 0, 50, 0, 3];
+  const row2 = [0, qx(12), qy(4), qx(10), qa(0), 100, 1, 0, 0, 50, 0, 3];
+  const row3 = [0, qx(14), qy(4), qx(10), qa(0), 95, 1, 0, 0, 50, 0, 3];
+  const aP = new Map(), aB = new Map(), bP = new Map(), bB = new Map();
+  mergeSnapshot(aP, aB, full(row1)); mergeSnapshot(bP, bB, full(row1));
+  mergeSnapshot(bP, bB, { ...full(row2), q: 2, full: 0 });
+  const lost = snapshotDisposition(1, 3, false);
+  if (snapshotDisposition(2, 3, false).accept)
+    mergeSnapshot(bP, bB, { ...full(row3), q: 3, full: 0 });
+  if (lost.accept) mergeSnapshot(aP, aB, { ...full(row3), q: 3, full: 0 });
+  if (snapshotDisposition(1, 4, true).accept) {
+    aP.clear(); aB.clear(); mergeSnapshot(aP, aB, { ...full(row3), q: 4 });
+  }
+  ok('two-client loss harness converges through a full checkpoint',
+    aP.get(0)[0] === bP.get(0)[0] && aP.get(0)[4] === bP.get(0)[4]);
+
+  ok('wire-byte accounting measures UTF-8 payloads',
+    wireBytes({ t: 'e', text: 'voxel ★' }) > 20);
+  const net = new Net();
+  let sent = 0;
+  net.conns = new Map([['p', { open: true, dataChannel: { bufferedAmount: 32 }, send: () => sent++ }]]);
+  net.sendTo('p', { t: 'e', k: 'hit' });
+  const stats = net.stats(net.telemetry.startedAt + 1000);
+  ok('network telemetry records packets, bytes, rate, and queue depth',
+    sent === 1 && stats.sentPackets === 1 && stats.sentBytes > 0
+      && Math.abs(stats.sentBytesPerSecond - stats.sentBytes) < 0.001
+      && stats.peakBuffered === 32);
+  ok('bounded world-sync payload passes the server trust boundary',
+    validServerMessage({ t: 'sync', seed: 1, map: 0, log, wr: log.length,
+      wh: worldLogHash(log) }));
+  ok('world-sync revision must match its payload exactly',
+    !validServerMessage({ t: 'sync', seed: 1, map: 0, log, wr: log.length + 1,
+      wh: worldLogHash(log) }));
+}
+
+function securityPhaseTests() {
+  group('phase thirteen: host authority and measured anti-cheat');
+  ok('combat action sequences accept monotonic input and reject replay',
+    actionSequenceDisposition(4, 5).accept
+      && actionSequenceDisposition(5, 5).reason === 'replay'
+      && actionSequenceDisposition(5, 4).reason === 'replay');
+  ok('sequence gaps remain recoverable without accepting an old action',
+    actionSequenceDisposition(5, 8).accept
+      && actionSequenceDisposition(5, 8).reason === 'gap');
+  ok('secured actions require a bounded sequence number at the protocol edge',
+    validClientMessage({ t: 'a', k: 'reload', n: 1 })
+      && !validClientMessage({ t: 'a', k: 'reload' })
+      && !validClientMessage({ t: 'a', k: 'shoot', n: 0, d: [1, 0, 0] }));
+  ok('room handshakes require the current protocol generation',
+    validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada' })
+      && !validClientMessage({ t: 'hi', v: PROTOCOL_VERSION - 1, name: 'Ada' })
+      && validServerMessage({ t: 'version', v: PROTOCOL_VERSION }));
+
+  const rifle = TOOLS[0];
+  let weapon = { ammo: 2, reloadUntil: 0, lastShotAt: -Infinity };
+  const first = authorizeWeaponFire(weapon, rifle, 1);
+  const tooFast = authorizeWeaponFire(first.state, rifle, 1.05);
+  const second = authorizeWeaponFire(first.state, rifle, 2);
+  ok('host weapon authority consumes ammunition and enforces cadence',
+    first.ok && first.state.ammo === 1 && tooFast.reason === 'cadence'
+      && second.ok && second.state.ammo === 0);
+  ok('an empty authoritative magazine cannot create damage',
+    authorizeWeaponFire(second.state, rifle, 3).reason === 'empty');
+  const loading = authorizeReload(second.state, rifle, 3);
+  ok('reload completion is host-timed rather than client-declared', loading.ok
+    && settleReload(loading.state, rifle, 3.5).ammo === 0
+    && settleReload(loading.state, rifle, 3 + rifle.reload).ammo === rifle.mag);
+
+  ok('body-facing validation permits real aim and catches a backwards first shot',
+    aimYawDelta(-Math.PI / 2, [1, 0, 0]) < 1e-9
+      && aimYawDelta(-Math.PI / 2, [-1, 0, 0]) > 3);
+  let integrity = null;
+  integrity = recordIntegrityViolation(integrity, 'lag-spike', 2, 0);
+  const cooled = recordIntegrityViolation(integrity, 'late-packet', 0.5, 10);
+  ok('isolated violations decay and never cause a false-positive disconnect',
+    integrity.action !== 'disconnect' && cooled.score < integrity.score);
+  let sustained = null;
+  for (let i = 0; i < 12; i++)
+    sustained = recordIntegrityViolation(sustained, 'impossible-move', 2, i * 0.01);
+  ok('sustained impossible input reaches the disconnect threshold',
+    sustained.action === 'disconnect' && sustained.total === 12);
+
+  const securedRow = [0, qx(10), qy(4), qx(10), qa(0), 100, 1, 0, 0, 50, 0, 3, 7, 900, 5];
+  const p = new Map(), b = new Map();
+  mergeSnapshot(p, b, { p: [securedRow], b: [] });
+  ok('authoritative ammo, reload time, and class survive snapshot reconstruction',
+    p.get(0)[11] === 7 && p.get(0)[12] === 900 && p.get(0)[13] === 5);
+}
+
+function releasePhaseTests() {
+  group('phase fourteen: release budgets, lifecycle, and ten-client soak');
+  ok('runtime percentiles are stable and ignore non-finite samples',
+    percentile([5, 10, 15, NaN, 20], 0.95) === 15);
+  const healthy = evaluateReleaseBudgets({ frameP95Ms: 16, longFrameRate: 0.01,
+    drawCalls: 300, triangles: 300000, particles: 100, networkBytesPerSecond: 12000 });
+  const overloaded = evaluateReleaseBudgets({ frameP95Ms: 60, longFrameRate: 0.2,
+    drawCalls: 1200, triangles: 2e6, particles: 2200, networkBytesPerSecond: 200000 });
+  ok('release budgets distinguish healthy and overloaded frames', healthy.pass && !overloaded.pass);
+  const monitor = new RuntimeHealth(60);
+  for (let i = 0; i < 60; i++) monitor.frame(i < 58 ? 16 : 70);
+  const report = monitor.snapshot({ drawCalls: 200, triangles: 200000,
+    particles: 50, networkBytesPerSecond: 8000 });
+  ok('rolling diagnostics expose p95, long-frame rate, and budget status',
+    report.sampledFrames === 60 && report.frameP95Ms === 16
+      && report.longFrameRate > 0 && report.budget.pass);
+  const drift = resourceDrift({ geometries: 300, textures: 2 },
+    { geometries: 304, textures: 2 });
+  ok('resource lifecycle drift identifies growth by category',
+    drift.geometries === 4 && drift.textures === 0);
+
+  // Ten replicas run through deterministic loss/reordering pressure. Any
+  // unsafe delta is refused; a periodic full checkpoint repairs it. The last
+  // full packet must leave every client on identical authoritative state.
+  const clients = Array.from({ length: 10 }, () => ({ last: null, p: new Map(), b: new Map() }));
+  let truth = null;
+  for (let q = 1; q <= 600; q++) {
+    const row = [0, qx(q / 10), qy(4), qx(20), qa(q / 50), 100 - (q % 20),
+      1, 0, 0, 50, 0, 3, 10 - (q % 10), 0];
+    truth = row;
+    const full = q === 1 || q % 30 === 0 || q === 600;
+    for (let i = 0; i < clients.length; i++) {
+      if (!full && ((q * 17 + i * 31) % 97 < 4)) continue; // deterministic 4% loss
+      const c = clients[i], order = snapshotDisposition(c.last, q, full);
+      if (!order.accept) continue;
+      if (full) { c.p.clear(); c.b.clear(); }
+      mergeSnapshot(c.p, c.b, { p: [row], b: [] });
+      c.last = q;
+    }
+  }
+  ok('ten-client impairment soak converges at the final checkpoint', clients.every(c =>
+    c.last === 600 && c.p.get(0)?.[0] === truth[1] / 256
+      && c.p.get(0)?.[4] === truth[5]));
+  ok('a worst-case ten-player snapshot stays inside the wire budget',
+    wireBytes({ t: 's', q: 1, full: 1, wr: 0, wh: WORLD_HASH_SEED,
+      p: Array.from({ length: 10 }, (_, i) => [i, ...truth.slice(1)]),
+      b: Array.from({ length: 10 }, (_, i) => [i, 0, 0, 0, 0, 100, 1, 0, 0]),
+      c: [0, 0], g: [] }) < 16 * 1024);
+
+  const lifecycleScene = scene();
+  const baselineChildren = lifecycleScene.children.length;
+  for (let i = 0; i < 3; i++) {
+    const world = new VoxelWorld(lifecycleScene);
+    generateMap(world, 1400 + i, i);
+    world.configureAtmosphere(i);
+    world.dispose();
+  }
+  ok('three full map lifecycles release every scene attachment',
+    lifecycleScene.children.length === baselineChildren,
+    `${lifecycleScene.children.length - baselineChildren} leaked scene nodes`);
+}
+
 export async function run() {
   collapseTests();
   wireTests();
+  networkSyncTests();
+  securityPhaseTests();
+  releasePhaseTests();
   audioPaletteTests();
   mapgenTests();
   raycastTests();

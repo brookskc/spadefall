@@ -2,7 +2,7 @@
 // Signaling rides the free PeerJS cloud; gameplay is pure browser-to-browser.
 // ?ns=name scopes all peer ids — tests and events get their own universe.
 import { isRecord } from './multiplayer.js';
-import { validPong, validServerMessage } from './protocol.js';
+import { PROTOCOL_VERSION, validPong, validServerMessage } from './protocol.js';
 const ns = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
   .get('ns')?.replace(/[^\w-]/g, '').slice(0, 16); // guarded for headless import
 const PREFIX = 'spadefall-' + (ns ? ns + '-' : '');
@@ -18,6 +18,11 @@ export const slotCode = i => 'PUB' + i;
 export const STATE_BUFFER_LIMIT = 64 * 1024;
 export const INBOUND_RATE = 120;
 export const INBOUND_BURST = 180;
+
+export function wireBytes(obj) {
+  try { return new TextEncoder().encode(JSON.stringify(obj)).byteLength; }
+  catch { return 0; }
+}
 
 // Position reports are superseded by the next one. Once a reliable WebRTC
 // channel is congested, queuing more of them only makes the eventual state
@@ -54,7 +59,40 @@ export function makeCode() {
 export class Net {
   // Handlers live on the instance so the lobby can rewire a connection after
   // the matchmaking handshake (e.g. attach the game once a room accepts us).
-  constructor() { this.handlers = {}; }
+  constructor() {
+    this.handlers = {};
+    this.telemetry = {
+      startedAt: typeof performance !== 'undefined' ? performance.now() : Date.now(),
+      sentPackets: 0, sentBytes: 0, recvPackets: 0, recvBytes: 0,
+      droppedState: 0, droppedInbound: 0, peakBuffered: 0,
+    };
+  }
+
+  _record(direction, obj, conn) {
+    const t = this.telemetry;
+    const bytes = wireBytes(obj);
+    if (direction === 'sent') { t.sentPackets++; t.sentBytes += bytes; }
+    else { t.recvPackets++; t.recvBytes += bytes; }
+    t.peakBuffered = Math.max(t.peakBuffered, conn?.dataChannel?.bufferedAmount ?? 0);
+  }
+
+  stats(now = typeof performance !== 'undefined' ? performance.now() : Date.now()) {
+    const t = this.telemetry;
+    const seconds = Math.max(0.001, (now - t.startedAt) / 1000);
+    return { ...t, seconds,
+      sentBytesPerSecond: t.sentBytes / seconds,
+      recvBytesPerSecond: t.recvBytes / seconds };
+  }
+
+  _sendConn(conn, obj) {
+    if (!shouldSend(conn, obj)) {
+      if (conn?.open && obj?.t === 's') this.telemetry.droppedState++;
+      return false;
+    }
+    conn.send(obj);
+    this._record('sent', obj, conn);
+    return true;
+  }
 
   // Replay anything that arrived before handlers existed. Call right after
   // assigning this.handlers on a host Net that came from _claim.
@@ -86,7 +124,8 @@ export class Net {
         net.conns.set(conn.peer, conn);
       });
       conn.on('data', d => {
-        if (!allowInbound(conn)) return;
+        net._record('recv', d, conn);
+        if (!allowInbound(conn)) { net.telemetry.droppedInbound++; return; }
         // A claimed room exists before its handlers do: _claim builds the Net
         // with {} and adoption attaches onData a beat later. A survivor whose
         // 'hi' lands in that window used to be answered with silence, and it
@@ -127,7 +166,7 @@ export class Net {
     net.peer.on('open', () => {
       net.conn = net.peer.connect(PREFIX + code, { reliable: true });
       net.conn.on('open', () => net.handlers.onOpen?.());
-      net.conn.on('data', d => net.handlers.onData?.(d));
+      net.conn.on('data', d => { net._record('recv', d, net.conn); net.handlers.onData?.(d); });
       net.conn.on('close', () => net.handlers.onClose?.());
       net.conn.on('error', () => net.handlers.onClose?.());
     });
@@ -161,7 +200,7 @@ export class Net {
       // team is the player's own OPTIONAL side preference (undefined when
       // they never set one) — the host honors it if given, falls back to
       // its own balance pick otherwise. See Game#_hostAddPlayer.
-      conn.on('open', () => conn.send({ t: 'hi', name, team }));
+      conn.on('open', () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team }));
       conn.on('data', d => {
         if (!isRecord(d)) return;
         // Do not adopt a channel on a merely welcome-shaped packet. A stale
@@ -169,6 +208,7 @@ export class Net {
         // Game rejected the packet and left the player in a frozen limbo.
         if (d.t === 'w' && validServerMessage(d)) done({ kind: 'join', conn, welcome: d });
         else if (d.t === 'full') done({ kind: 'full' });
+        else if (d.t === 'version') done({ kind: 'version', v: d.v });
       });
       conn.on('close', () => done({ kind: 'dead' }));
       conn.on('error', () => done({ kind: 'dead' }));
@@ -203,7 +243,7 @@ export class Net {
     net.conn = conn;
     window.__net = net; // debug handle
     peer.on('error', e => net.handlers.onError?.(e));
-    conn.on('data', d => net.handlers.onData?.(d));
+    conn.on('data', d => { net._record('recv', d, conn); net.handlers.onData?.(d); });
     conn.on('close', () => { console.debug(`[net] guest conn close`); net.handlers.onClose?.(); });
     conn.on('error', e => { console.debug(`[net] guest conn error ${e?.type ?? e}`); net.handlers.onClose?.(); });
     conn.on('iceStateChanged', s => console.debug(`[net] guest ice ${s}`));
@@ -296,6 +336,7 @@ export class Net {
           console.debug(`[qm] knock ${slotCode(room.slot)} -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: room.slot, welcome: k.welcome };
+          if (k.kind === 'version') { guest.destroy(); return k; }
           if (k.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
           // 'full'/'dead': lost a race — try the next room
         }
@@ -313,6 +354,7 @@ export class Net {
           console.debug(`[qm] knock ${slotCode(i)} (taken) -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: i, welcome: k.welcome };
+          if (k.kind === 'version') { guest.destroy(); return k; }
           if (k.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
           // 'full'/'dead': genuinely unavailable — try the next dead slot
         }
@@ -355,14 +397,14 @@ export class Net {
   get clientIds() { return [...this.conns.keys()]; }
 
   broadcast(obj) {
-    for (const c of this.conns.values()) if (c.open) c.send(obj);
+    for (const c of this.conns.values()) this._sendConn(c, obj);
   }
   sendTo(id, obj) {
     const c = this.conns.get(id);
-    if (c?.open) c.send(obj);
+    return this._sendConn(c, obj);
   }
   send(obj) { // client -> host
-    if (shouldSend(this.conn, obj)) this.conn.send(obj);
+    return this._sendConn(this.conn, obj);
   }
   destroy() { this.peer?.destroy(); }
 }

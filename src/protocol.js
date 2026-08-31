@@ -1,6 +1,9 @@
 // protocol.js — bounded structural validation for every network trust boundary.
 import { finiteVector, isRecord, parseSpawnRow } from './multiplayer.js';
 import { TEAM_PING_KINDS, validPingDirection } from './social.js';
+import { SECURED_ACTIONS } from './security.js';
+
+export const PROTOCOL_VERSION = 3;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -33,7 +36,7 @@ export function validEditLog(value) {
 export function validClientMessage(d) {
   if (!isRecord(d) || !shortString(d.t, 8)) return false;
   if (d.t === 'ping') return true;
-  if (d.t === 'hi') return shortString(String(d.name ?? ''), 64)
+  if (d.t === 'hi') return d.v === PROTOCOL_VERSION && shortString(String(d.name ?? ''), 64)
     // PeerJS/BinaryPack may preserve an omitted optional value as null.
     // Both null and undefined mean AUTO; named teams still need validation.
     && (d.team == null || team(d.team));
@@ -41,6 +44,8 @@ export function validClientMessage(d) {
     && Number.isInteger(d.tool) && (d.ts === undefined || finite(d.ts))
     && (d.strike === undefined || (isRecord(d.strike) && finite(d.strike.x) && finite(d.strike.z)));
   if (d.t !== 'a' || !shortString(d.k, 16)) return false;
+  if (SECURED_ACTIONS.includes(d.k)
+      && (!Number.isSafeInteger(d.n) || d.n < 1)) return false;
   if (d.k === 'chat') return shortString(String(d.text ?? ''), 512)
     && (d.scope === 'all' || d.scope === 'team');
   if (d.k === 'class') return Number.isInteger(d.cls);
@@ -48,12 +53,22 @@ export function validClientMessage(d) {
   if (d.k === 'overcharge') return true;
   if (d.k === 'mark') return validPingDirection(d.d);
   if (d.k === 'rematch') return true;
+  if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
+  if (d.k === 'reload') return true;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)
     && finiteVector(d.d) && (d.o === undefined || finiteVector(d.o));
 }
 
 function validSnapshot(d) {
   if (!rows(d.p, 12, 10) || !rows(d.b, 9, 10)) return false;
+  if (!d.p.every(r => (r[12] === undefined || (Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30))
+      && (r[13] === undefined || (Number.isInteger(r[13]) && r[13] >= 0 && r[13] <= 3000))
+      && (r[14] === undefined || r[14] === 0 || r[14] === 1 || r[14] === 5))) return false;
+  if ((d.q !== undefined && (!Number.isSafeInteger(d.q) || d.q < 1))
+      || (d.full !== undefined && d.full !== 0 && d.full !== 1)
+      || (d.ack !== undefined && (!Number.isSafeInteger(d.ack) || d.ack < 0))
+      || (d.wr !== undefined && (!Number.isSafeInteger(d.wr) || d.wr < 0))
+      || (d.wh !== undefined && (!Number.isInteger(d.wh) || d.wh < 0 || d.wh > 0xffffffff))) return false;
   if (!finiteArray(d.c, 2)) return false;
   if (d.m !== undefined && (!finiteArray(d.m, 3) || d.m[0] < 0 || d.m[0] > 36000
       || (d.m[1] !== 0 && d.m[1] !== 1) || d.m[2] < 0)) return false;
@@ -94,6 +109,9 @@ function validSnapshot(d) {
 
 function validEvent(d) {
   if (!shortString(d.k, 20)) return false;
+  if (['edit', 'boom', 'col'].includes(d.k)
+      && ((d.wr !== undefined && (!Number.isSafeInteger(d.wr) || d.wr < 1))
+        || (d.wh !== undefined && (!Number.isInteger(d.wh) || d.wh < 0 || d.wh > 0xffffffff)))) return false;
   switch (d.k) {
     case 'edit': return [d.x, d.y, d.z, d.v].every(finite);
     case 'boom': return [d.x, d.y, d.z, d.r].every(finite)
@@ -106,7 +124,8 @@ function validEvent(d) {
       && finite(d.remaining) && d.remaining >= 0 && d.remaining <= 15;
     case 'died': return d.rt === undefined || (finite(d.rt) && d.rt >= 0 && d.rt <= 9);
     case 'envdmg': return d.cause === 'fell' || d.cause === 'drowned';
-    case 'col': return Array.isArray(d.cells) && d.cells.length <= 12000 && d.cells.every(finite);
+    case 'col': return Array.isArray(d.cells) && d.cells.length % 3 === 0
+      && d.cells.length <= 12000 && d.cells.every(finite);
     case 'shot': return finiteVector(d.f) && finiteVector(d.e) && finite(d.hex)
       && shortString(String(d.gun ?? ''), 32);
     case 'feed': return shortString(String(d.html ?? ''), 1200);
@@ -129,6 +148,7 @@ function validEvent(d) {
       && Number.isInteger(d.needed) && d.needed >= 1 && d.needed <= 10;
     case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw));
     case 'corr': return [d.x, d.y, d.z].every(finite);
+    case 'kick': return d.reason === 'integrity';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
       && d.rows.every(r => Array.isArray(r) && r.length >= 5 && shortString(String(r[0] ?? ''), 16)
         && shortString(String(r[1] ?? ''), 64) && team(r[2]) && finite(r[3]) && finite(r[4])
@@ -142,13 +162,21 @@ function validEvent(d) {
 export function validServerMessage(d) {
   if (!isRecord(d) || !shortString(d.t, 8)) return false;
   if (d.t === 'full') return true;
+  if (d.t === 'version') return Number.isInteger(d.v) && d.v >= 1 && d.v <= 1000;
   if (d.t === 'r') return validRoster(d);
   if (d.t === 'w') return shortString(String(d.id ?? ''), 128) && team(d.team)
     && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
     && (d.reset === undefined || d.reset === 0 || d.reset === 1)
     && (d.migrated || parseSpawnRow(d.spawn))
-    && (!d.reset || parseSpawnRow(d.spawn));
+    && (!d.reset || parseSpawnRow(d.spawn))
+    && (d.wr === undefined || (Number.isSafeInteger(d.wr) && d.wr === d.log.length))
+    && (d.wh === undefined || (Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff));
+  if (d.t === 'sync') return finite(d.seed)
+    && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    && validEditLog(d.log)
+    && Number.isSafeInteger(d.wr) && d.wr === d.log.length
+    && Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff;
   if (d.t === 's') return validSnapshot(d);
   if (d.t === 'e') return validEvent(d);
   return false;

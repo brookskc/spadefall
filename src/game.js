@@ -15,7 +15,7 @@ import { stats } from './stats.js';
 import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
   teamCounts, validateMovementReport, normalizeDirection,
   migrationSurvivors, combatDamageAllowed, protectedBuildReason } from './multiplayer.js';
-import { validClientMessage, validServerMessage } from './protocol.js';
+import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './protocol.js';
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
   resetEnvironmentalState, stepBreath } from './environment.js';
@@ -36,6 +36,11 @@ import { rematchVotesNeeded, TEAM_PING_COOLDOWN, TEAM_PING_LIMIT,
   TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
 import { assignBotRoles, botsForSquadOrder, botTelemetrySummary,
   scheduleBotBrains } from './bot-rules.js';
+import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
+  worldEventDisposition, worldLogHash } from './network-sync.js';
+import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
+  authorizeWeaponFire, integritySummary, recordIntegrityViolation,
+  settleReload } from './security.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -182,11 +187,13 @@ const rowsEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 // host omits unchanged rows, so these maps — not the last packet — are the
 // world as the host sees it, and the replica a promoted client rebuilds
 // from. Decoded row shapes:
-//   player: [x, y, z, ry, hp, alive, carrier, tool, blocks, crouch, nades]
+  //   player: [x, y, z, ry, hp, alive, carrier, tool, blocks, crouch, nades,
+  //            authoritative gun ammo, reload milliseconds, gun class]
 //   bot:    [x, y, z, ry, hp, alive, carrier, crouch]
 export function mergeSnapshot(fullP, fullB, d) {
   for (const r of d.p ?? [])
-    fullP.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7], r[8], r[9], r[10], r[11]]);
+    fullP.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7],
+      r[8], r[9], r[10], r[11], r[12], r[13], r[14]]);
   for (const r of d.b ?? [])
     fullB.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7], r[8]]);
   for (const i of d.rm?.p ?? []) fullP.delete(i);
@@ -929,6 +936,7 @@ export class Game {
     this.friendlyFire = opts.friendlyFire === true;
     this.seed = opts.seed ?? 1979;
     this.editLog = [];                     // host: every world change, for late joiners
+    this._worldHash = WORLD_HASH_SEED;      // rolling edit-log desync alarm
     this.blockHits = new Map();            // host/solo: 'x,y,z' -> remaining gunfire HP
     this.remote = new Map();               // host: peerId -> RemotePlayer
     this.avatars = new Map();              // client: key -> Avatar
@@ -941,7 +949,11 @@ export class Game {
     this._fullP = new Map(); // client: idx -> decoded player row, omission-safe
     this._fullB = new Map(); // client: idx -> decoded bot row
     this._snapT = 0;
+    this._lastSnapshotSeq = null;
+    this._resyncAt = { state: 0, world: 0 };
     this._sendT = 0;
+    this._actionSeq = 0;                  // client combat replay protection
+    this._lastWeaponActionSeq = 0;
     this._lastHealth = 100;
     this._respawnT = 0;                  // client: cosmetic redeploy countdown
     this._chatCd = 0;                    // chat send cooldown (wall clock)
@@ -1171,6 +1183,9 @@ export class Game {
     this.overtime = false;
     this.winner = null;
     this.editLog = [];
+    this._worldHash = WORLD_HASH_SEED;
+    this._lastSnapshotSeq = null;
+    this._resyncAt = { state: 0, world: 0 };
     this.blockHits.clear();
     this.grenades = [];
     for (const m of this.grenadeMeshes) m.visible = false;
@@ -1669,6 +1684,12 @@ export class Game {
   }
 
   // Player tool entry points — route locally (solo/host) or to the host (client).
+  _sendAction(k, payload = {}) {
+    const n = ++this._actionSeq;
+    this.net?.send({ t: 'a', k, n, ...payload });
+    return n;
+  }
+
   requestShoot(p, t) {
     if (this.mode !== 'client') return this.fireHitscan(p, p.body.eye(), p.lookDir(), t);
     p.protT = 0; // firing drops spawn protection (the host drops its copy too)
@@ -1685,7 +1706,8 @@ export class Game {
     const muzzle = from.clone().addScaledVector(previewDir, 1.2).add(new THREE.Vector3(0, -0.12, 0));
     this.effects.tracer(muzzle, end);
     this.effects.muzzleFlash(muzzle);
-    this.net.send({ t: 'a', k: 'shoot', o: arr(from), d: arr(dir), tool: p.tool });
+    this._lastWeaponActionSeq = this._sendAction('shoot',
+      { o: arr(from), d: arr(dir), tool: p.tool });
   }
 
   // No speculative client preview: the host validates the streak, then its
@@ -1697,7 +1719,7 @@ export class Game {
   // the host's copy (the RemotePlayer) is the only one that counts.
   requestAirstrike(p, x, z, yaw = p.yaw) {
     if (this.mode !== 'client') return this._confirmAirstrike(p, x, z, yaw);
-    this.net.send({ t: 'a', k: 'strike', x, z, yaw });
+    this._sendAction('strike', { x, z, yaw });
   }
   // No payload needed at all — "turn it on for me," nothing to target or
   // aim. Same authority split as every other request* method: solo/host
@@ -1706,21 +1728,25 @@ export class Game {
   // authoritative copy (its RemotePlayer) is what damage() ever checks.
   requestOvercharge(p) {
     if (this.mode !== 'client') return this._activateOvercharge(p);
-    this.net.send({ t: 'a', k: 'overcharge' });
+    this._sendAction('overcharge');
+  }
+  requestReload(p) {
+    if (this.mode === 'client' && GUN_CLASSES.includes(p.tool))
+      this._lastWeaponActionSeq = this._sendAction('reload');
   }
   requestDig(p) {
     if (this.mode !== 'client') return this.playerDig(p);
-    this.net.send({ t: 'a', k: 'dig', o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    this._sendAction('dig', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
   requestPlace(p) {
     if (this.mode !== 'client') return this.playerPlace(p);
     if (p.blocks <= 0) { sfx.click(); return; }
-    this.net.send({ t: 'a', k: 'place', o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    this._sendAction('place', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
   requestNade(p) {
     p.protT = 0; // throwing is firing, as far as spawn protection is concerned
     if (this.mode !== 'client') return this.throwGrenade(p, p.body.eye(), p.lookDir(), 13);
-    this.net.send({ t: 'a', k: 'nade', o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    this._sendAction('nade', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
 
   // ---------------- bot team director ----------------
@@ -1888,8 +1914,9 @@ export class Game {
   // ---------------- chat ----------------
   // Local echo is immediate; in a room the host is the relay (and the spam
   // filter), so a message reaches every screen exactly once.
-  // Dev/testing commands, host or solo only — checked before anything
-  // else, including the chat rate limit below, since these aren't real
+  // Gameplay-changing dev commands are host/solo only; /netstats is a local
+  // readout available to guests too. Checked before anything else, including
+  // the chat rate limit below, since these aren't real
   // chat messages at all (never relayed, never worth rate-limiting the
   // way spamming enter would be) and testing benefits from rapid
   // iteration, not a 1.2s cooldown between each streak change. Never
@@ -1901,7 +1928,9 @@ export class Game {
   // boundary is "must be host or solo," which this.mode already
   // guarantees on its own.
   sendChat(text, scope) {
-    if (this.mode !== 'client' && this._devCommand(text)) return;
+    // Network telemetry is local and harmless on guests too; gameplay state
+    // commands remain host/solo-only as described above.
+    if ((this.mode !== 'client' || text.trim() === '/netstats') && this._devCommand(text)) return;
     const now = performance.now();
     if (now < this._chatCd) return;         // easy on the enter key
     this._chatCd = now + 1200;
@@ -1948,7 +1977,41 @@ export class Game {
         + `${Math.round(s.objectiveSeconds)}s objective`);
       return true;
     }
+    if (t === '/netstats') {
+      const n = this.net?.stats?.();
+      if (!n) hud.feed('NET: offline');
+      else hud.feed(`NET: ↑${(n.sentBytesPerSecond / 1024).toFixed(1)}KB/s `
+        + `↓${(n.recvBytesPerSecond / 1024).toFixed(1)}KB/s · `
+        + `${n.droppedState} stale state drops · ${n.droppedInbound} rate drops · `
+        + `${Math.round(n.peakBuffered / 1024)}KB peak queue`);
+      return true;
+    }
+    if (t === '/securitystats') {
+      const s = this.securityTelemetry();
+      hud.feed(`INTEGRITY: ${s.flagged} flagged · ${s.violations} rejected inputs · `
+        + `${s.peakScore.toFixed(1)} peak score`);
+      return true;
+    }
+    if (t === '/health') {
+      const h = this.runtimeHealth;
+      if (!h) hud.feed('HEALTH: diagnostics warming up');
+      else hud.feed(`HEALTH: ${h.budget.pass ? 'PASS' : 'OVER BUDGET'} · `
+        + `${h.frameP95Ms.toFixed(1)}ms p95 · ${h.drawCalls} calls · `
+        + `${Math.round(h.triangles / 1000)}k tris`);
+      return true;
+    }
     return false;
+  }
+
+  runtimeCounts() {
+    let sceneObjects = 0;
+    this.scene.traverse(() => sceneObjects++);
+    return {
+      sceneObjects, chunks: this.world.chunks.size, particles: this.effects.particles.length,
+      avatars: this.avatars.size, remotes: this.remote.size, bots: this.bots.length,
+      strikes: this._pendingStrikes.length, editLog: this.editLog.length,
+      respawnTimers: this.respawnTimers.size,
+    };
   }
 
   // Host side: show it here, then forward to everyone the message is for —
@@ -2187,13 +2250,24 @@ export class Game {
   }
 
   // ---------------- block tools ----------------
+  _appendWorldEdit(entry) {
+    this.editLog.push(entry);
+    this._worldHash = advanceWorldHash(this._worldHash, entry);
+  }
+
+  _worldStamp(message) {
+    message.wr = this.editLog.length;
+    message.wh = this._worldHash >>> 0;
+    return message;
+  }
+
   applyEdit(x, y, z, v, who = null) {
     this.blockHits.delete(x + ',' + y + ',' + z);  // fresh block / cleared cell: full HP
     this.world.set(x, y, z, v);
     this.navRevision++;
     if (this.mode === 'host') {
-      this.editLog.push([x, y, z, v]);
-      this.net.broadcast({ t: 'e', k: 'edit', x, y, z, v });
+      this._appendWorldEdit([x, y, z, v]);
+      this.net.broadcast(this._worldStamp({ t: 'e', k: 'edit', x, y, z, v }));
     }
     if (!v) this._collapseFrom([{ x, y, z }], who); // cut the legs out? it falls
   }
@@ -2281,9 +2355,9 @@ export class Game {
       if (hit) this.damage(e, hit, who, source, { cause: 'collapse' });
     }
     if (this.mode === 'host') {
-      for (const c of cells) this.editLog.push([c.x, c.y, c.z, 0]); // late joiners
-      this.net.broadcast({ t: 'e', k: 'col',
-        cells: cells.flatMap(c => [c.x, c.y, c.z]) });
+      for (const c of cells) this._appendWorldEdit([c.x, c.y, c.z, 0]); // late joiners
+      this.net.broadcast(this._worldStamp({ t: 'e', k: 'col',
+        cells: cells.flatMap(c => [c.x, c.y, c.z]) }));
     }
   }
 
@@ -2420,8 +2494,9 @@ export class Game {
     const R = 2.4; // a modest divot: grenades maim players, not landscapes
     this.explodeAt(g.pos.x, g.pos.y, g.pos.z, R, g.owner);
     if (this.mode === 'host') {
-      this.editLog.push(['b', g.pos.x, g.pos.y, g.pos.z, R]);
-      this.net.broadcast({ t: 'e', k: 'boom', x: g.pos.x, y: g.pos.y, z: g.pos.z, r: R });
+      this._appendWorldEdit(['b', g.pos.x, g.pos.y, g.pos.z, R]);
+      this.net.broadcast(this._worldStamp(
+        { t: 'e', k: 'boom', x: g.pos.x, y: g.pos.y, z: g.pos.z, r: R }));
     }
     this._blastDamage(g.pos, g.owner, R, 9, 150, 15);
   }
@@ -2700,9 +2775,9 @@ export class Game {
     this.explodeAt(pos.x, pos.y, pos.z, R, owner, 'airstrikeImpact');
     this._removeAirstrikeDrone(strikeId);
     if (this.mode === 'host') {
-      this.editLog.push(['b', pos.x, pos.y, pos.z, R]);
-      this.net.broadcast({ t: 'e', k: 'boom', x: pos.x, y: pos.y, z: pos.z,
-        r: R, strikeId });
+      this._appendWorldEdit(['b', pos.x, pos.y, pos.z, R]);
+      this.net.broadcast(this._worldStamp({ t: 'e', k: 'boom', x: pos.x, y: pos.y, z: pos.z,
+        r: R, strikeId }));
     }
     // The gap that made "hit in/around the target should kill them" not
     // quite true: anywhere the raw damage falloff below is already
@@ -3089,8 +3164,62 @@ export class Game {
       x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z });
   }
 
+  _hostResync(id, scope) {
+    const conn = this.net?.conns?.get(id);
+    if (!conn) return;
+    const now = performance.now();
+    if (now < (conn._resyncAt ?? 0)) return;
+    conn._resyncAt = now + 1000; // repair is expensive; one request is enough
+    if (scope === 'state') {
+      conn._forceFullSnapshot = true;
+      return;
+    }
+    this.net.sendTo(id, { t: 'sync', seed: this.seed, map: this.mapIndex,
+      log: this.editLog, wr: this.editLog.length, wh: this._worldHash >>> 0 });
+  }
+
+  _securityViolation(p, kind, severity = 1, correct = false) {
+    if (!p) return;
+    p._integrity = recordIntegrityViolation(p._integrity, kind, severity, this.time);
+    if (correct || p._integrity.action === 'correct') this._correctRemotePosition(p);
+    if (p._integrity.action !== 'disconnect' || p._disconnecting) return;
+    p._disconnecting = true;
+    this.net.sendTo(p.id, { t: 'e', k: 'kick', reason: 'integrity' });
+    const conn = this.net.conns.get(p.id);
+    setTimeout(() => conn?.close(), 250);
+  }
+
+  securityTelemetry() { return integritySummary(this.remote.values()); }
+
+  _remoteWeaponState(p) {
+    const spec = TOOLS[p.gunClass];
+    const settled = settleReload({ ammo: p.ammo[p.gunClass],
+      reloadUntil: p._reloadUntil, lastShotAt: p._actT.shoot }, spec, this.time);
+    p.ammo[p.gunClass] = settled.ammo;
+    p._reloadUntil = settled.reloadUntil;
+    if (Number.isFinite(settled.lastShotAt)) p._actT.shoot = settled.lastShotAt;
+    return settled;
+  }
+
+  _hostReload(p) {
+    if (!GUN_CLASSES.includes(p.tool) || p.tool !== p.gunClass) {
+      this._securityViolation(p, 'reload-tool', 0.5); return;
+    }
+    const spec = TOOLS[p.gunClass], current = this._remoteWeaponState(p);
+    const next = authorizeReload(current, spec, this.time);
+    if (!next.ok) return; // duplicate/full reload taps are ordinary input noise
+    p._reloadUntil = next.state.reloadUntil;
+  }
+
   hostOnData(id, d) {
-    if (!validClientMessage(d)) return;
+    if (d?.t === 'hi' && d.v !== PROTOCOL_VERSION) {
+      this.net.sendTo(id, { t: 'version', v: PROTOCOL_VERSION });
+      return;
+    }
+    if (!validClientMessage(d)) {
+      this._securityViolation(this.remote.get(id), 'malformed', 2);
+      return;
+    }
     // Matchmaking probe: answer on the same channel, before any join logic.
     if (d.t === 'ping') {
       // Room-browser probe: everything the list row wants to show.
@@ -3117,6 +3246,7 @@ export class Game {
         }
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
+          wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
         this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
@@ -3127,6 +3257,12 @@ export class Game {
     }
     const p = this.remote.get(id);
     if (!p) return;
+    if (d.t === 'a' && SECURED_ACTIONS.includes(d.k)) {
+      const order = actionSequenceDisposition(p._lastActionSeq, d.n);
+      if (!order.accept) { this._securityViolation(p, 'action-' + order.reason, 2); return; }
+      p._lastActionSeq = d.n;
+    }
+    if (d.t === 'a' && d.k === 'resync') return this._hostResync(id, d.scope);
     if (d.t === 'a' && d.k === 'chat') return this._hostOnChat(id, d.text, d.scope);
     if (d.t === 'a' && d.k === 'mark') {
       this._hostPlaceTeamPing(p, d.d);
@@ -3151,7 +3287,9 @@ export class Game {
       const elapsed = this.time - (p._lastPosT ?? this.time);
       const movement = validateMovementReport(p.body.pos,
         { x: nx, y: ny, z: nz, yaw: d.yaw }, elapsed);
-      if (!movement.ok) { this._correctRemotePosition(p); return; }
+      if (!movement.ok) {
+        this._securityViolation(p, 'move-' + movement.reason, 1, true); return;
+      }
       // No-clip: speed-legal isn't enough on its own — the landing spot
       // itself has to be somewhere the player's actual body could occupy.
       // Reuses the exact whole-body AABB the physics itself already checks
@@ -3162,7 +3300,9 @@ export class Game {
       // report that's claiming to be inside a wall. An honest client's own
       // local physics already keeps it out of solid geometry in the first
       // place, so this only ever catches a dishonest one.
-      if (p.body.overlapsSolid(nx, ny, nz)) { this._correctRemotePosition(p); return; }
+      if (p.body.overlapsSolid(nx, ny, nz)) {
+        this._securityViolation(p, 'move-solid', 1.5, true); return;
+      }
 
       // A legal jump follows y(t)=y0+v0*t-15*t² (gravity is -30). Track the
       // current unsupported interval so a zero-delta stream cannot hover in
@@ -3173,7 +3313,9 @@ export class Game {
         const air = p._airMove ??= { t: 0, y0: p.body.pos.y };
         air.t += movement.dt;
         const highestLegal = air.y0 + 10.5 * air.t - 15 * air.t * air.t + 0.8;
-        if (ny > highestLegal) { this._correctRemotePosition(p); return; }
+        if (ny > highestLegal) {
+          this._securityViolation(p, 'move-hover', 1.5, true); return;
+        }
       }
 
       // Remote bodies are client-predicted rather than integrated here. Use
@@ -3254,26 +3396,40 @@ export class Game {
         this._activateOvercharge(p);
         return;
       }
+      if (d.k === 'reload') { this._hostReload(p); return; }
       const normalized = normalizeDirection(d.d);
-      if (!normalized) return;
+      if (!normalized) { this._securityViolation(p, 'zero-direction', 1); return; }
       // The client supplies aim only. The host's accepted body position owns
       // the action origin, so a patched packet cannot shoot/build through a
       // nearby wall by inventing an eye point on its far side.
       const o = p.body.eye(), dir = v3(normalized);
+      if (aimYawDelta(p.yaw, normalized) > 1.4) {
+        this._securityViolation(p, 'aim-body-mismatch', 1); return;
+      }
       // Rate-limit by the tool's own interval (60% floor for frame jitter):
       // an honest client paces itself — a patched one must not get
       // per-packet full-auto, a shovel blender, or a grenade sprinkler.
       const now = this.time, gap = k => now - (p._actT[k] ?? -9);
       if (d.k === 'shoot') {
-        if (!GUN_CLASSES.includes(p.tool) || p.tool !== p.gunClass) return;
+        if (!GUN_CLASSES.includes(p.tool) || p.tool !== p.gunClass) {
+          this._securityViolation(p, 'shoot-tool', 1); return;
+        }
         const spec = TOOLS[p.tool];
-        if (!spec?.damage || gap('shoot') < spec.interval * 0.6) return;
+        if (!spec?.damage) return;
+        const fire = authorizeWeaponFire(this._remoteWeaponState(p), spec, now);
+        if (!fire.ok) {
+          this._securityViolation(p, 'shoot-' + fire.reason,
+            fire.reason === 'cadence' ? 0.5 : 0.25);
+          return;
+        }
+        p.ammo[p.gunClass] = fire.state.ammo;
+        p._reloadUntil = fire.state.reloadUntil;
         // Rate-limit timestamp updates here, BEFORE the aim check below —
         // an implausible-aim rejection still has to cost its slot in the
         // fire-rate budget. Without this, a rejected attempt would be
         // free to immediately retry, turning this into a probe for
         // whatever direction happens to pass rather than an actual gate.
-        p._actT.shoot = now;
+        p._actT.shoot = fire.state.lastShotAt;
         // Aim-angle plausibility: origin was already checked above (must
         // be near the player's own position) but the DIRECTION itself
         // had no equivalent limit — it could change instantly, shot to
@@ -3286,26 +3442,28 @@ export class Game {
         // arbitrary direction.
         if (p._lastAimDir) {
           const aimElapsed = Math.max(1 / 60, now - p._lastAimT);
-          if (p._lastAimDir.angleTo(dir) / aimElapsed > MAX_TURN_RATE) return;
+          if (p._lastAimDir.angleTo(dir) / aimElapsed > MAX_TURN_RATE) {
+            this._securityViolation(p, 'aim-turn', 1); return;
+          }
         }
         p._lastAimDir = dir.clone();
         p._lastAimT = now;
         this.fireHitscan(p, o, dir, spec);
       }
       else if (d.k === 'dig') {
-        if (p.tool !== 2) return;
+        if (p.tool !== 2) { this._securityViolation(p, 'dig-tool', 0.5); return; }
         if (gap('dig') < 0.2) return;
         p._actT.dig = now;
         this.playerDig(p, o, dir);
       }
       else if (d.k === 'place') {
-        if (p.tool !== 3) return;
+        if (p.tool !== 3) { this._securityViolation(p, 'place-tool', 0.5); return; }
         if (gap('place') < 0.12) return;
         p._actT.place = now;
         this.playerPlace(p, o, dir); // tryBuild enforces the block count
       }
       else if (d.k === 'nade') {
-        if (p.tool !== 4) return;
+        if (p.tool !== 4) { this._securityViolation(p, 'nade-tool', 0.5); return; }
         if (gap('nade') < 0.6 || p.nades <= 0) return;
         p._actT.nade = now;
         p.nades--;
@@ -3327,7 +3485,9 @@ export class Game {
         // than free.
         if (p._lastNadeAimDir) {
           const aimElapsed = Math.max(1 / 60, now - p._lastNadeAimT);
-          if (p._lastNadeAimDir.angleTo(dir) / aimElapsed > MAX_TURN_RATE) return;
+          if (p._lastNadeAimDir.angleTo(dir) / aimElapsed > MAX_TURN_RATE) {
+            this._securityViolation(p, 'nade-turn', 1); return;
+          }
         }
         p._lastNadeAimDir = dir.clone();
         p._lastNadeAimT = now;
@@ -3367,6 +3527,7 @@ export class Game {
     this._removeBot(team);
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
+      wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this.over) {
       this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
@@ -3397,6 +3558,9 @@ export class Game {
     this.mode = 'host';
     this.net = net;
     this.myId = 'HOST';
+    // Recompute rather than trust a stale cached digest: the promoted replica
+    // is now the source of truth for every survivor and late joiner.
+    this._worldHash = worldLogHash(this.editLog);
     // Keep our old client index: every survivor's avatars and reconstructed
     // maps are keyed by it, and re-keying mid-match would orphan them all.
     this._hostIdx = oldIdx;
@@ -3530,10 +3694,11 @@ export class Game {
     }, 60000);
   }
 
-  // Rebuild one RemotePlayer from its reconstructed full-state row
-  // ([x, y, z, ry, hp, alive, carrier, tool, blocks, crouch]).
+  // Rebuild one RemotePlayer from its reconstructed full-state row.
+  // Weapon class is explicit so migration remains exact while a non-gun tool is held.
   _restoreProxy(id, name, idx, team, row) {
-    const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades] = row;
+    const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades,
+      ammo, reloadMs, gunClass] = row;
     const proxy = new RemotePlayer(this, id, name, team);
     proxy.ridx = idx;
     proxy.body.pos.set(x, y, z);
@@ -3543,13 +3708,12 @@ export class Game {
     proxy.alive = !!alive;
     proxy.carrier = !!carrier;
     proxy.tool = tool;
-    // gunClass never rode the snapshot wire (no room without a real field
-    // addition, and this is a rare edge case). If they're mid-life holding
-    // one of the three guns right now, THAT is their class — recovers the
-    // common case for free. Only falls back to rifle if they happened to
-    // be on spade/block/nade at the exact instant the host died.
-    proxy.gunClass = GUN_CLASSES.includes(tool) ? tool : 0;
+    proxy.gunClass = GUN_CLASSES.includes(gunClass) ? gunClass
+      : GUN_CLASSES.includes(tool) ? tool : 0;
     proxy._pendingClass = proxy.gunClass;
+    if (Number.isInteger(ammo)) proxy.ammo[proxy.gunClass] = ammo;
+    proxy._reloadUntil = Number.isFinite(reloadMs) && reloadMs > 0
+      ? this.time + reloadMs / 1000 : 0;
     proxy.blocks = blocks;
     proxy.crouched = !!crouch;
     if (nades !== undefined) proxy.nades = nades;
@@ -3610,11 +3774,16 @@ export class Game {
     const P = [[this._hostIdx, ...pos(this.player.body.pos), qa(ry(this.player.yaw)),
       Math.round(this.player.health), this.player.alive ? 1 : 0,
       this.player.carrier ? 1 : 0, this.player.tool, this.player.blocks,
-      this.player.crouched ? 1 : 0, this.player.grenades]];
-    for (const p of this.remote.values())
+      this.player.crouched ? 1 : 0, this.player.grenades,
+      this.player.ammo[this.player.gunClass], Math.max(0, Math.round(this.player.reloading * 1000)),
+      this.player.gunClass]];
+    for (const p of this.remote.values()) {
+      this._remoteWeaponState(p);
       P.push([p.ridx, ...pos(p.body.pos), qa(p.yaw), Math.round(p.health),
         p.alive ? 1 : 0, p.carrier ? 1 : 0, p.tool, p.blocks, p.crouched ? 1 : 0,
-        p.nades]);
+        p.nades, p.ammo[p.gunClass], Math.max(0, Math.round((p._reloadUntil - this.time) * 1000)),
+        p.gunClass]);
+    }
     return {
       t: 's',
       p: P,
@@ -3684,11 +3853,17 @@ export class Game {
     for (const [id, conn] of this.net.conns) {
       if (!conn.open) continue;
       if (conn.dataChannel?.bufferedAmount > 64 * 1024) continue;
+      const full = !conn._sentRows || conn._forceFullSnapshot
+        || this.time >= (conn._nextFullSnapshotAt ?? 0);
       const sent = conn._sentRows ??= { p: new Map(), b: new Map() };
-      const out = { t: 's', f: snap.f, h: snap.h, c: snap.c, g: snap.g,
+      if (full) { sent.p.clear(); sent.b.clear(); }
+      const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
+        wr: this.editLog.length, wh: this._worldHash >>> 0,
+        f: snap.f, h: snap.h, c: snap.c, g: snap.g,
         a: snap.a, u: snap.u, l: snap.l, m: snap.m, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
+      out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
       const viewer = this.remote.get(id);
       const eye = viewer?.body.eye();
       for (const key of ['p', 'b']) {
@@ -3714,7 +3889,13 @@ export class Game {
           if (!cur.has(idx)) { rm.push(idx); sent[key].delete(idx); }
         if (rm.length) (out.rm ??= {})[key] = rm;
       }
-      conn.send(out);
+      if (this.net.sendTo(id, out)) {
+        conn._snapshotSeq = out.q;
+        if (full) {
+          conn._forceFullSnapshot = false;
+          conn._nextFullSnapshotAt = this.time + 2;
+        }
+      }
     }
   }
 
@@ -3739,13 +3920,52 @@ export class Game {
     }
   }
 
+  _applyWorldEntry(e) {
+    if (e[0] === 'b') this.world.carve(Math.floor(e[1]), Math.floor(e[2]), Math.floor(e[3]),
+      Math.min(Math.max(e[4] ?? 0, 0), 6));
+    else this.world.set(e[0], e[1], e[2], e[3]);
+  }
+
   _replayEdits(log) {
-    this.editLog = log ?? []; // kept current below: migration hosting needs it
-    for (const e of this.editLog) {
-      if (e[0] === 'b') this.world.carve(Math.floor(e[1]), Math.floor(e[2]), Math.floor(e[3]),
-        Math.min(Math.max(e[4] ?? 0, 0), 4)); // same clamp as a live 'boom'
-      else this.world.set(e[0], e[1], e[2], e[3]);
+    this.editLog = [];
+    this._worldHash = WORLD_HASH_SEED;
+    for (const e of log ?? []) {
+      this._applyWorldEntry(e);
+      this._appendWorldEdit(e);
     }
+  }
+
+  _requestResync(scope) {
+    const now = performance.now();
+    if (now < (this._resyncAt[scope] ?? 0)) return;
+    this._resyncAt[scope] = now + 1000;
+    this.net?.send({ t: 'a', k: 'resync', scope });
+  }
+
+  _applyWorldSync(d) {
+    if (d.seed !== this.seed || d.map !== this.mapIndex) return;
+    if (worldLogHash(d.log) !== (d.wh >>> 0)) return;
+    const localLength = this.editLog.length;
+    const isPrefix = localLength <= d.log.length
+      && worldLogHash(d.log.slice(0, localLength)) === (this._worldHash >>> 0);
+    if (isPrefix) {
+      for (const e of d.log.slice(localLength)) {
+        this._applyWorldEntry(e);
+        this._appendWorldEdit(e);
+      }
+    } else {
+      // Same deterministic baseline, repaired in place so bodies and scene
+      // references remain valid while the terrain replica is rebuilt.
+      this.world.data.fill(0);
+      this.world.dirty?.clear();
+      generateMap(this.world, this.seed, this.mapIndex);
+      this._replayEdits(d.log);
+      this.world.flushDirty();
+      hud.mapInit(this.world);
+      this.player.syncBlockColor();
+      retintVoxelBoxes(this.player.vmRoot);
+    }
+    this.navRevision++;
   }
 
   clientOnData(d) {
@@ -3753,7 +3973,9 @@ export class Game {
     this.lastRecv = performance.now(); // host heartbeat (snapshots beat at 15Hz)
     this._unstableShown = false; // the link's talking again — clear the warning flag
     if (d.t === 'full') return this.onFull?.();
+    if (d.t === 'version') return this.onVersion?.(d.v);
     if (d.t === 'r') return this._applyRoster(d);
+    if (d.t === 'sync') return this._applyWorldSync(d);
     if (d.t === 'w') {
       this.myId = d.id;
       this.myIdx = d.me;
@@ -3775,6 +3997,9 @@ export class Game {
         this._fullP.clear();
         this._fullB.clear();
         this._applyRoster(d.r);
+        this._lastSnapshotSeq = null;
+        if (d.wh !== undefined && (d.wh >>> 0) !== (this._worldHash >>> 0))
+          this._applyWorldSync(d);
         this.onWelcome?.();
       } else {
         this.rebuild(d.seed, d.map ?? 0);
@@ -3802,10 +4027,28 @@ export class Game {
           }
         }
         this._replayEdits(d.log);
+        if (d.wh !== undefined && (d.wh >>> 0) !== (this._worldHash >>> 0))
+          this._requestResync('world');
         this._applyRoster(d.r);
+        this._lastSnapshotSeq = null;
         this.onWelcome?.();
       }
     } else if (d.t === 's') {
+      if (d.q !== undefined) {
+        const order = snapshotDisposition(this._lastSnapshotSeq, d.q, !!d.full);
+        if (!order.accept) {
+          if (order.resync) this._requestResync('state');
+          return;
+        }
+        if (d.full) { this._fullP.clear(); this._fullB.clear(); }
+        this._lastSnapshotSeq = d.q;
+      }
+      if (Number.isSafeInteger(d.wr)) {
+        if (d.wr > this.editLog.length
+            || (d.wr === this.editLog.length && d.wh !== undefined
+              && (d.wh >>> 0) !== (this._worldHash >>> 0)))
+          this._requestResync('world');
+      }
       // Same EWMA idiom as Avatar's arrival-jitter tracking: smooth rather
       // than snap, so one late packet doesn't make the corner number jump.
       if (Number.isFinite(d.ts)) {
@@ -3825,7 +4068,8 @@ export class Game {
     this._syncAirstrikeRows(d.a ?? []);
     const want = new Set();
     for (const [idx, r] of this._fullP) {
-      const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades] = r;
+      const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades,
+        ammo, reloadMs, gunClass] = r;
       if (idx === this.myIdx) {
         if (!alive && this.player.alive) this._clientDied();
         // No hud.damage()/sfx.hurt() here anymore — damage() is the sole
@@ -3838,6 +4082,24 @@ export class Game {
         this.player.health = health;
         this.player.blocks = blocks;
         this.player.carrier = !!carrier;
+        if (GUN_CLASSES.includes(gunClass)) {
+          this.player.gunClass = gunClass;
+          this.player._pendingClass = gunClass;
+        }
+        const weaponAcked = !Number.isSafeInteger(d.ack)
+          || d.ack >= this._lastWeaponActionSeq;
+        const ammoChanged = weaponAcked && Number.isInteger(ammo)
+          && GUN_CLASSES.includes(this.player.gunClass)
+          && this.player.ammo[this.player.gunClass] !== ammo;
+        if (ammoChanged) this.player.ammo[this.player.gunClass] = ammo;
+        if (Number.isFinite(reloadMs)) {
+          if (reloadMs > 0 && this.player.reloading <= 0)
+            this.player.reloading = reloadMs / 1000;
+          else if (reloadMs <= 0 && ammo === TOOLS[this.player.gunClass]?.mag)
+            this.player.reloading = 0;
+        }
+        if (ammoChanged && this.player.tool === this.player.gunClass)
+          hud.refreshTool(this.player);
         // Ordinary movement remains client-predicted, but a large divergence
         // means the host rejected a report or corrected state. Snap only then;
         // applying every 15Hz row would make normal movement visibly stutter.
@@ -3931,6 +4193,16 @@ export class Game {
   }
 
   _clientEvent(d) {
+    if (d.k === 'edit' || d.k === 'boom' || d.k === 'col') {
+      const count = d.k === 'col' ? d.cells.length / 3 : 1;
+      if (d.wr !== undefined) {
+        const order = worldEventDisposition(this.editLog.length, d.wr, count);
+        if (!order.accept) {
+          if (order.resync) this._requestResync('world');
+          return;
+        }
+      }
+    }
     switch (d.k) {
       case 'edit': {
         // Explosions and structural collapses already replay their particle
@@ -3942,7 +4214,7 @@ export class Game {
         // screen but the one that caused it.
         const before = this.world.get(d.x, d.y, d.z);
         this.world.set(d.x, d.y, d.z, d.v);
-        this.editLog.push([d.x, d.y, d.z, d.v]); // migration: late joiners get it from us
+        this._appendWorldEdit([d.x, d.y, d.z, d.v]); // migration: late joiners get it from us
         if (!d.v && before) this.effects.blockBurst([{ x: d.x, y: d.y, z: d.z, v: before }]);
         break;
       }
@@ -3956,7 +4228,7 @@ export class Game {
         const r = Math.min(Math.max(d.r ?? 0, 0), 6);
         this.explodeAt(d.x, d.y, d.z, r, null,
           d.strikeId !== undefined ? 'airstrikeImpact' : 'explosion');
-        this.editLog.push(['b', d.x, d.y, d.z, r]);
+        this._appendWorldEdit(['b', d.x, d.y, d.z, r]);
         if (d.strikeId !== undefined) this._removeAirstrikeDrone(d.strikeId);
         break;
       }
@@ -3990,9 +4262,9 @@ export class Game {
         for (let i = 0; i + 2 < d.cells.length; i += 3) {
           const x = d.cells[i] | 0, y = d.cells[i + 1] | 0, z = d.cells[i + 2] | 0;
           const v = this.world.get(x, y, z);
+          if (v) this.world.set(x, y, z, 0);
+          this._appendWorldEdit([x, y, z, 0]); // keep stream history exact despite drift
           if (!v) continue;
-          this.world.set(x, y, z, 0);
-          this.editLog.push([x, y, z, 0]); // migration: we host next, maybe
           cells.push({ x, y, z, v });
         }
         if (cells.length) {
@@ -4041,6 +4313,7 @@ export class Game {
           this.player.body.vel.set(0, 0, 0);
         }
         break;
+      case 'kick': this.onKicked?.(d.reason); break;
       case 'kd': // host's authoritative contribution scoreboard
         this.kd = new Map((d.rows || []).map(r =>
           [String(r[0]).slice(0, 8), contributionRow({ name: cleanName(r[1]),
@@ -4056,6 +4329,8 @@ export class Game {
         this.onRestart?.(MAPS[d.map].name);
         break;
     }
+    if ((d.k === 'edit' || d.k === 'boom' || d.k === 'col') && d.wh !== undefined
+        && (d.wh >>> 0) !== (this._worldHash >>> 0)) this._requestResync('world');
   }
 
   _clientDied(redeploy) {

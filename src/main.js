@@ -12,9 +12,22 @@ import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
   getMotionScale, getMotionLevel, setMotionLevel,
   getColorMode, setColorMode } from './settings.js';
+import { PROTOCOL_VERSION } from './protocol.js';
+import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const diagnostics = window.__spadefallDiagnostics = {
+  protocol: PROTOCOL_VERSION, startedAt: new Date().toISOString(), faults: [],
+  metrics: null, soakCycles: 0,
+};
+const rememberFault = (kind, value) => {
+  diagnostics.faults.push({ kind, at: new Date().toISOString(),
+    message: String(value?.message ?? value ?? 'unknown').slice(0, 500) });
+  if (diagnostics.faults.length > 20) diagnostics.faults.shift();
+};
+window.addEventListener('error', e => rememberFault('error', e.error ?? e.message));
+window.addEventListener('unhandledrejection', e => rememberFault('rejection', e.reason));
 const airstrikeQa = params.has('airstrikeqa');
 const soldierQa = params.has('soldierqa');
 const mapQa = params.has('mapqa');
@@ -91,6 +104,7 @@ scene.add(makeSun());
 let playing = false;
 let net = null;
 let roomCode = null;
+window.addEventListener('pagehide', e => { if (!e.persisted) net?.destroy(); });
 const CALLSIGNS = ['Ace', 'Deuce', 'Trey', 'Joker', 'King', 'Queen', 'Jack', 'Ten'];
 
 function rawName() {
@@ -260,6 +274,18 @@ function failMigration(guest) {
   if (playing) { setPlaying(false); document.exitPointerLock?.(); }
 }
 
+function rejectClientSession(n, message) {
+  if (net !== n) return;
+  n.handlers.onClose = null;
+  game.onHostSilent = null;
+  game.onVersion = null;
+  game.onKicked = null;
+  net = null; game.net = null; game.mode = 'solo';
+  n.destroy();
+  status(message);
+  bailToMenu();
+}
+
 function adoptMigratedHost(n, code, gen) {
   net = n;
   window.__net = n;
@@ -295,6 +321,10 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
   n.handlers.onClose = () => startMigration(n); // the baton can pass again
   n.handlers.onError = () => {};
   game.onHostSilent = () => startMigration(n);
+  game.onVersion = v => rejectClientSession(n,
+    `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
+  game.onKicked = () => rejectClientSession(n,
+    'connection closed after sustained invalid gameplay input');
   console.debug(`[mig] rejoined migrated room ${code} as client`);
   game.clientOnData(welcome); // migrated welcome: world and kit kept as-is
   $('roomcode').querySelector('b').textContent = code;
@@ -340,6 +370,8 @@ async function migrateRoom(deadNet) {
     console.debug(`[mig] gen${gen} knock ${migCode} -> ${k.kind}`);
     if (net !== deadNet) { k.conn?.close(); return; }
     if (k.kind === 'join') return adoptMigratedClient(guest, k.conn, migCode, k.welcome, gen);
+    if (k.kind === 'version') return rejectClientSession(deadNet,
+      'game version mismatch after host migration — refresh this page');
     await sleep(700); // 'dead' (nobody hosting yet) and 'down' (broker hiccup)
                       // both just mean: try again until the deadline.
   }
@@ -375,6 +407,10 @@ function adoptJoin(n, code) {
   n.handlers.onData = d => game.clientOnData(d);
   n.handlers.onClose = () => startMigration(n);
   game.onHostSilent = () => startMigration(n);
+  game.onVersion = v => rejectClientSession(n,
+    `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
+  game.onKicked = () => rejectClientSession(n,
+    'connection closed after sustained invalid gameplay input');
   n.handlers.onError = e => {
     // Join failed before the match started — reset so the lobby still works.
     if (net === n) { net = null; game.net = null; game.mode = 'solo'; }
@@ -676,7 +712,8 @@ $('joinBtn').addEventListener('click', () => {
   status('connecting…');
   const n = Net.join(code, {});
   adoptJoin(n, code);
-  n.handlers.onOpen = () => n.send({ t: 'hi', name: game.player.name, team: teamPref() });
+  n.handlers.onOpen = () => n.send({ t: 'hi', v: PROTOCOL_VERSION,
+    name: game.player.name, team: teamPref() });
   if (document.pointerLockElement === renderer.domElement) setPlaying(true);
 });
 
@@ -742,6 +779,7 @@ $('quickBtn').addEventListener('click', async () => {
       game.hud.message(`HOSTING PUBLIC ROOM ${r.slot + 1} — PLAYERS WILL DROP IN`, '#ffd97a');
     } else {
       status(r.kind === 'down' ? 'cannot reach the matchmaking service — check your connection'
+        : r.kind === 'version' ? 'game version mismatch — refresh this page'
         : r.kind === 'timeout' ? 'matchmaking is taking too long — try again, or HOST a private room'
         : 'all public rooms are full — try again shortly, or HOST a private room');
       bailToMenu();
@@ -840,6 +878,7 @@ async function joinFromBrowser(room) {
   } else {
     guest.destroy();
     browseSt.textContent = k.kind === 'full' ? 'that room just filled up'
+      : k.kind === 'version' ? 'game version mismatch — refresh this page'
       : k.kind === 'down' ? 'cannot reach the matchmaking service — check your connection'
       : 'that room just ended';
     if (k.kind !== 'down') scanRooms(); // show what is actually live now
@@ -970,6 +1009,11 @@ let fpsEma = 60, fpsDisplayT = 0;
 const perfOn = params.has('perf');
 const perfSamples = new Float32Array(240);
 let perfCount = 0, perfCursor = 0;
+const runtimeHealth = new RuntimeHealth(240);
+let resourceBaseline = null;
+const soakOn = params.has('soak');
+const soakEvery = Math.max(5, parseInt(params.get('soak'), 10) || 12);
+let soakT = 0;
 if (perfOn) $('perf').style.display = 'block';
 let menuT = Math.PI * 0.15;
 let menuMapT = 0; // seconds the current backdrop map has been showing
@@ -1013,6 +1057,7 @@ function frame() {
   const dt = Math.min(wallDt, 0.05);        // sim step, capped for physics
 
   if (wallDt > 0) fpsEma = fpsEma * 0.9 + (1 / wallDt) * 0.1;
+  if (wallDt > 0) runtimeHealth.frame(wallDt * 1000);
   if (perfOn && wallDt > 0) {
     perfSamples[perfCursor] = wallDt * 1000;
     perfCursor = (perfCursor + 1) % perfSamples.length;
@@ -1027,14 +1072,42 @@ function frame() {
       el.textContent = f + ' fps';
       el.className = f < 25 ? 'bad' : f < 45 ? 'warn' : '';
     }
+    const info = renderer.info.render, memory = renderer.info.memory;
+    const n = game.net?.stats?.();
+    const resources = { geometries: memory.geometries, textures: memory.textures,
+      sceneObjects: game.runtimeCounts().sceneObjects };
+    if (!resourceBaseline && runtimeHealth.totalFrames >= 240) resourceBaseline = { ...resources };
+    const report = runtimeHealth.snapshot({ drawCalls: info.calls, triangles: info.triangles,
+      particles: game.effects.particles.length,
+      networkBytesPerSecond: (n?.sentBytesPerSecond ?? 0) + (n?.recvBytesPerSecond ?? 0) });
+    game.runtimeHealth = report;
+    diagnostics.metrics = { ...report, ...game.runtimeCounts(), resources,
+      resourceDrift: resourceBaseline ? resourceDrift(resourceBaseline, resources) : null };
     if (perfOn && perfCount) {
       const sorted = Array.from(perfSamples.slice(0, perfCount)).sort((a, b) => a - b);
       const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-      const info = renderer.info.render;
       $('perf').textContent = `${getGfxLevel().toUpperCase()}  ${innerWidth}×${innerHeight}\n`
         + `frame p95 ${p95.toFixed(1)}ms\n`
         + `${info.calls} calls  ${info.triangles} tris\n`
-        + `${game.effects.particles.length} debris`;
+        + `${game.effects.particles.length} debris\n`
+        + `${report.budget.pass ? 'release budgets pass' : 'release budget exceeded'}`
+        + (soakOn ? `\n${diagnostics.soakCycles} soak rotations` : '');
+    }
+  }
+
+  // Opt-in browser soak mode: repeatedly rebuilds/rotates the authoritative
+  // match while the normal diagnostics watch GPU resources and frame/network
+  // budgets. It never runs in ordinary play and never rebuilds a guest.
+  if (soakOn && game.mode !== 'client') {
+    soakT += wallDt;
+    if (soakT >= soakEvery) {
+      soakT = 0;
+      const pool = MAPS.map((m, i) => i).filter(i => MAPS[i].modes.includes(game.gameMode));
+      const next = pool[(pool.indexOf(game.mapIndex) + 1) % pool.length];
+      const seed = (game.seed + 104729) % 1e9;
+      if (game.mode === 'host') game._restartRound(next, seed);
+      else game.rebuild(seed, next);
+      diagnostics.soakCycles++;
     }
   }
 

@@ -51,6 +51,7 @@ import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors
   operationComplete, operationFromRow, operationLeg, operationRow,
   operationSideForColor, operationSideLabel, operationWinner,
   recordOperationResult } from './operations.js';
+import { balanceHumanTeams } from './team-balance.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -1170,6 +1171,8 @@ export class Game {
     this._lastStationRows = [];          // field-cache cooldown/capture migration state
     this._momentumHostEnabled = this.mode !== 'client'
       && !!this.engagementFeatures.momentumBalance;
+    this._teamBalanceHostEnabled = this.mode !== 'client'
+      && !!this.engagementFeatures.teamBalance;
     this._teamStreakUses = { green: 0, blue: 0 };
     this._lastMomentumRow = [this._momentumHostEnabled ? 1 : 0, 0, 0];
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
@@ -3432,11 +3435,13 @@ export class Game {
     hud.operationReport(this);
     $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
     const operationDone = operationComplete(this.operation);
-    $('endNote').textContent = operationDone
+    const balanceNote = this.teamBalanceEnabled() && !this.operation
+      ? ' · teams balance between rounds' : '';
+    $('endNote').textContent = (operationDone
       ? 'operation complete · vote for a new operation or leave'
       : this.mode === 'client'
         ? `next up: ${next} · waiting for host`
-        : `next up: ${next} · ${POST_MATCH_TIME}s`;
+        : `next up: ${next} · ${POST_MATCH_TIME}s`) + balanceNote;
     $('end').classList.remove('hidden');
     this._publishRematchState();
     this._publishSquadState();
@@ -3473,18 +3478,18 @@ export class Game {
   }
 
   _restartRound(map, seed) {
-    this._activeSquads = this.engagementFeatures.stayAsSquad
-      ? staySquadGroups(this._humanSquadRows(), [...this._squadVotes]) : [];
-    // Swap green<->blue for everyone before the next map generates. Team
-    // COMPOSITION doesn't change — who's grouped with whom stays put — only
-    // which color/side that group is called. Bases and flag stands never
-    // move, so this is what actually varies which side of the map you play:
-    // last map's green corner is blue's corner this map. Host/solo only —
-    // _rotate never runs on a client; they pick the change up from the
-    // roster broadcast below (see _applyRoster's self-sync).
-    const flip = t => (t === 'blue' ? 'green' : 'blue');
-    this.player.team = flip(this.player.team);
-    for (const p of this.remote.values()) p.team = flip(p.team);
+    this._activeSquads = staySquadGroups(this._humanSquadRows(), [...this._squadVotes]);
+    // Normal rounds rotate everyone green<->blue. With Phase 8 enabled, that
+    // full side flip is the preferred baseline but a sufficiently lopsided
+    // prior result can recompose the human teams here; explicit squads remain
+    // atomic. Operations deliberately retain fixed forces across all legs.
+    // Host/solo only — clients receive the result in the roster below.
+    const balance = this._balanceNextRoundTeams();
+    if (!balance.enabled) {
+      const flip = t => (t === 'blue' ? 'green' : 'blue');
+      this.player.team = flip(this.player.team);
+      for (const p of this.remote.values()) p.team = flip(p.team);
+    }
     if (this.operation) this.operation = flipOperationColors(this.operation);
     if (this.mode === 'host')
       this.net.broadcast({ t: 'e', k: 'restart', map, seed,
@@ -3493,7 +3498,35 @@ export class Game {
     // Fresh world, fresh bot ids: everyone rebuilds their replica and needs
     // the roster again (their full-state maps were cleared on rebuild).
     if (this.mode === 'host') this.net.broadcast(this._rosterMsg());
+    if (balance.adjusted)
+      this.message('TEAMS BALANCED FOR THE NEXT ROUND · CONFIRMED SQUADS KEPT TOGETHER', '#ffd97a');
     this.onRestart?.(MAPS[map].name);
+  }
+
+  teamBalanceEnabled() {
+    return this.mode === 'client' ? !!this._teamBalanceHostEnabled
+      : !!(this._teamBalanceHostEnabled || this.engagementFeatures.teamBalance);
+  }
+
+  _balanceNextRoundTeams() {
+    const humans = [this.player, ...this.remote.values()];
+    // An Operation is one contest across three legs. Re-drafting its rosters
+    // between maps would make the Alpha/Bravo series score meaningless.
+    if (!this.teamBalanceEnabled() || this.operation || humans.length < 2)
+      return { enabled: false, adjusted: false };
+    const players = humans.map(p => ({
+      key: this._kdKey(p),
+      team: p.team,
+      rating: this.kd.get(this._kdKey(p))?.score ?? 0,
+    }));
+    const botScores = this.bots.map(b => this.kd.get(this._kdKey(b))?.score)
+      .filter(Number.isFinite);
+    const botRating = botScores.length
+      ? botScores.reduce((sum, score) => sum + score, 0) / botScores.length : 0;
+    const result = balanceHumanTeams(players, this._activeSquads,
+      teamSizeForMode(this.gameMode), botRating);
+    for (const p of humans) p.team = result.assignments[this._kdKey(p)] ?? p.team;
+    return { enabled: true, adjusted: result.moved > 0, result };
   }
 
   _humanKeys() {
@@ -3681,6 +3714,7 @@ export class Game {
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
           op: this._operationRow(),
           mb: this._momentumRow(),
+          tb: this.teamBalanceEnabled() ? 1 : 0,
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
@@ -3954,7 +3988,7 @@ export class Game {
     // When the requested side is full, fall back to the side with a seat;
     // AUTO still chooses the less-populated human team.
     const team = chooseTeam(teamPref, teamCounts(this.player.team, this.remote.values()),
-      teamSizeForMode(this.gameMode));
+      teamSizeForMode(this.gameMode), this.teamBalanceEnabled());
     if (!team) {
       this.net.sendTo(id, { t: 'full' });
       setTimeout(() => this.net.conns.get(id)?.close(), 400);
@@ -3969,6 +4003,7 @@ export class Game {
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
       op: this._operationRow(),
       mb: this._momentumRow(),
+      tb: this.teamBalanceEnabled() ? 1 : 0,
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this.over) {
@@ -4257,6 +4292,7 @@ export class Game {
         Math.max(0, Math.round(s.t * 1000)), s.owner]),
       u: this._abilityRows(),
       mb: this._momentumRow(),
+      tb: this.teamBalanceEnabled() ? 1 : 0,
       l: this._stationRows(),
       m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
         Math.max(0, Math.round(this.matchElapsed * 10))],
@@ -4312,7 +4348,7 @@ export class Game {
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
         f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, u: snap.u, mb: snap.mb, l: snap.l, m: snap.m,
+        a: snap.a, u: snap.u, mb: snap.mb, tb: snap.tb, l: snap.l, m: snap.m,
         op: snap.op, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
@@ -4441,6 +4477,7 @@ export class Game {
       this.myIdx = d.me;
       this.player.team = d.team;
       if (d.mb !== undefined) this._applyMomentumRow(d.mb);
+      if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
       if (d.op !== undefined) this._applyOperationRow(d.op);
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
       if (d.migrated) {
@@ -4529,6 +4566,7 @@ export class Game {
     mergeSnapshot(this._fullP, this._fullB, d);
     this._syncAirstrikeRows(d.a ?? []);
     if (d.mb !== undefined) this._applyMomentumRow(d.mb);
+    if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
     if (d.op !== undefined) this._applyOperationRow(d.op);
     const want = new Set();
     for (const [idx, r] of this._fullP) {

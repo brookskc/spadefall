@@ -36,17 +36,22 @@ export function teamCounts(hostTeam, remotes) {
   return counts;
 }
 
-// Honor a preference only while that side has a human seat. Otherwise choose
-// the less populated side that still has room. Null means the room is full.
-export function chooseTeam(preference, counts, teamSize = TEAM_SIZE) {
+// Honor a preference while that side has a human seat. With optional balance
+// enabled, an existing count gap takes precedence and the arrival fills the
+// smaller human side. Null means the room is full.
+export function chooseTeam(preference, counts, teamSize = TEAM_SIZE, balance = false) {
   const green = Math.max(0, counts?.green | 0);
   const blue = Math.max(0, counts?.blue | 0);
   const roomOn = team => (team === 'green' ? green : blue) < teamSize;
-  if ((preference === 'green' || preference === 'blue') && roomOn(preference))
-    return preference;
   if (!roomOn('green') && !roomOn('blue')) return null;
   if (!roomOn('green')) return 'blue';
   if (!roomOn('blue')) return 'green';
+  // Optional Phase 8 policy: a preference is still honored when human
+  // counts are tied, but it cannot grow an already larger side. Bots fill
+  // the remaining seats either way, so this concerns human composition.
+  if (balance && green !== blue) return green < blue ? 'green' : 'blue';
+  if ((preference === 'green' || preference === 'blue') && roomOn(preference))
+    return preference;
   return green <= blue ? 'green' : 'blue';
 }
 

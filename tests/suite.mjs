@@ -56,6 +56,7 @@ import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors
   operationComplete, operationFromRow, operationLeg, operationRow,
   operationSideForColor, operationWinner, recordOperationResult,
   validOperationRow } from '../src/operations.js';
+import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
@@ -1128,6 +1129,55 @@ function stayAsSquadTests() {
       && !validServerMessage({ t: 'e', k: 'squad', voters: Array(11).fill(0).map((_, i) => `p${i}`) }));
 }
 
+function teamBalanceTests() {
+  group('phase eight: transparent between-round team balance');
+  ok('balanced live joins cannot grow the already larger human side',
+    chooseTeam('green', { green: 3, blue: 1 }, 5, true) === 'blue'
+      && chooseTeam('green', { green: 2, blue: 2 }, 5, true) === 'green');
+
+  const fair = balanceHumanTeams([
+    { key: 'p0', team: 'green', rating: 900 },
+    { key: 'p1', team: 'green', rating: 100 },
+    { key: 'p2', team: 'blue', rating: 800 },
+    { key: 'p3', team: 'blue', rating: 200 },
+  ], [], 5, 300);
+  ok('already fair compositions simply rotate map sides',
+    fair.moved === 0 && fair.sizeGap === 0 && fair.ratingGap === 0
+      && fair.assignments.p0 === 'blue' && fair.assignments.p2 === 'green');
+
+  const stacked = balanceHumanTeams([
+    { key: 'p0', team: 'green', rating: 1000 },
+    { key: 'p1', team: 'green', rating: 900 },
+    { key: 'p2', team: 'blue', rating: 100 },
+    { key: 'p3', team: 'blue', rating: 50 },
+  ], [], 2);
+  ok('a clear prior-round stack is split into equal, closely rated sides',
+    stacked.sizeGap === 0 && stacked.ratingGap === 50 && stacked.moved === 2);
+
+  const squad = balanceHumanTeams([
+    { key: 'p0', team: 'green', rating: 1000 },
+    { key: 'p1', team: 'green', rating: 900 },
+    { key: 'p2', team: 'blue', rating: 100 },
+    { key: 'p3', team: 'blue', rating: 50 },
+  ], [['p0', 'p1']], 2);
+  ok('a mutually confirmed squad is never split to manufacture a closer result',
+    squad.assignments.p0 === squad.assignments.p1 && squad.groups === 1);
+
+  const close = balanceHumanTeams([
+    { key: 'p0', team: 'green', rating: 550 },
+    { key: 'p1', team: 'green', rating: 450 },
+    { key: 'p2', team: 'blue', rating: 500 },
+    { key: 'p3', team: 'blue', rating: 400 },
+  ], [], 2);
+  ok('small projected gains do not justify disruptive roster churn',
+    close.moved === 0 && close.cost <= close.ratingGap + TEAM_REASSIGNMENT_COST);
+
+  const phaseEightSnapshot = { t: 's', p: [], b: [], c: [0, 0], g: [], tb: 1 };
+  ok('the host balance policy survives bounded snapshot synchronization',
+    validServerMessage(phaseEightSnapshot)
+      && !validServerMessage({ ...phaseEightSnapshot, tb: 2 }));
+}
+
 function operationTests() {
   group('phase six: optional three-match operations');
   ok('every operation is a mode-compatible KOTH → CTF → TDM arc',
@@ -1833,6 +1883,7 @@ export async function run() {
   deathRecapTests();
   selectedGoalTests();
   stayAsSquadTests();
+  teamBalanceTests();
   operationTests();
   damageDirectionTests();
   airstrikeDroneTests();

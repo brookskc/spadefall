@@ -6,7 +6,7 @@ import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -82,6 +82,7 @@ function validSnapshot(d) {
       || (d.mb[0] !== 0 && d.mb[0] !== 1)
       || !Number.isInteger(d.mb[1]) || d.mb[1] < 0 || d.mb[1] > 100
       || !Number.isInteger(d.mb[2]) || d.mb[2] < 0 || d.mb[2] > 100)) return false;
+  if (d.tb !== undefined && d.tb !== 0 && d.tb !== 1) return false;
   if (d.w !== undefined && d.w !== null && !team(d.w)) return false;
   if (!Array.isArray(d.g) || d.g.length > 16 || !d.g.every(v => finiteArray(v, 3))) return false;
   if (d.a !== undefined && (!Array.isArray(d.a) || d.a.length > 10
@@ -197,7 +198,8 @@ export function validServerMessage(d) {
     && (d.mb === undefined || (finiteArray(d.mb, 3)
       && (d.mb[0] === 0 || d.mb[0] === 1)
       && Number.isInteger(d.mb[1]) && d.mb[1] >= 0 && d.mb[1] <= 100
-      && Number.isInteger(d.mb[2]) && d.mb[2] >= 0 && d.mb[2] <= 100));
+      && Number.isInteger(d.mb[2]) && d.mb[2] >= 0 && d.mb[2] <= 100))
+    && (d.tb === undefined || d.tb === 0 || d.tb === 1);
   if (d.t === 'sync') return finite(d.seed)
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && validEditLog(d.log)

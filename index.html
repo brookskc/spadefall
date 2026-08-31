@@ -56,6 +56,8 @@
     border:1px solid rgba(255,255,255,.4); border-radius:4px; padding:4px 8px;
     font-size:12px; letter-spacing:1px; text-transform:uppercase; outline:none; }
   .prefs select:focus { border-color:#ffd97a; }
+  #operationPick { display:none; }
+  html[data-operations="on"] #operationPick { display:block; }
 
   /* lifetime stats + gun color unlocks — client-side only, see stats.js */
   #statsPanel { margin-top:18px; font-size:12px; letter-spacing:1.5px; opacity:.8; }
@@ -161,7 +163,7 @@
      centers by its own visible width, so the block sits dead-center under
      the title instead of drifting right on invisible label padding. */
   .controls b { color:#ffd97a; font-weight:600; }
-  #end { justify-content:flex-start; padding-top:26px; padding-bottom:28px; }
+  #end { justify-content:flex-start; padding-top:26px; padding-bottom:28px; overflow-y:auto; }
   #endTitle { font-size:52px; font-weight:800; letter-spacing:4px; }
   #endDetail { margin-top:10px; font-size:16px; opacity:.75; }
   #endReport { width:min(760px,94vw); margin-top:18px; }
@@ -190,6 +192,18 @@
   #endGoalName { margin-left:8px; font-size:11px; letter-spacing:1.7px; }
   #endGoalResult { color:#e8ecf2; font-size:10px; letter-spacing:1.5px; opacity:.65; }
   #endGoal.complete #endGoalResult { color:#ffd97a; opacity:1; }
+  #endOperation { display:none; width:min(736px,90vw); margin-top:11px; box-sizing:border-box;
+    padding:10px 13px; border-left:4px solid #8faee0; background:rgba(10,14,22,.78);
+    text-align:left; text-transform:uppercase; }
+  #endOperation.on { display:block; }
+  #endOperationLabel { display:block; color:#8faee0; font-size:8px; letter-spacing:2.5px; }
+  #endOperationTitle { display:block; margin-top:4px; font-size:14px; letter-spacing:2px; }
+  #endOperationDetail { display:block; margin-top:3px; font-size:9px; letter-spacing:1.2px; opacity:.62; }
+  #operationLeaveBtn { display:none; margin-top:9px; padding:7px 14px; color:#e8ecf2;
+    background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.24);
+    font-family:inherit; font-size:10px; letter-spacing:1.5px; cursor:pointer; }
+  #operationLeaveBtn.on { display:block; }
+  #operationLeaveBtn:hover { background:rgba(255,255,255,.1); }
   #endStory { display:none; width:min(736px,90vw); margin-top:13px; box-sizing:border-box;
     padding:9px 13px; border-left:4px solid #ffd97a; background:rgba(10,14,22,.72);
     text-align:left; text-transform:uppercase; }
@@ -480,6 +494,9 @@
     color:rgba(255,255,255,.82); }
   #matchclock.urgent { color:#ffd97a; }
   #matchclock.overtime { color:#ffd97a; animation:blink 1.2s infinite; }
+  #operationHud { display:none; margin-top:4px; color:#a9c5ee; font-size:8px;
+    font-weight:700; letter-spacing:1.2px; white-space:nowrap; }
+  #operationHud.on { display:block; }
 
   #feed { right:22px; top:60px; text-align:right; font-size:13px; line-height:1.8; }
   #feed div { opacity:.9; text-shadow:0 1px 3px rgba(0,0,0,.7); }
@@ -674,6 +691,7 @@
       <div id="score"><span class="g">GREEN 0</span><span style="opacity:.4">—</span><span class="b">0 BLUE</span></div>
       <div id="flagstate">first to 3 captures</div>
       <div id="matchclock">12:00</div>
+      <div id="operationHud"></div>
     </div>
     <div id="feed"></div>
     <div id="msg"></div>
@@ -723,7 +741,14 @@
     <div class="browselink home-only">
       or <span class="plink" id="browseBtn">browse public rooms</span> and pick one yourself
     </div>
-    <div class="prefs home-only">
+    <div class="prefs home-only" id="operationPick">
+      when you host — session <select id="operationPref">
+        <option value="standard">standard rotation</option>
+        <option value="operation">three-match operation</option>
+      </select>
+      <small>KOTH → CTF → TDM</small>
+    </div>
+    <div class="prefs home-only" id="standardHostPrefs">
       when you host — mode <select id="modePref">
         <option value="ctf">capture the flag</option>
         <option value="tdm">team deathmatch</option>
@@ -831,6 +856,12 @@
       <span><span id="endGoalLabel">PERSONAL FIELD GOAL</span><b id="endGoalName"></b></span>
       <span id="endGoalResult"></span>
     </div>
+    <div id="endOperation">
+      <span id="endOperationLabel"></span>
+      <b id="endOperationTitle"></b>
+      <small id="endOperationDetail"></small>
+    </div>
+    <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
     <div id="endStory">
       <span id="endStoryLabel">BATTLEFIELD STORY</span>
       <b id="endStoryTitle"></b>
@@ -846,6 +877,6 @@
     <div id="endNote">rotating to the next map…</div>
   </div>
 
-  <script type="module" src="./src/main.js?v=21"></script>
+  <script type="module" src="./src/main.js?v=22"></script>
 </body>
 </html>

@@ -4,14 +4,16 @@ import { TEAM_PING_KINDS, validPingDirection } from './social.js';
 import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
+import { validOperationRow } from './operations.js';
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
 const shortString = (value, max) => typeof value === 'string' && value.length <= max;
 const finiteArray = (value, length) =>
   Array.isArray(value) && value.length === length && value.every(finite);
+const operation = value => value === null || validOperationRow(value);
 const rows = (value, width, max) =>
   Array.isArray(value) && value.length <= max
     && value.every(row => Array.isArray(row) && row.length >= width
@@ -75,6 +77,7 @@ function validSnapshot(d) {
   if (!finiteArray(d.c, 2)) return false;
   if (d.m !== undefined && (!finiteArray(d.m, 3) || d.m[0] < 0 || d.m[0] > 36000
       || (d.m[1] !== 0 && d.m[1] !== 1) || d.m[2] < 0)) return false;
+  if (d.op !== undefined && !operation(d.op)) return false;
   if (d.w !== undefined && d.w !== null && !team(d.w)) return false;
   if (!Array.isArray(d.g) || d.g.length > 16 || !d.g.every(v => finiteArray(v, 3))) return false;
   if (d.a !== undefined && (!Array.isArray(d.a) || d.a.length > 10
@@ -163,8 +166,11 @@ function validEvent(d) {
         && shortString(String(r[1] ?? ''), 64) && team(r[2]) && finite(r[3]) && finite(r[4])
         && r.slice(5, 8).every(finite));
     case 'end': return team(d.winner)
-      && (d.story === undefined || validVoxelStoryMetrics(d.story));
-    case 'restart': return finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6;
+      && (d.story === undefined || validVoxelStoryMetrics(d.story))
+      && (d.op === undefined || operation(d.op));
+    case 'restart': return finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+      && ['ctf', 'tdm', 'koth'].includes(d.mode)
+      && (d.op === undefined || operation(d.op));
     default: return false;
   }
 }
@@ -176,12 +182,14 @@ export function validServerMessage(d) {
   if (d.t === 'r') return validRoster(d);
   if (d.t === 'w') return shortString(String(d.id ?? ''), 128) && team(d.team)
     && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
     && (d.reset === undefined || d.reset === 0 || d.reset === 1)
     && (d.migrated || parseSpawnRow(d.spawn))
     && (!d.reset || parseSpawnRow(d.spawn))
     && (d.wr === undefined || (Number.isSafeInteger(d.wr) && d.wr === d.log.length))
-    && (d.wh === undefined || (Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff));
+    && (d.wh === undefined || (Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff))
+    && (d.op === undefined || operation(d.op));
   if (d.t === 'sync') return finite(d.seed)
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && validEditLog(d.log)

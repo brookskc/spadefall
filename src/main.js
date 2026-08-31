@@ -15,12 +15,15 @@ import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
 import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
+import { OPERATION_PLANS } from './operations.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
 if (engagementFeatures.selectedGoals)
   document.documentElement.dataset.selectedGoals = 'on';
+if (engagementFeatures.operations)
+  document.documentElement.dataset.operations = 'on';
 const engagement = new EngagementTracker();
 engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
@@ -213,6 +216,7 @@ function setPlaying(v) {
 }
 
 $('leaveBtn').addEventListener('click', () => location.reload());
+$('operationLeaveBtn').addEventListener('click', () => location.reload());
 
 function deploy() {
   initAudio();
@@ -470,7 +474,7 @@ function adoptJoin(n, code) {
 // claim — never on migration promotion, so a replica keeps the room's
 // running map and mode. gameMode must be set BEFORE rebuild(), since flags
 // only exist in CTF. ?map=2&mode=tdm are test hooks that force the selects.
-const mapPref = $('mapPref'), modePref = $('modePref');
+const mapPref = $('mapPref'), modePref = $('modePref'), operationPref = $('operationPref');
 {
   // The map list follows the mode: each map declares which modes it supports
   // (DUNES is retired from the CTF rotation; CROWN and CALDERA are hill-first).
@@ -499,6 +503,21 @@ const mapPref = $('mapPref'), modePref = $('modePref');
   rebuildMapPref();
   const pm = parseInt(params.get('map'), 10);
   if (Number.isInteger(pm) && pm >= 0 && pm < MAPS.length) mapPref.value = String(pm);
+
+  const renderOperationPref = () => {
+    const enabled = engagementFeatures.operations && operationPref.value === 'operation';
+    $('standardHostPrefs').style.display = enabled ? 'none' : '';
+  };
+  if (engagementFeatures.operations) {
+    try { operationPref.value = localStorage.getItem('tos.operation') ?? 'standard'; }
+    catch { operationPref.value = 'standard'; }
+    if (params.has('operation')) operationPref.value = 'operation';
+    operationPref.addEventListener('change', () => {
+      try { localStorage.setItem('tos.operation', operationPref.value); } catch { /* best effort */ }
+      renderOperationPref();
+    });
+  }
+  renderOperationPref();
 }
 
 // Lifetime stats + gun color unlocks (see stats.js). Purely a home-screen
@@ -717,6 +736,13 @@ function teamPref() {
 // Returns the map index to start the new room on: the pinned map if it's
 // mode-compatible, else a random pick from the maps this mode supports.
 function applyHostPrefs() {
+  if (engagementFeatures.operations && operationPref.value === 'operation') {
+    const requested = Number.parseInt(params.get('operation'), 10);
+    const plan = Number.isInteger(requested) && OPERATION_PLANS[requested]
+      ? requested : Math.floor(Math.random() * OPERATION_PLANS.length);
+    return game.startOperation(plan).map;
+  }
+  game.clearOperation();
   const mode = ['ctf', 'tdm', 'koth'].includes(modePref.value) ? modePref.value : 'ctf';
   game.gameMode = mode;
   const v = parseInt(mapPref.value, 10);

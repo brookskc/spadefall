@@ -46,6 +46,10 @@ import { FirstMinuteGuide } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
 import { SelectedGoalTracker } from './selected-goals.js';
+import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
+  operationComplete, operationFromRow, operationLeg, operationRow,
+  operationSideForColor, operationSideLabel, operationWinner,
+  recordOperationResult } from './operations.js';
 
 const WIN_SCORE = 3;
 const POST_MATCH_TIME = 14;
@@ -462,11 +466,15 @@ const hud = {
   rematch(g, voters = [], needed = 1) {
     const btn = $('rematchBtn');
     if (!btn) return;
+    const operationDone = operationComplete(g.operation);
+    btn.style.display = g.operation && !operationDone ? 'none' : '';
+    if (g.operation && !operationDone) return;
     const mine = g._kdKey(g.player);
     const voted = voters.includes(mine);
     btn.disabled = voted;
     btn.classList.toggle('voted', voted);
-    btn.textContent = `${voted ? 'REMATCH VOTED' : 'VOTE REMATCH'} · ${voters.length}/${needed}`;
+    const action = operationDone ? 'NEW OPERATION' : 'REMATCH';
+    btn.textContent = `${voted ? `${action} VOTED` : `VOTE ${action}`} · ${voters.length}/${needed}`;
   },
   staySquad(g, voters = []) {
     const wrap = $('squadReady');
@@ -484,6 +492,45 @@ const hud = {
       : state.voted
         ? `WAITING FOR TEAM · ${state.ready}/${state.teammates}`
         : `STAY AS SQUAD · ${state.ready}/${state.teammates}`;
+  },
+  operation(g) {
+    const el = $('operationHud');
+    if (!el) return;
+    const op = g.operation;
+    el.classList.toggle('on', !!op);
+    if (!op) return;
+    const plan = OPERATION_PLANS[op.plan];
+    const mine = operationSideForColor(op, g.player.team);
+    const text = `OPERATION ${plan.name} · LEG ${op.leg + 1}/${plan.legs.length}`
+      + ` · ALPHA ${op.wins[0]}—${op.wins[1]} BRAVO · YOU ${operationSideLabel(mine)}`;
+    if (el.textContent !== text) el.textContent = text;
+  },
+  operationReport(g) {
+    const el = $('endOperation');
+    const leave = $('operationLeaveBtn');
+    if (!el || !leave) return;
+    const op = g.operation;
+    el.classList.toggle('on', !!op);
+    leave.classList.toggle('on', !!op);
+    if (!op) return;
+    const plan = OPERATION_PLANS[op.plan];
+    const mine = operationSideForColor(op, g.player.team);
+    const mineIndex = mine === 'bravo' ? 1 : 0;
+    const myWins = op.wins[mineIndex], theirWins = op.wins[1 - mineIndex];
+    const done = operationComplete(op);
+    $('endOperationLabel').textContent = `OPERATION ${plan.name} · `
+      + (done ? 'FINAL REPORT' : `LEG ${op.leg + 1}/${plan.legs.length}`);
+    $('endOperationTitle').textContent = done
+      ? `${operationWinner(op) === mine ? 'OPERATION WON' : 'OPERATION LOST'} · ${myWins}—${theirWins}`
+      : `YOUR FORCE ${myWins}—${theirWins} OPPOSITION`;
+    const results = op.results.map((winner, i) => {
+      const leg = plan.legs[i];
+      return `${MAPS[leg.map].name} ${winner === mineIndex ? 'W' : 'L'}`;
+    });
+    const next = !done ? operationLeg(op, 1) : null;
+    $('endOperationDetail').textContent = results.join(' · ')
+      + (next ? ` · NEXT ${MAPS[next.map].name} ${next.mode.toUpperCase()}` : '');
+    leave.textContent = done ? 'RETURN TO MAIN MENU' : 'LEAVE OPERATION';
   },
   fieldStation(g) {
     const el = $('fieldStation');
@@ -1109,6 +1156,7 @@ export class Game {
     this._squadVotes = new Set();
     this._activeSquads = [];
     this._squadHostEnabled = false;
+    this.operation = null;                // optional host-authored three-match arc
     this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
     this._pendingStrikes = [];           // host/solo authoritative impact timers
     this._airstrikeDrones = new Map();   // every mode: local visual replicas by strike id
@@ -1362,6 +1410,28 @@ export class Game {
     this._statsSeen = { k: 0, d: 0 }; // fresh baseline — see the constructor note
     this._kdSeed();
     hud.score(this);
+    hud.operation(this);
+  }
+
+  startOperation(plan = 0) {
+    this.operation = createOperation(plan);
+    this.mapLock = null;
+    const leg = operationLeg(this.operation);
+    this.gameMode = leg.mode;
+    hud.operation(this);
+    return leg;
+  }
+
+  clearOperation() {
+    this.operation = null;
+    hud.operation(this);
+  }
+
+  _operationRow() { return operationRow(this.operation); }
+
+  _applyOperationRow(row) {
+    this.operation = row == null ? null : operationFromRow(row);
+    hud.operation(this);
   }
 
   // Scoreboard rows are keyed by roster index, not by display name: the bot
@@ -3237,15 +3307,21 @@ export class Game {
     hud.clock(this);
   }
 
-  _end(winner, authoritativeStory = null) {
+  _end(winner, authoritativeStory = null, authoritativeOperation = undefined) {
+    if (authoritativeOperation !== undefined) this._applyOperationRow(authoritativeOperation);
     if (this.over) {
       // A snapshot can announce game-over just ahead of the reliable end
       // event. Let that later event replace the locally reconstructed story
       // with the host's complete bounded counters.
       if (this.voxelStory && authoritativeStory)
         hud.voxelStory(voxelBattleStory(authoritativeStory));
+      hud.operationReport(this);
       return;
     }
+    // Only the authority settles a leg. Clients display the bounded state
+    // carried by the end event/snapshot, avoiding divergent series scores.
+    if (this.mode !== 'client' && this.operation)
+      this.operation = recordOperationResult(this.operation, winner);
     this._broadcastScoreboard(true);
     this.over = true;
     this.winner = winner;
@@ -3254,7 +3330,7 @@ export class Game {
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     if (this.mode === 'host') {
-      const event = { t: 'e', k: 'end', winner };
+      const event = { t: 'e', k: 'end', winner, op: this._operationRow() };
       if (storyMetrics) event.story = storyMetrics;
       this.net.broadcast(event);
     }
@@ -3282,21 +3358,28 @@ export class Game {
     hud.matchReport(this, report, recordUpdate);
     hud.selectedGoalResult(this.selectedGoal?.result());
     hud.voxelStory(story);
+    hud.operation(this);
+    hud.operationReport(this);
     $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
-    $('endNote').textContent = this.mode === 'client'
-      ? `next up: ${next} · waiting for host`
-      : `next up: ${next} · ${POST_MATCH_TIME}s`;
+    const operationDone = operationComplete(this.operation);
+    $('endNote').textContent = operationDone
+      ? 'operation complete · vote for a new operation or leave'
+      : this.mode === 'client'
+        ? `next up: ${next} · waiting for host`
+        : `next up: ${next} · ${POST_MATCH_TIME}s`;
     $('end').classList.remove('hidden');
     this._publishRematchState();
     this._publishSquadState();
     if (!won) sfx.lose();
     // The room rotates maps on its own a few seconds after the final capture.
-    if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
+    if (this.mode !== 'client') this._rotateT = operationDone ? null : POST_MATCH_TIME;
   }
 
   // Next map in the rotation for the CURRENT mode: a host pin wins if it's
   // mode-compatible, otherwise cycle the maps that support this mode.
   _nextMap() {
+    if (this.operation) return operationLeg(this.operation,
+      operationComplete(this.operation) ? 0 : 1)?.map ?? this.mapIndex;
     if (this.mapLock != null && MAPS[this.mapLock].modes.includes(this.gameMode))
       return this.mapLock;
     const pool = mapsForMode(this.gameMode);
@@ -3304,6 +3387,16 @@ export class Game {
   }
 
   _rotate() {
+    if (this.operation) {
+      const next = advanceOperation(this.operation);
+      if (next === this.operation) return;
+      this.operation = next;
+      const leg = operationLeg(this.operation);
+      this.gameMode = leg.mode;
+      this.mapLock = null;
+      this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
+      return;
+    }
     const map = this._nextMap();
     const seed = Math.floor(Math.random() * 1e9);
     this._restartRound(map, seed);
@@ -3322,8 +3415,10 @@ export class Game {
     const flip = t => (t === 'blue' ? 'green' : 'blue');
     this.player.team = flip(this.player.team);
     for (const p of this.remote.values()) p.team = flip(p.team);
+    if (this.operation) this.operation = flipOperationColors(this.operation);
     if (this.mode === 'host')
-      this.net.broadcast({ t: 'e', k: 'restart', map, seed });
+      this.net.broadcast({ t: 'e', k: 'restart', map, seed,
+        mode: this.gameMode, op: this._operationRow() });
     this.rebuild(seed, map);
     // Fresh world, fresh bot ids: everyone rebuilds their replica and needs
     // the roster again (their full-state maps were cleared on rebuild).
@@ -3380,7 +3475,7 @@ export class Game {
   }
 
   requestRematch() {
-    if (!this.over) return;
+    if (!this.over || (this.operation && !operationComplete(this.operation))) return;
     this.engagement?.record('rematch', { action: 'vote' });
     if (this.mode === 'client') {
       this.net?.send({ t: 'a', k: 'rematch' });
@@ -3390,7 +3485,7 @@ export class Game {
   }
 
   _hostRematchVote(e) {
-    if (!this.over || !e) return;
+    if (!this.over || !e || (this.operation && !operationComplete(this.operation))) return;
     const key = this._kdKey(e);
     if (!this._humanKeys().includes(key) || this._rematchVotes.has(key)) return;
     this._rematchVotes.add(key);
@@ -3401,6 +3496,12 @@ export class Game {
   _maybeStartRematch() {
     if (!this.over || this._rematchVotes.size < rematchVotesNeeded(this.remote.size + 1)) return;
     this._rotateT = null;
+    if (operationComplete(this.operation)) {
+      const nextPlan = (this.operation.plan + 1) % OPERATION_PLANS.length;
+      const leg = this.startOperation(nextPlan);
+      this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
+      return;
+    }
     // A rematch restores the same authored battlefield and procedural seed,
     // but swaps sides so asymmetric cover never becomes a permanent edge.
     this._restartRound(this.mapIndex, this.seed);
@@ -3508,6 +3609,7 @@ export class Game {
         }
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
+          op: this._operationRow(),
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
@@ -3794,10 +3896,12 @@ export class Game {
     this._removeBot(team);
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
+      op: this._operationRow(),
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this.over) {
-      this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
+      this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner,
+        op: this._operationRow() });
       this.net.sendTo(id, { t: 'e', k: 'rematch', voters: [...this._rematchVotes],
         needed: rematchVotesNeeded(this.remote.size + 1) });
       if (this.engagementFeatures.stayAsSquad)
@@ -3935,7 +4039,7 @@ export class Game {
     // gets its rotation.
     if (!this.player.alive) this.respawnTimers.set(this.player,
       respawnWaveDelay(this.gameMode, this.matchElapsed));
-    if (this.over) this._rotateT = 2;
+    if (this.over) this._rotateT = operationComplete(this.operation) ? null : 2;
     // Stragglers get a minute to find the new room before their roster entry
     // lapses and any later knock is treated as a fresh join.
     setTimeout(() => {
@@ -4083,6 +4187,7 @@ export class Game {
       l: this._stationRows(),
       m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
         Math.max(0, Math.round(this.matchElapsed * 10))],
+      op: this._operationRow(),
       o: this.over ? 1 : 0,
       w: this.winner,
     };
@@ -4134,7 +4239,7 @@ export class Game {
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
         f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, u: snap.u, l: snap.l, m: snap.m, o: snap.o, w: snap.w };
+        a: snap.a, u: snap.u, l: snap.l, m: snap.m, op: snap.op, o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
       out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
@@ -4261,6 +4366,7 @@ export class Game {
       this.myId = d.id;
       this.myIdx = d.me;
       this.player.team = d.team;
+      if (d.op !== undefined) this._applyOperationRow(d.op);
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
       if (d.migrated) {
         // Baton-pass rejoin: we never left — keep position and kit; the new
@@ -4347,6 +4453,7 @@ export class Game {
     // promoteToHost rebuilds the match from exactly these.
     mergeSnapshot(this._fullP, this._fullB, d);
     this._syncAirstrikeRows(d.a ?? []);
+    if (d.op !== undefined) this._applyOperationRow(d.op);
     const want = new Set();
     for (const [idx, r] of this._fullP) {
       const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades,
@@ -4615,8 +4722,10 @@ export class Game {
         this._observeSelectedGoal();
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
-      case 'end': this._end(d.winner, d.story); break;
+      case 'end': this._end(d.winner, d.story, d.op); break;
       case 'restart':
+        if (d.op !== undefined) this._applyOperationRow(d.op);
+        this.gameMode = d.mode;
         this.rebuild(d.seed, d.map);
         this.onRestart?.(MAPS[d.map].name);
         break;

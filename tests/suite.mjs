@@ -51,6 +51,10 @@ import { rematchVotesNeeded, staySquadGroups, staySquadState,
   validPingDirection } from '../src/social.js';
 import { EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
+import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
+  operationComplete, operationFromRow, operationLeg, operationRow,
+  operationSideForColor, operationWinner, recordOperationResult,
+  validOperationRow } from '../src/operations.js';
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
@@ -418,7 +422,7 @@ function multiplayerRuleTests() {
       rows: [['p0', 'Player', 'green', 2, 1, 325, 1, 4]] })
       && !validServerMessage({ t: 'e', k: 'kd',
         rows: [['p0', 'Player', 'green', 2, 1, 'lots', 1, 4]] }));
-  const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0,
+  const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0, mode: 'ctf',
     me: 2, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
     r: { p: [], b: [] } };
   ok('migration reset welcomes require a valid authoritative spawn',
@@ -1099,6 +1103,50 @@ function stayAsSquadTests() {
       && !validServerMessage({ t: 'e', k: 'squad', voters: Array(11).fill(0).map((_, i) => `p${i}`) }));
 }
 
+function operationTests() {
+  group('phase six: optional three-match operations');
+  ok('every operation is a mode-compatible KOTH → CTF → TDM arc',
+    OPERATION_PLANS.length >= 3 && OPERATION_PLANS.every(plan =>
+      plan.legs.map(leg => leg.mode).join(',') === 'koth,ctf,tdm'
+        && plan.legs.every(leg => MAPS[leg.map]?.modes.includes(leg.mode))));
+
+  let op = createOperation(0);
+  ok('a new operation starts at leg one with a clean Alpha/Bravo score',
+    operationLeg(op) === OPERATION_PLANS[0].legs[0]
+      && op.leg === 0 && op.wins.join(',') === '0,0' && op.results.length === 0
+      && operationSideForColor(op, 'green') === 'alpha');
+  op = recordOperationResult(op, 'green');
+  const settled = op;
+  ok('one authoritative result settles a leg exactly once',
+    op.wins.join(',') === '1,0' && op.results.join(',') === '0'
+      && recordOperationResult(op, 'blue') === settled);
+  op = flipOperationColors(advanceOperation(op));
+  ok('side flips preserve Alpha/Bravo identity between different map colors',
+    op.leg === 1 && op.greenSide === 1
+      && operationSideForColor(op, 'blue') === 'alpha');
+  op = recordOperationResult(op, 'blue');
+  op = flipOperationColors(advanceOperation(op));
+  op = recordOperationResult(op, 'blue');
+  ok('three legs produce a bounded final operation winner and report score',
+    operationComplete(op) && operationWinner(op) === 'alpha'
+      && op.wins.join(',') === '2,1' && op.results.join(',') === '0,0,1');
+
+  const row = operationRow(op);
+  ok('operation state round-trips through its compact migration-safe row',
+    validOperationRow(row) && JSON.stringify(operationRow(operationFromRow(row))) === JSON.stringify(row));
+  ok('malformed or internally inconsistent operation rows are rejected',
+    !validOperationRow([0, 2, 3, 0, 0, 0])
+      && !validOperationRow([99, 0, 0, 0, 0])
+      && !validOperationRow([0, 0, 0, 0, 2]));
+  ok('operation end and mode-changing restart packets pass the trust boundary',
+    validServerMessage({ t: 'e', k: 'end', winner: 'blue', op: row })
+      && validServerMessage({ t: 'e', k: 'restart', seed: 42, map: 2,
+        mode: 'ctf', op: operationRow(createOperation(0)) })
+      && !validServerMessage({ t: 'e', k: 'restart', seed: 42, map: 2,
+        op: operationRow(createOperation(0)) })
+      && !validServerMessage({ t: 'e', k: 'end', winner: 'blue', op: [0, 9, 0, 0, 0] }));
+}
+
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
   group('damage direction: source bearing to screen edge');
@@ -1760,6 +1808,7 @@ export async function run() {
   deathRecapTests();
   selectedGoalTests();
   stayAsSquadTests();
+  operationTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

@@ -36,7 +36,7 @@ Choose one gun for each life. Every class also carries a spade, 50 building bloc
 | SMG | Fast automatic fire for close fights |
 | Sniper | Bolt-action precision with a calibrated scope reticle |
 
-The ballistics model includes recoil, spread, range compensation, and bullet drop. The first-person weapon models provide working iron sights and scope alignment. Lifetime match contribution advances a cosmetic mastery track, adding up to four neutral metal bands to your weapons without changing their stats.
+The ballistics model includes recoil, spread, range compensation, and bullet drop. The first-person weapon models provide working iron sights and scope alignment. Lifetime match contribution advances a mastery rank without changing weapon stats.
 
 Contribution earned during one life fills the combat-momentum meter. Kills,
 assists, flag play, hill occupation, defense, and escorts all count. Press `F`

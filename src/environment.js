@@ -2,12 +2,12 @@
 // Kept free of DOM/Three dependencies so the same rules can be tested headlessly
 // and used by the authoritative host for local players, guests, and bots.
 
-export const FALL_SAFE_SPEED = 13;
-export const FALL_FATAL_SPEED = 33;
+export const FALL_SAFE_SPEED = 18;
+export const FALL_FATAL_SPEED = 36;
 
-// Small drops stay free, medium drops sting, and a roughly 18-block fall is
-// fatal from full health. The eased curve keeps ordinary voxel traversal from
-// feeling punitive while making tall towers and blasted shafts genuinely risky.
+// Ordinary traversal, jumps, and drops of roughly five blocks stay free.
+// Taller falls ramp in gently, while a roughly 22-block fall remains fatal.
+// This keeps movement fluid without making towers and blasted shafts harmless.
 export function fallDamageForImpact(speed) {
   if (!Number.isFinite(speed) || speed <= FALL_SAFE_SPEED) return 0;
   const t = Math.min(1, (speed - FALL_SAFE_SPEED) / (FALL_FATAL_SPEED - FALL_SAFE_SPEED));

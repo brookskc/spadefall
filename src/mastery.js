@@ -1,12 +1,12 @@
-// mastery.js — contribution-based, cosmetic-only long-term progression.
-// Bands are neutral metal details on the local first-person weapon model;
-// they confer no stat, hitbox, or networking advantage.
+// mastery.js — contribution-based long-term rank progression.
+// Ranks are a record of match contribution only; they confer no gameplay,
+// hitbox, weapon-model, or networking advantage.
 export const MASTERY_TIERS = [
-  { points: 0,     name: 'RECRUIT', bands: 0 },
-  { points: 1000,  name: 'FIELD',   bands: 1 },
-  { points: 5000,  name: 'VETERAN', bands: 2 },
-  { points: 15000, name: 'ELITE',   bands: 3 },
-  { points: 40000, name: 'LEGEND',  bands: 4 },
+  { points: 0,     name: 'RECRUIT' },
+  { points: 1000,  name: 'FIELD' },
+  { points: 5000,  name: 'VETERAN' },
+  { points: 15000, name: 'ELITE' },
+  { points: 40000, name: 'LEGEND' },
 ];
 
 export function masteryProgress(value) {

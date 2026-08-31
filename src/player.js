@@ -7,7 +7,6 @@ import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
 import { availableStreakAbility } from './streaks.js';
-import { masteryProgress } from './mastery.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -327,11 +326,6 @@ export class Player {
 
   // ---------------- viewmodel ----------------
   _buildViewmodel() {
-    // Unlocked at kill milestones (see stats.js) — a small personal touch
-    // that's genuinely yours: nothing here rides the network, so it's
-    // exactly what YOU see when you look at your own gun, not something
-    // shown off to anyone else.
-    //
     // dark is deliberately gun-only (rifle/smg/sniper colorable bodies) —
     // toolDark is a SEPARATE, fixed material for the spade and grenade at
     // the same default color. Both used to be the same shared material,
@@ -345,7 +339,6 @@ export class Player {
     // Sights, muzzle hardware, rails, and action pieces should look like
     // functional parts, not like one uninterrupted recolored cuboid.
     const metal = new THREE.MeshBasicMaterial({ color: 0x424952, vertexColors: true });
-    const masteryMetal = new THREE.MeshBasicMaterial({ color: 0xc9b878, vertexColors: true });
     const toolDark = new THREE.MeshBasicMaterial({ color: 0x2b2b30, vertexColors: true });
     const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
     const blockMat = new THREE.MeshBasicMaterial({
@@ -360,7 +353,6 @@ export class Player {
     };
     this.vm = {};
     this._magParts = {};
-    this._masteryMarks = [];
     const root = new THREE.Group();
     this.camera.add(root);
     this.vmRoot = root;
@@ -378,12 +370,6 @@ export class Player {
       mk(0.008, 0.02, 0.03, metal, -0.0085, 0.055, 0, rear);  // wing L
       mk(0.008, 0.02, 0.03, metal,  0.0085, 0.055, 0, rear);  // wing R
     };
-    const masteryBands = (g, startZ, y, width) => {
-      for (let i = 0; i < 4; i++) {
-        const band = mk(width, 0.012, 0.018, masteryMetal, 0, y, startZ + i * 0.032, g);
-        this._masteryMarks.push(band);
-      }
-    };
     const rifle = new THREE.Group();
     mk(0.05, 0.07, 0.85, dark, 0, 0, -0.5, rifle);       // barrel
     mk(0.06, 0.08, 0.07, metal, 0, 0, -0.955, rifle);    // muzzle cap
@@ -393,7 +379,6 @@ export class Player {
     this._magParts.rifle = { mesh: rifleMag, y: rifleMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.12, 0.05, rifle);    // hand
     sights(rifle, -0.85, -0.12, 0.035);
-    masteryBands(rifle, -0.56, 0.046, 0.058);
     this.vm.rifle = rifle;
 
     const smg = new THREE.Group();
@@ -406,7 +391,6 @@ export class Player {
     this._magParts.smg = { mesh: smgMag, y: smgMag.position.y };
     mk(0.05, 0.1, 0.06, skin, 0, -0.1, 0.05, smg);
     sights(smg, -0.53, -0.1, 0.04);
-    masteryBands(smg, -0.41, 0.052, 0.068);
     this.vm.smg = smg;
 
     // Bolt-action, scoped — no iron sights; a scope box above the barrel
@@ -439,7 +423,6 @@ export class Player {
     // isn't in your view when you're looking through it either.
     this.vm.sniper = sniper;
     this._scopeParts = [scopeBody, scopeLens, scopeRingA, scopeRingB];
-    masteryBands(sniper, -0.76, 0.038, 0.052);
 
     const spade = new THREE.Group();
     mk(0.035, 0.035, 0.5, wood, 0, 0, -0.25, spade);     // handle
@@ -464,7 +447,6 @@ export class Player {
 
     for (const k in this.vm) root.add(this.vm[k]);
     this.vmRoot.position.set(0.28, -0.26, -0.25);
-    this.syncMastery();
     this._syncViewmodel();
   }
 
@@ -474,12 +456,6 @@ export class Player {
   // a mid-session choice actually show up.
   setGunColor(hex) {
     this._gunMat?.color.setHex(hex);
-  }
-
-  syncMastery() {
-    const bands = masteryProgress(stats.get().masteryPoints).tier.bands;
-    for (let i = 0; i < (this._masteryMarks?.length ?? 0); i++)
-      this._masteryMarks[i].visible = i % 4 < bands;
   }
 
   _syncViewmodel() {

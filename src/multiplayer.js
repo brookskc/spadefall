@@ -4,6 +4,12 @@
 
 export const TEAM_SIZE = 5;
 export const MAX_HUMANS = TEAM_SIZE * 2;
+export const KOTH_TEAM_SIZE = 4;
+
+// A single concentrated hill becomes grenade-heavy and visually crowded at
+// 5v5. CTF and TDM still need five soldiers per side to keep their larger
+// routes populated, while KOTH deliberately runs one seat lighter per team.
+export const teamSizeForMode = mode => mode === 'koth' ? KOTH_TEAM_SIZE : TEAM_SIZE;
 
 export const MOVEMENT = Object.freeze({
   horizontalSpeed: 9,

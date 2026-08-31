@@ -306,20 +306,22 @@
     55%{opacity:1; transform:translate(-50%,-50%) rotate(45deg) scale(1.15);}
     100%{opacity:0; transform:translate(-50%,-50%) rotate(45deg) scale(1);} }
 
-  /* Damage direction: a flat, hard-edged chevron at the screen edge,
+  /* Damage direction: a long-shafted, hard-edged arrow at the screen edge,
      rotated by hud.damageDir()'s bearing (0 = the source is straight
-     ahead, so the chevron sits at the top pointing down at you — the
+     ahead, so the arrow sits at the top pointing down at you — the
      rotation carries the shape with it, so it always points inward
      toward center no matter which edge it lands on). One shared element,
      not one per hit: a new hit snaps opacity back to 1 and restarts the
-     fade rather than stacking a second chevron, so a stream of hits from
+     fade rather than stacking a second arrow, so a stream of hits from
      the same direction reads as "still under fire" instead of clutter.
      Same danger red as the kill hitmark, same flat/no-blur language as
      the rest of this HUD — no gradient, no glow. */
   #dmgDir { position:fixed; left:50%; top:50%; width:0; height:0; pointer-events:none; }
-  #dmgDir .chevron { position:absolute; left:-13px; top:-190px; opacity:0;
-    width:0; height:0; border-left:13px solid transparent; border-right:13px solid transparent;
-    border-top:20px solid rgba(224,90,74,.92); }
+  #dmgDir .chevron { position:absolute; left:-11px; top:-205px; opacity:0;
+    width:22px; height:40px; background:rgba(224,90,74,.92);
+    clip-path:polygon(35% 0,65% 0,65% 57%,100% 57%,50% 100%,0 57%,35% 57%); }
+  html[data-damageqa="on"] #dmgDir { transform:rotate(1.05rad); }
+  html[data-damageqa="on"] #dmgDir .chevron { opacity:1; }
 
   /* Multi-kill callout: bold flat text, no gradient/glow (same rule as
      everything else in this HUD), color set inline per tier by
@@ -374,11 +376,14 @@
   #objective { display:none; position:absolute; left:50%; bottom:112px;
     transform:translateX(-50%); font-size:11px; letter-spacing:2px; text-transform:uppercase;
     color:#e8ecf2; align-items:center; gap:9px; }
-  #objective .arrow { display:inline-block; color:#ffd97a; font-size:15px; line-height:1; }
+  #objective .arrow,#teamPing .arrow { display:inline-block; flex:none; background:currentColor;
+    clip-path:polygon(50% 0,100% 43%,65% 43%,65% 100%,35% 100%,35% 43%,0 43%);
+    transform-origin:50% 50%; }
+  #objective .arrow { width:16px; height:24px; color:#ffd97a; }
   #teamPing { display:none; position:absolute; left:50%; bottom:92px;
     transform:translateX(-50%); font-size:10px; letter-spacing:1.6px; text-transform:uppercase;
     color:#ffd97a; align-items:center; gap:8px; text-shadow:0 1px 4px rgba(0,0,0,.8); }
-  #teamPing .arrow { display:inline-block; font-size:13px; line-height:1; }
+  #teamPing .arrow { width:14px; height:21px; }
   #fieldStation { display:none; position:absolute; left:50%; bottom:137px;
     transform:translateX(-50%); font-size:10px; letter-spacing:1.7px;
     text-transform:uppercase; color:#ffd97a; text-shadow:0 1px 4px rgba(0,0,0,.8); }
@@ -539,8 +544,8 @@
     <div id="airstrikeHud"><div class="reticle"></div><div class="label">airstrike — click to confirm</div></div>
     <div id="airstrikeReady">airstrike ready — [F]</div>
     <div id="overchargeActive"></div>
-    <div id="objective"><span class="arrow">▲</span><span class="label"></span></div>
-    <div id="teamPing"><span class="arrow">▲</span><span class="label"></span></div>
+    <div id="objective"><span class="arrow"></span><span class="label"></span></div>
+    <div id="teamPing"><span class="arrow"></span><span class="label"></span></div>
     <div id="fieldStation"></div>
     <div id="scopeOverlay">
       <div id="scopeFrame">
@@ -719,6 +724,6 @@
     <div id="endNote">rotating to the next map…</div>
   </div>
 
-  <script type="module" src="./src/main.js?v=20"></script>
+  <script type="module" src="./src/main.js?v=21"></script>
 </body>
 </html>

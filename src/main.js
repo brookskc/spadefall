@@ -68,6 +68,9 @@ if (params.has('scopeqa')) {
     game.player.aimK = 1;
   }, 50);
 }
+// Static component preview for the directional damage marker. Normal play
+// never sets this data attribute; it exists only for visual regression QA.
+if (params.has('damageqa')) document.documentElement.dataset.damageqa = 'on';
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
@@ -484,7 +487,7 @@ const mapPref = $('mapPref'), modePref = $('modePref');
     masteryLine.textContent = mastery.next
       ? `${mastery.tier.name} MASTERY · ${mastery.points} / ${mastery.next.points} · `
         + `${mastery.remaining} TO ${mastery.next.name}`
-      : `${mastery.tier.name} MASTERY · ${mastery.points} · ALL 4 BANDS EARNED`;
+      : `${mastery.tier.name} MASTERY · ${mastery.points} · MAXIMUM RANK`;
     gunColors.innerHTML = '';
     const unlockedHex = new Set(stats.unlocked().map(c => c.hex));
     const equipped = stats.gunColor();
@@ -1204,9 +1207,9 @@ if (stationQa) {
   const station = game.fieldStations[Math.max(0, Math.min(game.fieldStations.length - 1,
     Number.parseInt(params.get('stationqa') || '0', 10) || 0))];
   if (station) {
-    game.player.body.pos.set(station.x, station.y, station.z);
+    game.player.body.pos.set(station.x, station.y, station.z + 2);
     game.player.body.vel.set(0, 0, 0);
-    game.player.yaw = Math.PI / 2;
+    game.player.yaw = Math.PI / 2; // face the three signal pylons on the north edge
     game.player.blocks = 1;
     game.player.grenades = 0;
     game.player.protT = 999;

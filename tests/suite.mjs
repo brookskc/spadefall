@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
-import { generateMap, MAPS, BASE, mapsForMode } from '../src/mapgen.js';
+import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
@@ -15,7 +15,8 @@ import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing } from '
 import { Avatar } from '../src/avatar.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
-  parseSpawnRow, protectedBuildReason, spawnRow, validateMovementReport } from '../src/multiplayer.js';
+  parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
+  validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
 import { allowInbound, Net, shouldSend, wireBytes } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
@@ -107,6 +108,12 @@ function mapgenTests() {
         surface >= SEA && a.get(x, surface, z) === BLOCK.STONE
           && a.get(x, surface + 1, z) === 0 && a.get(x, surface + 2, z) === 0,
         `surface=${surface}`);
+      ok(`${name}: cache ${i + 1} uses separated signal pylons without a crossbar`,
+        a.get(x - 2, s.y + 1, z - 3) === BLOCK.STONE
+          && a.get(x, s.y + 2, z - 3) === BLOCK.STONE
+          && a.get(x + 2, s.y + 3, z - 3) === BLOCK.STONE
+          && a.get(x - 1, s.y + 2, z - 3) === 0
+          && a.get(x + 1, s.y + 2, z - 3) === 0);
     }
     let bad = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] >= PALETTE.length) bad++;
@@ -117,6 +124,13 @@ function mapgenTests() {
   ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
   ok('mapsForMode(tdm) covers every map',
     mapsForMode('tdm').length === MAPS.length, JSON.stringify(mapsForMode('tdm')));
+  ok('every map has a complete authored flat-color terrain palette',
+    MAPS.every(m => ['grass', 'dirt', 'sand', 'stone', 'moss']
+      .every(material => Number.isInteger(m.paletteOverrides?.[material]))));
+  ok('all six map atmospheres have distinct sky gradients',
+    new Set(MAPS.map((_, i) => mapAtmosphere(i).sky.join(','))).size === MAPS.length);
+  ok('PINEFALL uses a warm lavender sky that preserves blue-team contrast',
+    mapAtmosphere(2).sky[0] === '#aaa3d2' && mapAtmosphere(2).fog === 0xc9c1d6);
 
   const greenPlaced = PALETTE[BLOCK.GREEN].color, bluePlaced = PALETTE[BLOCK.BLUE].color;
   PALETTE[BLOCK.GREEN].color = 0x123456;
@@ -284,6 +298,12 @@ function multiplayerRuleTests() {
     chooseTeam('blue', { green: 3, blue: 5 }) === 'green');
   ok('a full 5v5 room has no assignable team',
     chooseTeam('green', { green: 5, blue: 5 }) === null);
+  ok('KOTH targets 4v4 while CTF and TDM retain 5v5',
+    teamSizeForMode('koth') === 4
+      && teamSizeForMode('ctf') === 5 && teamSizeForMode('tdm') === 5);
+  ok('KOTH team assignment enforces the four-player side cap',
+    chooseTeam('green', { green: 4, blue: 3 }, teamSizeForMode('koth')) === 'blue'
+      && chooseTeam('blue', { green: 4, blue: 4 }, teamSizeForMode('koth')) === null);
 
   const body = { pos: { x: 12, y: 30, z: 42 } };
   const row = spawnRow(body, Math.PI);
@@ -724,7 +744,7 @@ function matchReportTests() {
 }
 
 function socialProgressionTests() {
-  group('phase ten: squad signals, rematches, and cosmetic mastery');
+  group('phase ten: squad signals, rematches, and mastery ranks');
   ok('a solo rematch needs one vote', rematchVotesNeeded(1) === 1);
   ok('two players must both agree to a rematch', rematchVotesNeeded(2) === 2);
   ok('larger rooms use a strict majority', rematchVotesNeeded(3) === 2
@@ -744,10 +764,11 @@ function socialProgressionTests() {
     validClientMessage({ t: 'a', k: 'rematch' })
       && validServerMessage({ t: 'e', k: 'rematch', voters: ['p0', 'p2'], needed: 2 })
       && !validServerMessage({ t: 'e', k: 'rematch', voters: ['p0'], needed: 0 }));
-  ok('mastery tier boundaries award only cosmetic band counts',
-    masteryProgress(999).tier.bands === 0
-      && masteryProgress(1000).tier.bands === 1
-      && masteryProgress(40000).tier.bands === 4);
+  ok('mastery tier boundaries advance rank without weapon decoration',
+    masteryProgress(999).tier.name === 'RECRUIT'
+      && masteryProgress(1000).tier.name === 'FIELD'
+      && masteryProgress(40000).tier.name === 'LEGEND'
+      && !('bands' in masteryProgress(40000).tier));
   ok('mastery reports progress to the next tier',
     masteryProgress(4900).remaining === 100 && masteryProgress(5000).tier.name === 'VETERAN');
 }
@@ -967,10 +988,11 @@ function bodyTests() {
 function environmentalDamageTests() {
   group('environmental damage: falls, water entry, and breath');
 
-  ok('ordinary jumps and short drops remain safe', fallDamageForImpact(13) === 0);
-  ok('medium falls cause non-lethal damage', fallDamageForImpact(24) > 0
-    && fallDamageForImpact(24) < 100);
-  ok('a fatal-speed impact reaches full health', fallDamageForImpact(33) === 100);
+  ok('ordinary traversal and roughly five-block drops remain safe',
+    fallDamageForImpact(18) === 0);
+  ok('medium falls ramp in gently without becoming lethal',
+    fallDamageForImpact(24) > 0 && fallDamageForImpact(24) <= 12);
+  ok('a fatal-speed impact reaches full health', fallDamageForImpact(36) === 100);
   ok('host-observed fall distance reconstructs physical impact speed',
     Math.abs(impactSpeedForFallDistance(15) - 30) < 1e-9);
 

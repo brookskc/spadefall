@@ -48,21 +48,25 @@ export const MAPS = [
       { x: 127.5, z: 86, label: 'NORTH WALL' },
       { x: 127.5, z: 170, label: 'SOUTH SHELF' },
     ],
-    atmosphere: { sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] } },
+    atmosphere: { sky: ['#5eafe0', '#a6d3e2', '#e3ead5'], fog: 0xcadcc9, cloud: 0xf5f1dc, water: 0x347ba7,
+      sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] },
+    paletteOverrides: { grass: 0x5f9f45, dirt: 0x75563a, sand: 0xc4ad73, stone: 0x70796f, moss: 0x3d7545 } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
     stations: [
       { x: 127.5, z: 82, label: 'NORTH DUGOUT' },
       { x: 127.5, z: 174, label: 'SOUTH DUGOUT' },
     ],
-    atmosphere: { sky: ['#3fa8e0', '#8fd4ec', '#eef8f0'], fog: 0xd9f0ea, cloud: 0xffffff, water: 0x1f8fc4,
-      sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] } },
+    atmosphere: { sky: ['#4d9fc9', '#9bcbd8', '#e8eee4'], fog: 0xd3e3dc, cloud: 0xf8f4e8, water: 0x248fa4,
+      sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] },
+    paletteOverrides: { grass: 0x689c52, dirt: 0x79563c, sand: 0xd0b97d, stone: 0x7f8584, moss: 0x55745d } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
     stations: [
       { x: 127.5, z: 82, label: 'NORTH FORD' },
       { x: 127.5, z: 174, label: 'SOUTH FORD' },
     ],
-    atmosphere: { sky: ['#75a98d', '#b1c8b8', '#e3ebe0'], fog: 0xaec9b0, cloud: 0xe8ecdf, water: 0x2f6b5a,
-      sun: [0.55, 1, -0.35], sunTint: [1.02, 1.05, 0.94] } },
+    atmosphere: { sky: ['#aaa3d2', '#c8c0dc', '#e4ddea'], fog: 0xc9c1d6, cloud: 0xf1edf4, water: 0x3c6967,
+      sun: [0.55, 1, -0.35], sunTint: [1.02, 1.00, 1.06] },
+    paletteOverrides: { grass: 0x4f824c, dirt: 0x685344, sand: 0xb0a683, stone: 0x72757f, moss: 0x315d3f } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
     stations: [
       { x: 99, z: 127.5, label: 'WEST RUINS' },
@@ -73,8 +77,9 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH' },
       { x: SX / 2, z: SZ / 2 + 40, r: 8, label: 'SOUTH' },
     ],
-    atmosphere: { sky: ['#e8a24f', '#f2c98a', '#fbe6c2'], fog: 0xe8c78f, cloud: 0xfff0dc, water: 0x3a7fae,
-      sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] } },
+    atmosphere: { sky: ['#a78492', '#d8ad8d', '#f0d6ae'], fog: 0xd7bd9f, cloud: 0xeee5dc, water: 0x397f96,
+      sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] },
+    paletteOverrides: { grass: 0x8c8b55, dirt: 0x895d49, sand: 0xcaa461, stone: 0x846f72, moss: 0x74694f } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
     stations: [
       { x: 127.5, z: 110, label: 'NORTH CAUSEWAY' },
@@ -85,8 +90,9 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH GATE' },
       { x: SX / 2, z: SZ / 2 + 40, r: 8, label: 'SOUTH GATE' },
     ],
-    atmosphere: { sky: ['#4a7fc4', '#a8c8e8', '#e0ecf5'], fog: 0xc5d8ea,
-      sun: [0.35, 1, -0.55], sunTint: [1.02, 1.03, 1.0] } },
+    atmosphere: { sky: ['#607da9', '#aebcd1', '#dfe2e7'], fog: 0xbfc7d1, cloud: 0xe9ebed, water: 0x496c86,
+      sun: [0.35, 1, -0.55], sunTint: [1.02, 1.03, 1.0] },
+    paletteOverrides: { grass: 0x71866a, dirt: 0x665f55, sand: 0xa8a18c, stone: 0x68727d, moss: 0x4f6659 } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
     stations: [
       { x: 104, z: 127.5, label: 'WEST SADDLE' },
@@ -97,9 +103,9 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
       { x: SX / 2, z: SZ / 2 + 28, r: 8, label: 'SOUTH BOWL' },
     ],
-    atmosphere: { sky: ['#c25a3a', '#e08a5a', '#f0c090'], fog: 0xd9a878, cloud: 0xe8c4a8, water: 0x6a5548,
+    atmosphere: { sky: ['#a75547', '#cf8069', '#e6b99a'], fog: 0xc99e8e, cloud: 0xdac7ba, water: 0x595866,
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
-    paletteOverrides: { stone: 0x6e4a42 } },
+    paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
 ];
 
 // Mutated by each generator; game.js reads spawn points and flag stands here.
@@ -118,7 +124,7 @@ const put = (world, x, y, z, block) => {
 const terrainY = (height, x, z) => Math.floor(height[at(Math.round(x), Math.round(z))]);
 
 // Every battlefield gets two authored neutral field caches. The same chunky
-// silhouette — stone pad, pallet boxes, four bollards, signal mast — makes
+// silhouette — stone pad, pallet boxes, four bollards, signal pylons — makes
 // their function readable across themes without a texture, glowing pickup,
 // or prop mesh. They are ordinary terrain voxels, so a fight can chew the
 // shelter apart and players can rebuild cover around the still-marked site.
@@ -145,9 +151,12 @@ function buildFieldStations(world, mapIndex) {
     // Low supply pallets: readable as crates, usable as crouch cover.
     for (const dx of [-1, 0, 1]) put(world, cx + dx, y + 1, cz + 2, BLOCK.DIRT);
     put(world, cx - 1, y + 2, cz + 2, BLOCK.DIRT);
-    // A five-block signal mast gives the site a long-distance silhouette.
-    for (let h = 1; h <= 5; h++) put(world, cx, y + h, cz - 3, BLOCK.STONE);
-    for (const dx of [-1, 1]) put(world, cx + dx, y + 4, cz - 3, BLOCK.STONE);
+    // Three separated rising pylons read as signal-strength bars from a
+    // distance. The old single mast plus crossbar unintentionally resembled
+    // a Christian cross; this industrial silhouette is deliberately neutral.
+    for (const [dx, height] of [[-2, 2], [0, 3], [2, 4]])
+      for (let h = 1; h <= height; h++)
+        put(world, cx + dx, y + h, cz - 3, BLOCK.STONE);
   }
 }
 
@@ -271,7 +280,17 @@ function genIsland(world, seed) {
     }
   }
 
-  fillColumns(world, height, (x, z, h) => h <= SEA + 1 ? BLOCK.SAND : BLOCK.GRASS);
+  // Broad meadow bands give the rolling field readable color landmarks
+  // without noisy per-voxel fleck: damp hollows run fern-green, occasional
+  // exposed ridges turn to earth, and meadow grass remains the main surface.
+  fillColumns(world, height, (x, z, h) => {
+    if (h <= SEA + 1) return BLOCK.SAND;
+    const band = 0.65 * noise(x * 0.018 + 21, z * 0.018 + 8)
+      + 0.35 * noise(x * 0.045 + 5, z * 0.045 + 31);
+    if (h <= SEA + 10 && band > 0.56) return BLOCK.MOSS;
+    if (h >= SEA + 15 && band < 0.24) return BLOCK.DIRT;
+    return BLOCK.GRASS;
+  });
 
   // GREENBELT needs authored landmarks as well as good noise. Broken field
   // walls provide a readable middle distance without becoming continuous
@@ -555,7 +574,12 @@ function genDesert(world, seed) {
 
   flattenBases(height);
   fillColumns(world, height,
-    (x, z) => Math.hypot(x - AX, z - CZ) < 9 ? BLOCK.STONE : BLOCK.SAND, BLOCK.SAND);
+    (x, z) => {
+      if (Math.hypot(x - AX, z - CZ) < 9) return BLOCK.STONE;
+      // Wide mineral bands add ochre/umber rhythm to the dunes; the low
+      // frequency keeps them geological rather than texture-like.
+      return noise(x * 0.025 + 17, z * 0.025 + 41) > 0.73 ? BLOCK.DIRT : BLOCK.SAND;
+    }, BLOCK.SAND);
 
   // Mesas cap in stone — the perch reads as rock and tunnels stay sandy.
   for (const [mx, mz] of mesas)

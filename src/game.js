@@ -13,6 +13,7 @@ import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
 import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
+  teamSizeForMode,
   teamCounts, validateMovementReport, normalizeDirection,
   migrationSurvivors, combatDamageAllowed, protectedBuildReason } from './multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './protocol.js';
@@ -84,8 +85,9 @@ const HOST_SILENT_MS = 2500;
 // blocks exactly as much as it hurts people (rifle 55 -> 3 shots, SMG 22 ->
 // 7 shots, bot carbine 16 -> 10). The spade still digs in one hit.
 const BLOCK_HP = 150;
-// Hard cap on humans per room (host + guests): 5v5, matching _spawnBots'
-// per-team target below. Test hook: ?cap=2.
+// Hard ceiling on humans per room (host + guests). KOTH applies its lower
+// mode-specific 4v4 cap at runtime; CTF/TDM retain the 5v5 ceiling here.
+// Test hook: ?cap=2.
 const capParam = parseInt(QUERY.get('cap'), 10);
 export const MAX_HUMANS = Number.isInteger(capParam) ? Math.min(HUMAN_CAP, Math.max(2, capParam)) : HUMAN_CAP;
 // Position authority limits live in multiplayer.js so they can be tested
@@ -539,10 +541,10 @@ const hud = {
     }
     const mastery = recordUpdate.mastery ?? stats.mastery();
     $('endMastery').textContent = recordUpdate.newMasteryTier
-      ? `${recordUpdate.newMasteryTier.name} MASTERY UNLOCKED · ${recordUpdate.newMasteryTier.bands} WEAPON BAND${recordUpdate.newMasteryTier.bands === 1 ? '' : 'S'}`
+      ? `${recordUpdate.newMasteryTier.name} MASTERY RANK UNLOCKED`
       : mastery.next
         ? `${mastery.tier.name} MASTERY · ${mastery.remaining} SCORE TO ${mastery.next.name}`
-        : `${mastery.tier.name} MASTERY · ALL WEAPON BANDS EARNED`;
+        : `${mastery.tier.name} MASTERY · MAXIMUM RANK`;
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);
@@ -1268,7 +1270,8 @@ export class Game {
   _kdSeed() { for (const e of this.entities()) this._kdRow(e); }
 
   _spawnBots() {
-    // 5 a side, filling around whoever's already connected — the host and
+    // Fill the mode's roster target around whoever is already connected:
+    // 4 a side in concentrated KOTH fights, 5 a side in CTF/TDM. The host and
     // any remote players occupy real seats on their own team, bots take
     // the rest. Reads team membership live rather than assuming "host is
     // green": that assumption used to be baked in here, which meant a
@@ -1282,9 +1285,12 @@ export class Game {
     for (const p of this.remote.values()) humans[p.team] = (humans[p.team] ?? 0) + 1;
     const bots = { green: 0, blue: 0 };
     for (const b of this.bots) bots[b.team] = (bots[b.team] ?? 0) + 1;
-    for (let i = bots.green; i < 5 - humans.green; i++) this.bots.push(new Bot(this, 'green'));
-    for (let i = bots.blue; i < 5 - humans.blue; i++) this.bots.push(new Bot(this, 'blue'));
+    const target = teamSizeForMode(this.gameMode);
+    for (let i = bots.green; i < target - humans.green; i++) this.bots.push(new Bot(this, 'green'));
+    for (let i = bots.blue; i < target - humans.blue; i++) this.bots.push(new Bot(this, 'blue'));
   }
+
+  _humanCap() { return Math.min(MAX_HUMANS, teamSizeForMode(this.gameMode) * 2); }
 
   enemyOf(team) { return team === 'blue' ? 'green' : 'blue'; }
 
@@ -3045,7 +3051,6 @@ export class Game {
     const report = buildMatchReport(this._kdKey(this.player), this.kd.entries());
     const recordUpdate = stats.finishMatch(winner === this.player.team,
       this.gameMode, report.local);
-    this.player.syncMastery();
     this.onStatsChanged?.();
     document.exitPointerLock();
     hud.statsHide(); // the summary board replaces the overlay
@@ -3223,10 +3228,11 @@ export class Game {
     // Matchmaking probe: answer on the same channel, before any join logic.
     if (d.t === 'ping') {
       // Room-browser probe: everything the list row wants to show.
-      this.net.sendTo(id, { t: 'pong', humans: this.remote.size + 1, max: MAX_HUMANS,
+      const humanCap = this._humanCap();
+      this.net.sendTo(id, { t: 'pong', humans: this.remote.size + 1, max: humanCap,
         map: this.mapIndex, mode: this.gameMode,
         g: this.captures.green, b: this.captures.blue,
-        names: [this.player.name, ...[...this.remote.values()].map(p => p.name)].slice(0, MAX_HUMANS) });
+        names: [this.player.name, ...[...this.remote.values()].map(p => p.name)].slice(0, humanCap) });
       return;
     }
     if (d.t === 'hi') {
@@ -3505,16 +3511,17 @@ export class Game {
   }
 
   _hostAddPlayer(id, rawName, teamPref) {
-    if (this.remote.size + 1 >= MAX_HUMANS) { // room full — turn them away politely
+    if (this.remote.size + 1 >= this._humanCap()) { // room full — turn them away politely
       this.net.sendTo(id, { t: 'full' });
       setTimeout(() => this.net.conns.get(id)?.close(), 400); // let the packet land
       return;
     }
     const name = cleanName(rawName); // one sanitizer, one fallback ('Player')
-    // Preferences are best-effort: never put a sixth human on one side.
+    // Preferences are best-effort: never exceed this mode's team size.
     // When the requested side is full, fall back to the side with a seat;
     // AUTO still chooses the less-populated human team.
-    const team = chooseTeam(teamPref, teamCounts(this.player.team, this.remote.values()));
+    const team = chooseTeam(teamPref, teamCounts(this.player.team, this.remote.values()),
+      teamSizeForMode(this.gameMode));
     if (!team) {
       this.net.sendTo(id, { t: 'full' });
       setTimeout(() => this.net.conns.get(id)?.close(), 400);

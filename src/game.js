@@ -3506,7 +3506,7 @@ export class Game {
       points: report.local.score, objective: report.local.objective, assists: report.local.a,
     });
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
-    $('endTitle').style.color = won ? '#8fd98f' : '#e74c3c';
+    $('end').dataset.outcome = won ? 'victory' : 'defeat';
     const next = MAPS[this._nextMap()].name;
     const score = this.hill
       ? `occupied the hill ${holdClock(this.captures.green)} — ${holdClock(this.captures.blue)}`

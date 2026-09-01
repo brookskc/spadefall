@@ -176,19 +176,36 @@
      centers by its own visible width, so the block sits dead-center under
      the title instead of drifting right on invisible label padding. */
   .controls b { color:#ffd97a; font-weight:600; }
-  #end { justify-content:flex-start; padding-top:26px; padding-bottom:28px; overflow-y:auto; }
-  #endTitle { font-size:52px; font-weight:800; letter-spacing:4px; }
+  /* Match results use one centered content block. Auto margins absorb spare
+     vertical room, but collapse to zero when the report is taller than the
+     viewport so every row remains reachable by scrolling. */
+  #end { justify-content:flex-start; overflow-y:auto; padding:20px 18px;
+    background:rgba(8,12,20,.86); --outcome:#8fd98f; }
+  #end[data-outcome="defeat"] { --outcome:#e05a4e; }
+  #endContent { width:100%; margin-block:auto; padding:8px 0; display:flex;
+    flex-direction:column; align-items:center; flex:0 0 auto; }
+  #endTitle { position:relative; padding:8px 34px 10px; color:var(--outcome);
+    font:900 52px/.9 "Arial Black","Segoe UI",sans-serif; letter-spacing:4px;
+    text-shadow:4px 4px 0 rgba(0,0,0,.58); }
+  #endTitle::before,#endTitle::after { content:""; position:absolute; top:4px;
+    width:8px; height:8px; background:var(--outcome); opacity:.78; }
+  #endTitle::before { left:4px; box-shadow:8px 0 0 var(--outcome),
+    0 8px 0 var(--outcome),0 16px 0 var(--outcome); }
+  #endTitle::after { right:4px; box-shadow:-8px 0 0 var(--outcome),
+    0 8px 0 var(--outcome),0 16px 0 var(--outcome); }
   #endDetail { margin-top:10px; font-size:16px; opacity:.75; }
   #endReport { width:min(760px,94vw); margin-top:18px; }
   #endStats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
-  .reportStat { padding:10px 12px; background:rgba(10,14,22,.72);
-    border:1px solid rgba(255,255,255,.12); text-align:left; }
+  .reportStat { padding:10px 12px; background:rgba(14,20,31,.92);
+    border:2px solid rgba(232,236,242,.22); box-shadow:3px 3px 0 rgba(0,0,0,.48);
+    text-align:left; }
   .reportStat span { display:block; font-size:9px; letter-spacing:2px; opacity:.5; }
   .reportStat b { display:block; margin-top:3px; font-size:22px; letter-spacing:1px; }
   .reportStat small { display:block; margin-top:2px; font-size:9px; opacity:.48; }
   #endMedals { display:flex; justify-content:center; gap:8px; margin-top:10px; min-height:40px; }
-  .medal { min-width:150px; padding:7px 12px; border-left:4px solid #ffd97a;
-    background:rgba(255,217,122,.08); text-align:left; }
+  .medal { min-width:150px; padding:7px 12px; border:2px solid rgba(255,217,122,.38);
+    border-left-width:6px; background:rgba(30,28,22,.94);
+    box-shadow:3px 3px 0 rgba(0,0,0,.48); text-align:left; }
   .medal b { display:block; color:#ffd97a; font-size:11px; letter-spacing:1.5px; }
   .medal span { display:block; margin-top:2px; font-size:9px; opacity:.58; }
   .noMedals { align-self:center; font-size:10px; letter-spacing:2px; opacity:.35; }
@@ -197,33 +214,38 @@
   #endMastery { margin-top:7px; min-height:14px; color:#ffd97a;
     font-size:10px; letter-spacing:1.5px; }
   #endGoal { display:none; width:min(736px,90vw); margin-top:11px; box-sizing:border-box;
-    padding:8px 13px; border-left:4px solid rgba(255,255,255,.26);
-    background:rgba(10,14,22,.72); text-align:left; text-transform:uppercase; }
+    padding:8px 13px; border:2px solid rgba(255,255,255,.22); border-left-width:6px;
+    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
+    text-align:left; text-transform:uppercase; }
   #endGoal.on { display:flex; align-items:center; justify-content:space-between; }
-  #endGoal.complete { border-left-color:#ffd97a; }
+  #endGoal.complete { border-color:rgba(255,217,122,.42); border-left-color:#ffd97a; }
   #endGoalLabel { font-size:8px; letter-spacing:2.3px; opacity:.42; }
   #endGoalName { margin-left:8px; font-size:11px; letter-spacing:1.7px; }
   #endGoalResult { color:#e8ecf2; font-size:10px; letter-spacing:1.5px; opacity:.65; }
   #endGoal.complete #endGoalResult { color:#ffd97a; opacity:1; }
   #endFieldwork { display:none; width:min(736px,90vw); margin-top:7px; box-sizing:border-box;
-    padding:7px 13px; background:rgba(10,14,22,.58); text-align:left; text-transform:uppercase; }
+    padding:7px 13px; background:rgba(14,20,31,.9);
+    border:2px solid rgba(255,255,255,.18); box-shadow:4px 4px 0 rgba(0,0,0,.42);
+    text-align:left; text-transform:uppercase; }
   #endFieldwork.on { display:flex; align-items:center; justify-content:space-between; gap:12px; }
   #endFieldworkLabel { font-size:8px; letter-spacing:2.3px; opacity:.42; }
   #endFieldworkDetail { font-size:9px; letter-spacing:1.1px; opacity:.7; }
   #endOperation { display:none; width:min(736px,90vw); margin-top:11px; box-sizing:border-box;
-    padding:10px 13px; border-left:4px solid #8faee0; background:rgba(10,14,22,.78);
+    padding:10px 13px; border:2px solid rgba(143,174,224,.42); border-left:6px solid #8faee0;
+    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
     text-align:left; text-transform:uppercase; }
   #endOperation.on { display:block; }
   #endOperationLabel { display:block; color:#8faee0; font-size:8px; letter-spacing:2.5px; }
   #endOperationTitle { display:block; margin-top:4px; font-size:14px; letter-spacing:2px; }
   #endOperationDetail { display:block; margin-top:3px; font-size:9px; letter-spacing:1.2px; opacity:.62; }
   #operationLeaveBtn { display:none; margin-top:9px; padding:7px 14px; color:#e8ecf2;
-    background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.24);
+    background:#141b28; border:2px solid rgba(255,255,255,.28); box-shadow:3px 3px 0 #05070b;
     font-family:inherit; font-size:10px; letter-spacing:1.5px; cursor:pointer; }
   #operationLeaveBtn.on { display:block; }
   #operationLeaveBtn:hover { background:rgba(255,255,255,.1); }
   #endStory { display:none; width:min(736px,90vw); margin-top:13px; box-sizing:border-box;
-    padding:9px 13px; border-left:4px solid #ffd97a; background:rgba(10,14,22,.72);
+    padding:9px 13px; border:2px solid rgba(255,217,122,.4); border-left:6px solid #ffd97a;
+    background:rgba(30,28,22,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
     text-align:left; text-transform:uppercase; }
   #endStory.on { display:block; }
   #endStory.collapse-kill { border-left-color:#e05a4e; }
@@ -235,16 +257,19 @@
   #endBoardLabel { margin-top:14px; margin-bottom:6px; font-size:9px;
     letter-spacing:2.5px; opacity:.38; }
   #endBoard { display:flex; justify-content:center; max-height:31vh; overflow:auto; }
+  #endBoard table.kd { border:2px solid rgba(255,255,255,.22); border-radius:0;
+    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48); }
   #endNote { margin-top:16px; font-size:12px; letter-spacing:2px; opacity:.5; }
   #rematchBtn { margin-top:13px; padding:8px 16px; color:#ffd97a;
-    background:rgba(255,217,122,.07); border:1px solid rgba(255,217,122,.45);
+    background:#1e1c16; border:2px solid rgba(255,217,122,.58); box-shadow:3px 3px 0 #05070b;
     font-family:inherit; font-size:11px; font-weight:700; letter-spacing:1.8px; cursor:pointer; }
   #rematchBtn:hover { background:rgba(255,217,122,.14); }
   #rematchBtn.voted, #rematchBtn:disabled { color:#e8ecf2; opacity:.55; cursor:default; }
   #squadReady { display:none; margin-top:9px; align-items:center; gap:10px; }
   #squadReady.on { display:flex; }
-  #squadBtn { padding:8px 16px; color:#8fd98f; background:rgba(143,217,143,.07);
-    border:1px solid rgba(143,217,143,.45); font-family:inherit; font-size:11px;
+  #squadBtn { padding:8px 16px; color:#8fd98f; background:#142019;
+    border:2px solid rgba(143,217,143,.55); box-shadow:3px 3px 0 #05070b;
+    font-family:inherit; font-size:11px;
     font-weight:700; letter-spacing:1.8px; cursor:pointer; }
   #squadBtn:hover { background:rgba(143,217,143,.14); }
   #squadBtn.voted, #squadBtn:disabled { color:#e8ecf2; opacity:.62; cursor:default; }
@@ -252,7 +277,7 @@
     line-height:1.35; letter-spacing:1px; opacity:.42; }
   @media (max-width:650px) {
     #endStats { grid-template-columns:repeat(2,1fr); }
-    #endTitle { font-size:40px; }
+    #endTitle { padding-inline:30px; font-size:40px; }
     #endMedals { flex-wrap:wrap; }
   }
 
@@ -886,42 +911,44 @@
     </div>
   </div>
 
-  <div class="screen hidden" id="end">
-    <div id="endTitle">VICTORY</div>
-    <div id="endDetail"></div>
-    <div id="endReport">
-      <div id="endStats"></div>
-      <div id="endMedals"></div>
-      <div id="endBests"></div>
-      <div id="endMastery"></div>
+  <div class="screen hidden" id="end" data-outcome="victory">
+    <div id="endContent">
+      <div id="endTitle">VICTORY</div>
+      <div id="endDetail"></div>
+      <div id="endReport">
+        <div id="endStats"></div>
+        <div id="endMedals"></div>
+        <div id="endBests"></div>
+        <div id="endMastery"></div>
+      </div>
+      <div id="endGoal">
+        <span><span id="endGoalLabel">PERSONAL FIELD GOAL</span><b id="endGoalName"></b></span>
+        <span id="endGoalResult"></span>
+      </div>
+      <div id="endFieldwork">
+        <span id="endFieldworkLabel">YOUR FIELDWORK</span>
+        <span id="endFieldworkDetail"></span>
+      </div>
+      <div id="endOperation">
+        <span id="endOperationLabel"></span>
+        <b id="endOperationTitle"></b>
+        <small id="endOperationDetail"></small>
+      </div>
+      <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
+      <div id="endStory">
+        <span id="endStoryLabel">BATTLEFIELD STORY</span>
+        <b id="endStoryTitle"></b>
+        <small id="endStoryDetail"></small>
+      </div>
+      <div id="endBoardLabel">MATCH SCOREBOARD</div>
+      <div id="endBoard"></div>
+      <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
+      <div id="squadReady">
+        <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
+        <small>Your current teammates already carry into the next round. Signal that you’re staying.</small>
+      </div>
+      <div id="endNote">rotating to the next map…</div>
     </div>
-    <div id="endGoal">
-      <span><span id="endGoalLabel">PERSONAL FIELD GOAL</span><b id="endGoalName"></b></span>
-      <span id="endGoalResult"></span>
-    </div>
-    <div id="endFieldwork">
-      <span id="endFieldworkLabel">YOUR FIELDWORK</span>
-      <span id="endFieldworkDetail"></span>
-    </div>
-    <div id="endOperation">
-      <span id="endOperationLabel"></span>
-      <b id="endOperationTitle"></b>
-      <small id="endOperationDetail"></small>
-    </div>
-    <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
-    <div id="endStory">
-      <span id="endStoryLabel">BATTLEFIELD STORY</span>
-      <b id="endStoryTitle"></b>
-      <small id="endStoryDetail"></small>
-    </div>
-    <div id="endBoardLabel">MATCH SCOREBOARD</div>
-    <div id="endBoard"></div>
-    <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
-    <div id="squadReady">
-      <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
-      <small>Your current teammates already carry into the next round. Signal that you’re staying.</small>
-    </div>
-    <div id="endNote">rotating to the next map…</div>
   </div>
 
   <script type="module" src="./src/main.js?v=27"></script>

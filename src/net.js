@@ -18,10 +18,40 @@ export const slotCode = i => 'PUB' + i;
 export const STATE_BUFFER_LIMIT = 64 * 1024;
 export const INBOUND_RATE = 120;
 export const INBOUND_BURST = 180;
+export const CLIENT_MESSAGE_BYTES = 2048;
+export const SERVER_MESSAGE_BYTES = 2 * 1024 * 1024;
+export const SNAPSHOT_MESSAGE_BYTES = 64 * 1024;
+export const EVENT_MESSAGE_BYTES = 128 * 1024;
 
 export function wireBytes(obj) {
   try { return new TextEncoder().encode(JSON.stringify(obj)).byteLength; }
   catch { return 0; }
+}
+
+export function wireBudget(obj, serverMessage = false) {
+  if (!serverMessage) return CLIENT_MESSAGE_BYTES;
+  if (obj?.t === 's') return SNAPSHOT_MESSAGE_BYTES;
+  if (obj?.t === 'e') return EVENT_MESSAGE_BYTES;
+  return SERVER_MESSAGE_BYTES;
+}
+
+export function withinWireBudget(obj, serverMessage = false) {
+  const bytes = wireBytes(obj);
+  return bytes > 0 && bytes <= wireBudget(obj, serverMessage);
+}
+
+// Exactly one open data channel owns a peer id. A replacement wins and the
+// old channel is closed immediately; late data/close events from that old
+// object are ignored by the identity checks in the host handlers below.
+export function claimPeerChannel(connections, conn) {
+  if (!(connections instanceof Map) || !conn?.peer) return null;
+  const previous = connections.get(conn.peer);
+  if (previous === conn) return previous;
+  connections.set(conn.peer, conn);
+  if (previous?.open) {
+    try { previous.close(); } catch { /* already closing */ }
+  }
+  return previous ?? null;
 }
 
 // Position reports are superseded by the next one. Once a reliable WebRTC
@@ -64,13 +94,13 @@ export class Net {
     this.telemetry = {
       startedAt: typeof performance !== 'undefined' ? performance.now() : Date.now(),
       sentPackets: 0, sentBytes: 0, recvPackets: 0, recvBytes: 0,
-      droppedState: 0, droppedInbound: 0, peakBuffered: 0,
+      droppedState: 0, droppedInbound: 0, droppedOversize: 0,
+      duplicateChannels: 0, peakBuffered: 0,
     };
   }
 
-  _record(direction, obj, conn) {
+  _record(direction, obj, conn, bytes = wireBytes(obj)) {
     const t = this.telemetry;
-    const bytes = wireBytes(obj);
     if (direction === 'sent') { t.sentPackets++; t.sentBytes += bytes; }
     else { t.recvPackets++; t.recvBytes += bytes; }
     t.peakBuffered = Math.max(t.peakBuffered, conn?.dataChannel?.bufferedAmount ?? 0);
@@ -85,12 +115,17 @@ export class Net {
   }
 
   _sendConn(conn, obj) {
+    const bytes = wireBytes(obj);
+    if (!bytes || bytes > wireBudget(obj, this.isHost)) {
+      this.telemetry.droppedOversize++;
+      return false;
+    }
     if (!shouldSend(conn, obj)) {
       if (conn?.open && obj?.t === 's') this.telemetry.droppedState++;
       return false;
     }
     conn.send(obj);
-    this._record('sent', obj, conn);
+    this._record('sent', obj, conn, bytes);
     return true;
   }
 
@@ -121,10 +156,16 @@ export class Net {
         // An open channel is proof of life — claim the map slot. A zombie
         // channel from an abandoned knock never opens, so it can never
         // steal the slot; whichever live channel opens last rightfully wins.
-        net.conns.set(conn.peer, conn);
+        if (claimPeerChannel(net.conns, conn)) net.telemetry.duplicateChannels++;
       });
       conn.on('data', d => {
-        net._record('recv', d, conn);
+        if (net.conns.get(conn.peer) !== conn) return;
+        const bytes = wireBytes(d);
+        if (!bytes || bytes > wireBudget(d, false)) {
+          net.telemetry.droppedOversize++;
+          return;
+        }
+        net._record('recv', d, conn, bytes);
         if (!allowInbound(conn)) { net.telemetry.droppedInbound++; return; }
         // A claimed room exists before its handlers do: _claim builds the Net
         // with {} and adoption attaches onData a beat later. A survivor whose
@@ -166,7 +207,11 @@ export class Net {
     net.peer.on('open', () => {
       net.conn = net.peer.connect(PREFIX + code, { reliable: true });
       net.conn.on('open', () => net.handlers.onOpen?.());
-      net.conn.on('data', d => { net._record('recv', d, net.conn); net.handlers.onData?.(d); });
+      net.conn.on('data', d => {
+        const bytes = wireBytes(d);
+        if (!bytes || bytes > wireBudget(d, true)) { net.telemetry.droppedOversize++; return; }
+        net._record('recv', d, net.conn, bytes); net.handlers.onData?.(d);
+      });
       net.conn.on('close', () => net.handlers.onClose?.());
       net.conn.on('error', () => net.handlers.onClose?.());
     });
@@ -243,7 +288,11 @@ export class Net {
     net.conn = conn;
     window.__net = net; // debug handle
     peer.on('error', e => net.handlers.onError?.(e));
-    conn.on('data', d => { net._record('recv', d, conn); net.handlers.onData?.(d); });
+    conn.on('data', d => {
+      const bytes = wireBytes(d);
+      if (!bytes || bytes > wireBudget(d, true)) { net.telemetry.droppedOversize++; return; }
+      net._record('recv', d, conn, bytes); net.handlers.onData?.(d);
+    });
     conn.on('close', () => { console.debug(`[net] guest conn close`); net.handlers.onClose?.(); });
     conn.on('error', e => { console.debug(`[net] guest conn error ${e?.type ?? e}`); net.handlers.onClose?.(); });
     conn.on('iceStateChanged', s => console.debug(`[net] guest ice ${s}`));

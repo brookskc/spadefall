@@ -11,23 +11,26 @@ import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
   PINEFALL_RAVINE_HALF_WIDTH, pinefallRavineCenter,
   pinefallRavineHeight } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
-  animateSoldier, disposeObject, makeMq9Drone, makeSoldier,
+  animateSoldier, applySoldierGraphics, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
 import { Avatar } from '../src/avatar.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
-  parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
+  createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, Net, shouldSend, wireBytes } from '../src/net.js';
+import { allowInbound, claimPeerChannel, Net, shouldSend, wireBytes,
+  withinWireBudget } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
   authorizeWeaponFire, recordIntegrityViolation, settleReload } from '../src/security.js';
 import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
+import { modeScoreLimit } from '../src/match-modes.js';
+import { PresentationSchedule } from '../src/presentation.js';
 import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
@@ -275,6 +278,25 @@ function meshingTests() {
   w.set(100, 22, 100, BLOCK.BLUE);
   w.flushDirty();
   ok('and comes back when refilled', w.chunks.size === before);
+
+  const blast = slab();
+  let rebuilds = 0;
+  const originalBuildChunk = blast.buildChunk.bind(blast);
+  blast.buildChunk = (...args) => { rebuilds++; return originalBuildChunk(...args); };
+  blast.carve(96, 22, 96, 3);
+  ok('explosions defer all remeshing to the shared dirty flush', rebuilds === 0);
+  blast.flushDirty();
+  ok('one explosion rebuilds each dirty chunk at most once', rebuilds > 0
+    && rebuilds <= 9, `${rebuilds} chunks rebuilt`);
+
+  const notifications = [];
+  blast.onEdit = (x, z) => notifications.push(x + ',' + z);
+  blast.batchEdits(() => {
+    blast.set(80, 20, 80, 0);
+    blast.set(80, 21, 80, 0);
+    blast.set(80, 22, 80, 0);
+  });
+  ok('batched edits invalidate each minimap column once', notifications.length === 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +426,21 @@ function multiplayerRuleTests() {
     validateMovementReport(prev, { x: 40, y: 20, z: 10, yaw: 0 }, 1 / 30).reason === 'horizontal-speed');
   ok('vertical teleport is rejected',
     validateMovementReport(prev, { x: 10, y: 40, z: 10, yaw: 0 }, 1 / 30).reason === 'vertical-rise');
+  const moveBudget = createMovementBudget();
+  let budgetPos = prev;
+  let burstAccepted = 0;
+  for (let i = 0; i < 20; i++) {
+    const next = { x: budgetPos.x + 0.3, y: 20, z: 10, yaw: 0 };
+    const result = validateMovementReport(budgetPos, next, 0, undefined, moveBudget);
+    if (!result.ok) break;
+    budgetPos = next;
+    burstAccepted++;
+  }
+  ok('same-frame reports share one capped movement budget', burstAccepted === 4,
+    `${burstAccepted} burst reports accepted`);
+  ok('movement credit refills from real elapsed time',
+    validateMovementReport(budgetPos,
+      { x: budgetPos.x + 0.9, y: 20, z: 10, yaw: 0 }, 0.1, undefined, moveBudget).ok);
   ok('zero-length action direction is rejected', normalizeDirection([0, 0, 0]) === null);
   const dir = normalizeDirection([3, 0, 4]);
   ok('action direction is normalized at the trust boundary',
@@ -412,6 +449,20 @@ function multiplayerRuleTests() {
     validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada', team: null }));
   ok('null client messages are rejected without dispatch', !validClientMessage(null));
   ok('malformed state reports are rejected', !validClientMessage({ t: 's', x: NaN }));
+  ok('protocol objects reject undeclared fields instead of silently carrying them',
+    !validClientMessage({ t: 'ping', hidden: 'payload' })
+      && !validServerMessage({ t: 'e', k: 'hit', kill: false, tier: null, hidden: 1 }));
+  ok('wire budgets accept normal actions and reject oversized client payloads',
+    withinWireBudget({ t: 'a', k: 'chat', text: 'hello', scope: 'all' })
+      && !withinWireBudget({ t: 'a', k: 'chat', text: 'x'.repeat(3000), scope: 'all' }));
+  const channels = new Map();
+  const oldChannel = { peer: 'peer-1', open: true, closed: false,
+    close() { this.closed = true; } };
+  const newChannel = { peer: 'peer-1', open: true, close() {} };
+  claimPeerChannel(channels, oldChannel);
+  claimPeerChannel(channels, newChannel);
+  ok('a peer id owns exactly one live channel', channels.get('peer-1') === newChannel
+    && oldChannel.closed);
   ok('oversized collapse events are rejected', !validServerMessage({
     t: 'e', k: 'col', cells: Array(12003).fill(0),
   }));
@@ -435,6 +486,15 @@ function multiplayerRuleTests() {
   ok('room browser rejects malformed names payloads', !validPong({
     t: 'pong', humans: 1, max: 10, map: 0, mode: 'ctf', g: 0, b: 0, names: 'oops',
   }));
+  ok('extracted match-mode limits retain their mode mapping',
+    modeScoreLimit('ctf') === 3 && modeScoreLimit('tdm') >= 2
+      && modeScoreLimit('koth') >= 10);
+  const schedule = new PresentationSchedule();
+  const firstPresentation = schedule.step(0);
+  const quietPresentation = schedule.step(0.01);
+  ok('presentation cadence keeps noncritical work off every frame',
+    firstPresentation.fast && firstPresentation.slow && firstPresentation.network
+      && !quietPresentation.fast && !quietPresentation.slow && !quietPresentation.network);
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,13 +1409,22 @@ function airstrikeDroneTests() {
 function soldierModelTests() {
   group('voxel soldier: articulated model and class silhouettes');
   const p = makeSoldier(0x4e8b57);
-  let meshes = 0, visibleMeshes = 0;
+  const visibleInTree = object => {
+    for (let node = object; node; node = node.parent) if (!node.visible) return false;
+    return true;
+  };
+  let drawCalls = 0, visibleDrawCalls = 0, voxelParts = 0, visibleParts = 0;
   p.group.traverse(o => {
     if (!o.isMesh) return;
-    meshes++;
-    if (o.visible && o.parent?.visible !== false) visibleMeshes++;
+    drawCalls++;
+    const count = o.userData.voxelPartCount ?? 1;
+    voxelParts += count;
+    if (visibleInTree(o)) { visibleDrawCalls++; visibleParts += count; }
   });
-  ok('soldier is a detailed articulated assembly', meshes >= 55, `${meshes} box meshes`);
+  ok('soldier keeps its detailed articulated assembly', voxelParts >= 55,
+    `${voxelParts} voxel parts`);
+  ok('visible soldier voxel parts are consolidated into bounded draw calls',
+    visibleDrawCalls <= 28, `${visibleDrawCalls} visible / ${drawCalls} total assemblies`);
   ok('rifle is the default world-model weapon and equipment kit', p.gun.visible && p.rifle.visible
     && !p.smg.visible && !p.sniper.visible && p.rifleKit.visible
     && !p.smgKit.visible && !p.sniperKit.visible);
@@ -1391,8 +1460,16 @@ function soldierModelTests() {
   ok('standing model stays aligned to the gameplay body height',
     bounds.min.y >= -0.01 && bounds.max.y <= 1.8,
     `y=${bounds.min.y.toFixed(2)}..${bounds.max.y.toFixed(2)}`);
-  ok('default visible complexity remains bounded', visibleMeshes < 45,
-    `${visibleMeshes} visible box meshes`);
+  ok('default visible complexity remains bounded', visibleParts < 45,
+    `${visibleParts} visible voxel parts`);
+  applySoldierGraphics(p, 'low');
+  let liveLowParts = 0;
+  p.group.traverse(o => {
+    if (o.isMesh && visibleInTree(o)) liveLowParts += o.userData.voxelPartCount ?? 1;
+  });
+  ok('graphics changes apply to an already-spawned soldier', liveLowParts <= visibleParts - 8,
+    `${visibleParts} -> ${liveLowParts} visible parts`);
+  applySoldierGraphics(p, 'high');
   disposeObject(p.group);
 
   const hadStorage = 'localStorage' in globalThis;
@@ -1401,10 +1478,10 @@ function soldierModelTests() {
   const low = makeSoldier(0x4e8b57);
   let lowVisible = 0;
   low.group.traverse(o => {
-    if (o.isMesh && o.visible && o.parent?.visible !== false) lowVisible++;
+    if (o.isMesh && visibleInTree(o)) lowVisible += o.userData.voxelPartCount ?? 1;
   });
   ok('low graphics removes only nonessential soldier detail',
-    lowVisible <= visibleMeshes - 8, `${visibleMeshes} -> ${lowVisible} visible meshes`);
+    lowVisible <= visibleParts - 8, `${visibleParts} -> ${lowVisible} visible parts`);
   disposeObject(low.group);
   if (hadStorage) globalThis.localStorage = priorStorage;
   else delete globalThis.localStorage;
@@ -1453,6 +1530,21 @@ function bodyTests() {
   ok('without the guard you walk off the cliff', walkEast(false) > 50);
   note(`guarded body parks at x=${guarded.toFixed(2)}; the last solid column ends at 50, so the centre `
     + 'overhangs by ~0.25 (the guard only requires SOME of the footprint to have footing)');
+
+  const sweepWorld = floorAt(30);
+  for (let y = 31; y <= 33; y++)
+    sweepWorld.data[(y * SZ + 50) * SX + 50] = BLOCK.STONE;
+  const sweepBody = new Body(sweepWorld, 48.5, 31, 50.5);
+  ok('swept validation catches a wall between clear endpoints',
+    sweepBody.sweptOverlapsSolid(48.5, 31, 50.5, 51.5, 31, 50.5));
+  ok('swept validation permits an unobstructed report',
+    !sweepBody.sweptOverlapsSolid(48.5, 31, 48.5, 49.2, 31, 48.5));
+
+  const sweptStep = floorAt(30);
+  sweptStep.data[(31 * SZ + 50) * SX + 50] = BLOCK.STONE;
+  const stepBody = new Body(sweptStep, 49.2, 31, 50.5);
+  ok('swept validation preserves a legal one-block step',
+    !stepBody.sweptOverlapsSolid(49.2, 31, 50.5, 50.5, 32.001, 50.5));
 
   const step = new VoxelWorld(scene());
   for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) {

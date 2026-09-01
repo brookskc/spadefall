@@ -59,6 +59,30 @@ export class Body {
     return false;
   }
 
+  // Check the volume between two reported positions, not merely the final
+  // AABB. Sampling at less than the body's half-width prevents a peer from
+  // crossing a one-voxel wall between otherwise legal endpoints. A legal
+  // one-block step may travel upward first, so test that alternate path when
+  // the destination is no more than one normal step above the start.
+  sweptOverlapsSolid(x0, y0, z0, x1, y1, z1, maxStep = 0.2) {
+    const blocked = (ax, ay, az, bx, by, bz) => {
+      const distance = Math.hypot(bx - ax, by - ay, bz - az);
+      const steps = Math.max(1, Math.ceil(distance / maxStep));
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        if (this.overlapsSolid(
+          ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t)) return true;
+      }
+      return false;
+    };
+    if (!blocked(x0, y0, z0, x1, y1, z1)) return false;
+    const rise = y1 - y0;
+    if (rise > 0 && rise <= 1.05
+        && !blocked(x0, y0, z0, x0, y1, z0)
+        && !blocked(x0, y1, z0, x1, y1, z1)) return false;
+    return true;
+  }
+
   // Axis-separated integration: move one axis at a time, clamp on collision.
   move(dt) {
     this.landedSpeed = 0;
@@ -197,7 +221,9 @@ export class Body {
     else if (this.inWater) this.vel.y = 4; // swim upward
   }
 
-  eye() { return new THREE.Vector3(this.pos.x, this.pos.y + this.half.h - EYE_INSET, this.pos.z); }
+  eye(target = new THREE.Vector3()) {
+    return target.set(this.pos.x, this.pos.y + this.half.h - EYE_INSET, this.pos.z);
+  }
 }
 
 // A blocky AoS-style soldier: legs, torso, arms, head, gun — team colored.
@@ -293,6 +319,23 @@ export function retintVoxelBoxes(root) {
   });
 }
 
+let soldierBoxGeometry = null;
+const soldierMaterialCache = new Map();
+
+function sharedSoldierGeometry() {
+  if (!soldierBoxGeometry) soldierBoxGeometry = faceTintedBox(1, 1, 1);
+  return soldierBoxGeometry;
+}
+
+function sharedSoldierMaterial(color) {
+  if (!soldierMaterialCache.has(color)) {
+    const material = new THREE.MeshBasicMaterial({ color, vertexColors: true });
+    material.userData.shared = true;
+    soldierMaterialCache.set(color, material);
+  }
+  return soldierMaterialCache.get(color);
+}
+
 // Block-built MQ-9 silhouette used by the airstrike flyover. The aircraft
 // points along local +X, which matches the player's world-space forward
 // vector after Game rotates the group by player yaw. Keeping every visible
@@ -370,21 +413,47 @@ export function makeMq9Drone() {
 export function makeSoldier(teamColor) {
   const g = new THREE.Group();
   const gfx = getGfxLevel();
-  const detail = gfx !== 'low';
-  const fineDetail = gfx === 'high';
-  const skin = new THREE.MeshBasicMaterial({ color: 0xd9a066, vertexColors: true });
-  const cloth = new THREE.MeshBasicMaterial({ color: teamColor, vertexColors: true });
-  const armor = new THREE.MeshBasicMaterial({ color: 0x4b504d, vertexColors: true });
-  const armorDark = new THREE.MeshBasicMaterial({ color: 0x303533, vertexColors: true });
-  const dark = new THREE.MeshBasicMaterial({ color: 0x202426, vertexColors: true });
-  const metal = new THREE.MeshBasicMaterial({ color: 0x666d6b, vertexColors: true });
-  const lens = new THREE.MeshBasicMaterial({ color: 0x263b42, vertexColors: true });
-  const wood = new THREE.MeshBasicMaterial({ color: 0x6b4a2c, vertexColors: true });
-  const box = (w, h, d, mat, x, y, z, parent = g) => {
-    const m = new THREE.Mesh(faceTintedBox(w, h, d), mat);
-    m.position.set(x, y, z);
-    parent.add(m);
-    return m;
+  const skin = sharedSoldierMaterial(0xd9a066);
+  const cloth = sharedSoldierMaterial(teamColor);
+  const armor = sharedSoldierMaterial(0x4b504d);
+  const armorDark = sharedSoldierMaterial(0x303533);
+  const dark = sharedSoldierMaterial(0x202426);
+  const metal = sharedSoldierMaterial(0x666d6b);
+  const lens = sharedSoldierMaterial(0x263b42);
+  const wood = sharedSoldierMaterial(0x6b4a2c);
+  const boxBatches = new Map();
+  const box = (w, h, d, mat, x, y, z, parent = g, tier = 'low') => {
+    let byMaterial = boxBatches.get(parent);
+    if (!byMaterial) boxBatches.set(parent, byMaterial = new Map());
+    const key = mat.uuid + ':' + tier;
+    let batch = byMaterial.get(key);
+    if (!batch) byMaterial.set(key, batch = { material: mat, tier, transforms: [] });
+    const transform = new THREE.Object3D();
+    transform.position.set(x, y, z);
+    transform.scale.set(w, h, d);
+    batch.transforms.push(transform);
+    return transform;
+  };
+  const detailBox = (w, h, d, mat, x, y, z, parent = g) =>
+    box(w, h, d, mat, x, y, z, parent, 'medium');
+  const fineBox = (w, h, d, mat, x, y, z, parent = g) =>
+    box(w, h, d, mat, x, y, z, parent, 'high');
+  const flushBoxes = () => {
+    for (const [parent, byMaterial] of boxBatches) {
+      for (const { material, tier, transforms } of byMaterial.values()) {
+        const mesh = new THREE.InstancedMesh(sharedSoldierGeometry(), material, transforms.length);
+        mesh.userData.shared = true;
+        mesh.userData.voxelPartCount = transforms.length;
+        mesh.userData.gfxMin = tier;
+        mesh.frustumCulled = false;
+        for (let i = 0; i < transforms.length; i++) {
+          transforms[i].updateMatrix();
+          mesh.setMatrixAt(i, transforms[i].matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        parent.add(mesh);
+      }
+    }
   };
 
   // Legs pivot at the hips. Splitting boot, trouser, and knee pad gives the
@@ -395,7 +464,7 @@ export function makeSoldier(teamColor) {
     box(0.25, 0.34, 0.27, cloth, 0, -0.17, 0, root);
     box(0.23, 0.28, 0.24, cloth, 0, -0.47, 0, root);
     box(0.25, 0.14, 0.36, dark, 0, -0.62, -0.055, root);
-    if (detail) box(0.24, 0.12, 0.08, armorDark, 0, -0.36, -0.145, root);
+    detailBox(0.24, 0.12, 0.08, armorDark, 0, -0.36, -0.145, root);
     g.add(root);
     return root;
   };
@@ -419,30 +488,23 @@ export function makeSoldier(teamColor) {
   // without painting class information onto the uniform.
   const rifleKit = new THREE.Group();
   box(0.36, 0.38, 0.18, armor, 0, 0.36, 0.25, rifleKit);
-  if (detail) {
-    box(0.28, 0.09, 0.21, armorDark, 0, 0.58, 0.21, rifleKit);
-    box(0.05, 0.34, 0.035, armorDark, -0.11, 0.36, 0.35, rifleKit);
-    box(0.05, 0.34, 0.035, armorDark, 0.11, 0.36, 0.35, rifleKit);
-  }
+  detailBox(0.28, 0.09, 0.21, armorDark, 0, 0.58, 0.21, rifleKit);
+  detailBox(0.05, 0.34, 0.035, armorDark, -0.11, 0.36, 0.35, rifleKit);
+  detailBox(0.05, 0.34, 0.035, armorDark, 0.11, 0.36, 0.35, rifleKit);
 
   const smgKit = new THREE.Group();
   box(0.27, 0.24, 0.14, armor, 0, 0.34, 0.23, smgKit); // compact assault pack
   box(0.10, 0.15, 0.12, armorDark, -0.27, 0.09, 0.18, smgKit);
   box(0.10, 0.15, 0.12, armorDark, 0.27, 0.09, 0.18, smgKit);
-  if (detail) {
-    for (const x of [-0.11, 0, 0.11])
-      box(0.055, 0.14, 0.035, metal, x, 0.34, -0.238, smgKit);
-  }
+  for (const x of [-0.11, 0, 0.11])
+    detailBox(0.055, 0.14, 0.035, metal, x, 0.34, -0.238, smgKit);
 
   const sniperKit = new THREE.Group();
   box(0.25, 0.50, 0.14, armor, 0, 0.38, 0.24, sniperKit); // tall, narrow pack
   box(0.36, 0.11, 0.17, armorDark, 0, 0.10, 0.24, sniperKit); // bedroll
-  if (detail) {
-    const strap = box(0.05, 0.46, 0.026, armorDark, 0.09, 0.40, -0.239, sniperKit);
-    strap.rotation.z = -0.38;
-  }
-  if (fineDetail)
-    box(0.032, 0.38, 0.032, metal, 0.14, 0.74, 0.27, sniperKit); // radio antenna
+  const strap = detailBox(0.05, 0.46, 0.026, armorDark, 0.09, 0.40, -0.239, sniperKit);
+  strap.rotation.z = -0.38;
+  fineBox(0.032, 0.38, 0.032, metal, 0.14, 0.74, 0.27, sniperKit); // radio antenna
   torso.add(rifleKit, smgKit, sniperKit);
   g.add(torso);
 
@@ -454,7 +516,7 @@ export function makeSoldier(teamColor) {
     box(0.18, 0.30, 0.21, cloth, 0, -0.15, 0, root);
     box(0.17, 0.25, 0.19, armor, 0, -0.42, 0, root);
     box(0.18, 0.14, 0.20, dark, 0, -0.61, 0, root);
-    if (detail) box(0.08, 0.13, 0.05, cloth, x < 0 ? -0.11 : 0.11, -0.12, -0.12, root);
+    detailBox(0.08, 0.13, 0.05, cloth, x < 0 ? -0.11 : 0.11, -0.12, -0.12, root);
     g.add(root);
     return root;
   };
@@ -488,7 +550,7 @@ export function makeSoldier(teamColor) {
   wp(rifle, 0.07, 0.07, 0.50, metal, 0, 0.02, -0.56);
   wp(rifle, 0.11, 0.10, 0.13, dark, 0, 0.02, -0.86);
   wp(rifle, 0.14, 0.25, 0.16, armorDark, 0, -0.18, -0.10);
-  if (detail) wp(rifle, 0.08, 0.09, 0.08, metal, 0, 0.14, -0.20);
+  detailBox(0.08, 0.09, 0.08, metal, 0, 0.14, -0.20, rifle);
   // SMG: short barrel, tall box magazine, compact folding stock.
   wp(smg, 0.22, 0.22, 0.38, dark, 0, 0, -0.08);
   wp(smg, 0.10, 0.10, 0.24, metal, 0, 0.01, -0.38);
@@ -525,14 +587,25 @@ export function makeSoldier(teamColor) {
   box(0.06, 0.12, 0.14, dark, 0.08, 0.22, 0, grenade);
   grenade.position.set(0.22, 0.86, -0.35); grenade.visible = false; g.add(grenade);
 
+  flushBoxes();
+
   const blob = blobShadow();
   g.add(blob);
 
   const parts = { group: g, legL, legR, armL, armR, head, torso, gun,
     rifle, smg, sniper, rifleKit, smgKit, sniperKit,
-    spade, block, grenade, blob, brim };
+    spade, block, grenade, blob, brim, teamMaterial: cloth };
   setSoldierTool(parts, 0);
+  applySoldierGraphics(parts, gfx);
   return parts;
+}
+
+export function applySoldierGraphics(parts, level = getGfxLevel()) {
+  const rank = { low: 0, medium: 1, high: 2 }[level] ?? 2;
+  parts?.group?.traverse?.(object => {
+    const minimum = object.userData?.gfxMin;
+    if (minimum) object.visible = rank >= ({ low: 0, medium: 1, high: 2 }[minimum] ?? 0);
+  });
 }
 
 export function setSoldierTool(parts, tool) {

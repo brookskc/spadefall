@@ -94,7 +94,7 @@ Low, Medium, and High graphics presets adjust render resolution, antialiasing, a
 
 ## How it is built
 
-The game is plain HTML, CSS, and JavaScript modules. Three.js r170 and PeerJS are vendored in the repository, so the project has no package install or production build step.
+The game is plain HTML, CSS, and JavaScript modules. Three.js r170 and PeerJS are vendored in the repository, so the production game has no package install or build step. Playwright is a development-only dependency for the two-browser multiplayer test.
 
 - A `256 x 64 x 256` voxel world stored in typed arrays
 - `16 x 16` terrain chunks with queued remeshing after edits
@@ -116,11 +116,15 @@ python -m http.server 8000
 
 Open `http://localhost:8000`. Browsers block JavaScript modules when `index.html` is opened directly from disk, so a local HTTP server is required.
 
-Run the test suite with:
+Install the test tooling, then run the deterministic suite and real-browser multiplayer test:
 
 ```sh
-node tests/run.mjs
+npm install
+npm test
+npm run test:multiplayer
 ```
+
+Run both suites in the same order as CI with `npm run test:ci`.
 
 For bot tuning, append `?botq=easy`, `?botq=normal`, or `?botq=hard` to the local URL. Difficulty changes reaction time, aim error, memory, hearing, and decision cadence; it does not change bot health or weapon damage. In a solo or hosted match, `/botstats` in chat reports average decision time, stuck recoveries, and objective participation.
 

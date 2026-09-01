@@ -1,0 +1,13 @@
+{
+  "name": "spadefall",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "test:multiplayer": "node tests/multiplayer.browser.mjs",
+    "test:ci": "npm test && npm run test:multiplayer"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

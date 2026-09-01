@@ -15,14 +15,17 @@ export class Effects {
     // simultaneous instances to update during a chaotic firefight, which
     // is exactly when frame drops are most noticeable on weak hardware.
     const preset = gfxPreset();
+    const capacity = gfxPreset('high');
     this.maxDebris = preset.debris;
     this.maxCasings = preset.casings;
+    this.activeTracers = preset.tracers;
+    this.activeFlashes = preset.flashes;
 
     // Debris — one InstancedMesh, recycled slots.
     this.debris = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.16, 0.16, 0.16),
       new THREE.MeshBasicMaterial(),
-      this.maxDebris
+      capacity.debris
     );
     this.debris.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.debris.count = 0;
@@ -30,9 +33,9 @@ export class Effects {
     scene.add(this.debris);
 
     this.casingParticles = [];
-    this.casings = this.maxCasings ? new THREE.InstancedMesh(
+    this.casings = capacity.casings ? new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.035, 0.035, 0.12),
-      new THREE.MeshBasicMaterial({ color: 0xc9a24a }), this.maxCasings) : null;
+      new THREE.MeshBasicMaterial({ color: 0xc9a24a }), capacity.casings) : null;
     if (this.casings) {
       this.casings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       this.casings.count = 0;
@@ -46,7 +49,7 @@ export class Effects {
       color: 0xffe9a8, transparent: true, opacity: 0.9,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    for (let i = 0; i < preset.tracers; i++) {
+    for (let i = 0; i < capacity.tracers; i++) {
       const m = new THREE.Mesh(tGeo, tMat.clone());
       m.visible = false;
       scene.add(m);
@@ -64,7 +67,7 @@ export class Effects {
       color: 0xfff2c4, transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    for (let i = 0; i < preset.flashes; i++) {
+    for (let i = 0; i < capacity.flashes; i++) {
       const m = new THREE.Mesh(fGeo, fMat.clone());
       m.visible = false;
       scene.add(m);
@@ -87,8 +90,27 @@ export class Effects {
     this.flashLife = 0;
   }
 
+  applyGraphics(level) {
+    const preset = gfxPreset(level);
+    this.maxDebris = preset.debris;
+    this.maxCasings = preset.casings;
+    this.activeTracers = preset.tracers;
+    this.activeFlashes = preset.flashes;
+    if (this.particles.length > this.maxDebris) this.particles.length = this.maxDebris;
+    if (this.casingParticles.length > this.maxCasings)
+      this.casingParticles.length = this.maxCasings;
+    for (let i = this.activeTracers; i < this.tracers.length; i++) {
+      this.tracers[i].life = 0; this.tracers[i].mesh.visible = false;
+    }
+    for (let i = this.activeFlashes; i < this.flashes.length; i++) {
+      this.flashes[i].life = 0; this.flashes[i].mesh.visible = false;
+    }
+  }
+
   tracer(from, to) {
-    const t = this.tracers.find(t => t.life <= 0);
+    let t = null;
+    for (let i = 0; i < this.activeTracers; i++)
+      if (this.tracers[i].life <= 0) { t = this.tracers[i]; break; }
     if (!t) return;
     const len = from.distanceTo(to);
     t.mesh.position.copy(from).add(to).multiplyScalar(0.5);
@@ -100,7 +122,9 @@ export class Effects {
   }
 
   muzzleFlash(pos, kind = 'rifle') {
-    const f = this.flashes.find(f => f.life <= 0);
+    let f = null;
+    for (let i = 0; i < this.activeFlashes; i++)
+      if (this.flashes[i].life <= 0) { f = this.flashes[i]; break; }
     if (!f) return;
     f.mesh.position.copy(pos);
     const scale = kind === 'sniper' ? 1.35 : kind === 'smg' ? 0.72 : 1;

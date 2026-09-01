@@ -644,14 +644,14 @@ if (engagementFeatures.selectedGoals) {
   renderStartTeam();
 }
 
-// Graphics preset picker: Low/Medium/High. Pixel ratio applies live —
+// Graphics preset picker: Low/Medium/High. Pixel ratio, particle capacity,
+// ambience, and foam apply live —
 // setPixelRatio can change on an already-running renderer. Antialiasing
 // cannot: it's fixed at WebGL context creation, so a change here only
 // takes effect next launch — gfxReloadNote says so explicitly rather
 // than silently doing nothing visible until a reload happens to occur.
-// Particle pool caps (see settings.js/effects.js) apply on the next
-// Effects construction, which a map rebuild already triggers often
-// enough that this isn't worth forcing immediately either.
+// Antialiasing remains the sole reload-only option because WebGL fixes it
+// when the rendering context is created.
 {
   const opts = document.querySelectorAll('#gfxOpts .opt');
   const note = $('gfxReloadNote');
@@ -666,6 +666,7 @@ if (engagementFeatures.selectedGoals) {
       const level = el.dataset.gfx;
       setGfxLevel(level);
       renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset(level).pixelRatio));
+      game.applyGraphics(level);
       renderGfx();
     });
   }
@@ -719,6 +720,7 @@ choiceRow('motionOpts', getMotionLevel, setMotionLevel, value => {
 });
 choiceRow('colorOpts', getColorMode, setColorMode, value => {
   document.body.dataset.colors = value;
+  game.applyColorMode();
 });
 
 // Reads the preference the picker above sets, or undefined if the player

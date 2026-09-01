@@ -6,7 +6,7 @@ import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -14,43 +14,65 @@ const shortString = (value, max) => typeof value === 'string' && value.length <=
 const finiteArray = (value, length) =>
   Array.isArray(value) && value.length === length && value.every(finite);
 const operation = value => value === null || validOperationRow(value);
+const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const exactKeys = (value, allowed, required = []) => {
+  const set = new Set(allowed);
+  return Object.keys(value).every(key => set.has(key))
+    && required.every(key => own(value, key));
+};
 const rows = (value, width, max) =>
   Array.isArray(value) && value.length <= max
-    && value.every(row => Array.isArray(row) && row.length >= width
-      && row.slice(0, width).every(finite));
+    && value.every(row => Array.isArray(row) && row.length === width
+      && row.every(finite));
 
 export function validRoster(value) {
   return isRecord(value)
+    && exactKeys(value, ['t', 'p', 'b'], ['p', 'b'])
+    && (value.t === undefined || value.t === 'r')
     && Array.isArray(value.p) && value.p.length <= 10
-    && value.p.every(r => Array.isArray(r) && r.length >= 4 && finite(r[0])
-      && shortString(String(r[1] ?? ''), 64) && team(r[2]) && shortString(String(r[3] ?? ''), 128))
+    && value.p.every(r => Array.isArray(r) && r.length === 4 && finite(r[0])
+      && shortString(r[1], 64) && team(r[2]) && shortString(r[3], 128))
     && Array.isArray(value.b) && value.b.length <= 10
-    && value.b.every(r => Array.isArray(r) && r.length >= 3 && finite(r[0])
-      && shortString(String(r[1] ?? ''), 64) && team(r[2]));
+    && value.b.every(r => Array.isArray(r) && r.length === 3 && finite(r[0])
+      && shortString(r[1], 64) && team(r[2]));
 }
 
 export function validEditLog(value) {
   return Array.isArray(value) && value.length <= 100000 && value.every(e => {
     if (!Array.isArray(e)) return false;
-    if (e[0] === 'b') return e.length >= 5 && e.slice(1, 5).every(finite);
-    return e.length >= 4 && e.slice(0, 4).every(finite);
+    if (e[0] === 'b') return e.length === 5 && e.slice(1).every(finite);
+    return e.length === 4 && e.every(finite);
   });
 }
 
 export function validClientMessage(d) {
   if (!isRecord(d) || !shortString(d.t, 8)) return false;
-  if (d.t === 'ping') return true;
-  if (d.t === 'hi') return d.v === PROTOCOL_VERSION && shortString(String(d.name ?? ''), 64)
+  if (d.t === 'ping') return exactKeys(d, ['t'], ['t']);
+  if (d.t === 'hi') return exactKeys(d, ['t', 'v', 'name', 'team'], ['t', 'v', 'name'])
+    && d.v === PROTOCOL_VERSION && shortString(d.name, 64)
     // PeerJS/BinaryPack may preserve an omitted optional value as null.
     // Both null and undefined mean AUTO; named teams still need validation.
     && (d.team == null || team(d.team));
-  if (d.t === 's') return [d.x, d.y, d.z, d.yaw].every(finite)
-    && Number.isInteger(d.tool) && (d.ts === undefined || finite(d.ts))
+  if (d.t === 's') return exactKeys(d,
+    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c', 'ts', 'strike'],
+    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c'])
+    && [d.x, d.y, d.z, d.yaw].every(finite)
+    && Number.isInteger(d.tool) && (d.c === 0 || d.c === 1)
+    && (d.ts === undefined || finite(d.ts))
     && (d.strike === undefined || (isRecord(d.strike) && finite(d.strike.x) && finite(d.strike.z)));
   if (d.t !== 'a' || !shortString(d.k, 16)) return false;
   if (SECURED_ACTIONS.includes(d.k)
       && (!Number.isSafeInteger(d.n) || d.n < 1)) return false;
-  if (d.k === 'chat') return shortString(String(d.text ?? ''), 512)
+  const actionKeys = {
+    chat: ['t', 'k', 'text', 'scope'], class: ['t', 'k', 'cls'],
+    strike: ['t', 'k', 'n', 'x', 'z', 'yaw'], overcharge: ['t', 'k', 'n'],
+    mark: ['t', 'k', 'd'], rematch: ['t', 'k'], squad: ['t', 'k'],
+    resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n'],
+    shoot: ['t', 'k', 'n', 'd', 'o'], dig: ['t', 'k', 'n', 'd', 'o'],
+    place: ['t', 'k', 'n', 'd', 'o'], nade: ['t', 'k', 'n', 'd', 'o'],
+  };
+  if (!actionKeys[d.k] || !exactKeys(d, actionKeys[d.k], ['t', 'k'])) return false;
+  if (d.k === 'chat') return shortString(d.text, 512)
     && (d.scope === 'all' || d.scope === 'team');
   if (d.k === 'class') return Number.isInteger(d.cls);
   if (d.k === 'strike') return finite(d.x) && finite(d.z) && finite(d.yaw);
@@ -65,12 +87,14 @@ export function validClientMessage(d) {
 }
 
 function validSnapshot(d) {
-  if (!rows(d.p, 12, 10) || !rows(d.b, 9, 10)) return false;
-  if (!d.p.every(r => (r[12] === undefined || (Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30))
-      && (r[13] === undefined || (Number.isInteger(r[13]) && r[13] >= 0 && r[13] <= 3000))
-      && (r[14] === undefined || r[14] === 0 || r[14] === 1 || r[14] === 5))) return false;
-  if (!d.b.every(r => r[9] === undefined
-      || (Number.isInteger(r[9]) && r[9] >= 0 && r[9] <= 2))) return false;
+  if (!exactKeys(d, ['t', 'p', 'b', 'q', 'full', 'ack', 'wr', 'wh', 'c', 'm',
+      'op', 'mb', 'tb', 'bd', 'w', 'g', 'a', 'u', 'l', 'f', 'h', 'rm', 'o', 'ts'],
+      ['t', 'p', 'b', 'c', 'g'])) return false;
+  if (!rows(d.p, 15, 10) || !rows(d.b, 10, 10)) return false;
+  if (!d.p.every(r => Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30
+      && Number.isInteger(r[13]) && r[13] >= 0 && r[13] <= 3000
+      && (r[14] === 0 || r[14] === 1 || r[14] === 5))) return false;
+  if (!d.b.every(r => Number.isInteger(r[9]) && r[9] >= 0 && r[9] <= 2)) return false;
   if ((d.q !== undefined && (!Number.isSafeInteger(d.q) || d.q < 1))
       || (d.full !== undefined && d.full !== 0 && d.full !== 1)
       || (d.ack !== undefined && (!Number.isSafeInteger(d.ack) || d.ack < 0))
@@ -126,6 +150,26 @@ function validSnapshot(d) {
 
 function validEvent(d) {
   if (!shortString(d.k, 20)) return false;
+  const eventKeys = {
+    edit: ['t', 'k', 'x', 'y', 'z', 'v', 'wr', 'wh'],
+    boom: ['t', 'k', 'x', 'y', 'z', 'r', 'strikeId', 'wr', 'wh'],
+    telegraph: ['t', 'k', 'x', 'y', 'z', 'yaw', 'remaining', 'owner', 'id'],
+    overcharge: ['t', 'k', 'owner', 'phase', 'remaining'],
+    died: ['t', 'k', 'rt', 'recap'], envdmg: ['t', 'k', 'cause'],
+    col: ['t', 'k', 'cells', 'wr', 'wh'],
+    shot: ['t', 'k', 'sid', 'f', 'e', 'hit', 'hex', 'gun'],
+    feed: ['t', 'k', 'html'], msg: ['t', 'k', 'text', 'color', 'team'],
+    supply: ['t', 'k', 'blocks', 'nades'], hit: ['t', 'k', 'kill', 'tier'],
+    goal: ['t', 'k', 'metric', 'amount'], dmgdir: ['t', 'k', 'x', 'z'],
+    chat: ['t', 'k', 'name', 'text', 'team', 'scope'],
+    mark: ['t', 'k', 'id', 'name', 'team', 'x', 'y', 'z', 'kind'],
+    rematch: ['t', 'k', 'voters', 'needed'], squad: ['t', 'k', 'voters'],
+    spawn: ['t', 'k', 'x', 'y', 'z', 'yaw'], corr: ['t', 'k', 'x', 'y', 'z'],
+    kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
+    end: ['t', 'k', 'winner', 'story', 'op'],
+    restart: ['t', 'k', 'seed', 'map', 'mode', 'op'],
+  };
+  if (!eventKeys[d.k] || !exactKeys(d, eventKeys[d.k], ['t', 'k'])) return false;
   if (['edit', 'boom', 'col'].includes(d.k)
       && ((d.wr !== undefined && (!Number.isSafeInteger(d.wr) || d.wr < 1))
         || (d.wh !== undefined && (!Number.isInteger(d.wh) || d.wh < 0 || d.wh > 0xffffffff)))) return false;
@@ -145,20 +189,22 @@ function validEvent(d) {
     case 'col': return Array.isArray(d.cells) && d.cells.length % 3 === 0
       && d.cells.length <= 12000 && d.cells.every(finite);
     case 'shot': return finiteVector(d.f) && finiteVector(d.e) && finite(d.hex)
-      && shortString(String(d.gun ?? ''), 32);
-    case 'feed': return shortString(String(d.html ?? ''), 1200);
-    case 'msg': return shortString(String(d.text ?? ''), 500)
-      && shortString(String(d.color ?? ''), 32) && (d.team === undefined || team(d.team));
+      && shortString(d.sid, 128) && typeof d.hit === 'boolean' && shortString(d.gun, 32);
+    case 'feed': return shortString(d.html, 1200);
+    case 'msg': return shortString(d.text, 500)
+      && shortString(d.color, 32) && (d.team === undefined || team(d.team));
     case 'supply': return Number.isInteger(d.blocks) && d.blocks >= 0 && d.blocks <= 20
       && Number.isInteger(d.nades) && d.nades >= 0 && d.nades <= 1;
-    case 'hit': return true;
+    case 'hit': return typeof d.kill === 'boolean'
+      && (d.tier === null || d.tier === undefined || ['double', 'triple', 'multi'].includes(d.tier));
     case 'goal': return d.metric === 'terrain' && Number.isInteger(d.amount)
       && d.amount >= 1 && d.amount <= 32;
     case 'dmgdir': return finite(d.x) && finite(d.z);
-    case 'chat': return shortString(String(d.name ?? ''), 64)
-      && shortString(String(d.text ?? ''), 512) && team(d.team);
+    case 'chat': return shortString(d.name, 64)
+      && shortString(d.text, 512) && team(d.team)
+      && (d.scope === 'all' || d.scope === 'team');
     case 'mark': return Number.isInteger(d.id) && d.id >= 0 && d.id <= 1e9
-      && shortString(String(d.name ?? ''), 64) && team(d.team)
+      && shortString(d.name, 64) && team(d.team)
       && [d.x, d.y, d.z].every(finite) && d.x >= 0 && d.x <= 256
       && d.y >= -4 && d.y <= 72 && d.z >= 0 && d.z <= 256
       && TEAM_PING_KINDS.includes(d.kind);
@@ -173,9 +219,8 @@ function validEvent(d) {
     case 'corr': return [d.x, d.y, d.z].every(finite);
     case 'kick': return d.reason === 'integrity';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
-      && d.rows.every(r => Array.isArray(r) && r.length >= 5 && shortString(String(r[0] ?? ''), 16)
-        && shortString(String(r[1] ?? ''), 64) && team(r[2]) && finite(r[3]) && finite(r[4])
-        && r.slice(5, 8).every(finite));
+      && d.rows.every(r => Array.isArray(r) && r.length === 8 && shortString(r[0], 16)
+        && shortString(r[1], 64) && team(r[2]) && r.slice(3).every(finite));
     case 'end': return team(d.winner)
       && (d.story === undefined || validVoxelStoryMetrics(d.story))
       && (d.op === undefined || operation(d.op));
@@ -188,10 +233,14 @@ function validEvent(d) {
 
 export function validServerMessage(d) {
   if (!isRecord(d) || !shortString(d.t, 8)) return false;
-  if (d.t === 'full') return true;
-  if (d.t === 'version') return Number.isInteger(d.v) && d.v >= 1 && d.v <= 1000;
+  if (d.t === 'full') return exactKeys(d, ['t'], ['t']);
+  if (d.t === 'version') return exactKeys(d, ['t', 'v'], ['t', 'v'])
+    && Number.isInteger(d.v) && d.v >= 1 && d.v <= 1000;
   if (d.t === 'r') return validRoster(d);
-  if (d.t === 'w') return shortString(String(d.id ?? ''), 128) && team(d.team)
+  if (d.t === 'w') return exactKeys(d, ['t', 'id', 'team', 'seed', 'map', 'mode', 'me',
+      'log', 'r', 'reset', 'migrated', 'spawn', 'wr', 'wh', 'op', 'mb', 'tb', 'bd'],
+      ['t', 'id', 'team', 'seed', 'map', 'mode', 'me', 'log', 'r'])
+    && shortString(d.id, 128) && team(d.team)
     && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
@@ -210,7 +259,8 @@ export function validServerMessage(d) {
       && (d.bd[0] === 0 || d.bd[0] === 1)
       && Number.isInteger(d.bd[1]) && d.bd[1] >= 0 && d.bd[1] <= 2
       && Number.isInteger(d.bd[2]) && d.bd[2] >= 0 && d.bd[2] <= 2));
-  if (d.t === 'sync') return finite(d.seed)
+  if (d.t === 'sync') return exactKeys(d, ['t', 'seed', 'map', 'log', 'wr', 'wh'],
+      ['t', 'seed', 'map', 'log', 'wr', 'wh']) && finite(d.seed)
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && validEditLog(d.log)
     && Number.isSafeInteger(d.wr) && d.wr === d.log.length
@@ -221,12 +271,14 @@ export function validServerMessage(d) {
 }
 
 export function validPong(d) {
-  return isRecord(d) && d.t === 'pong'
+  return isRecord(d) && exactKeys(d,
+    ['t', 'humans', 'max', 'map', 'mode', 'g', 'b', 'names'],
+    ['t', 'humans', 'max', 'map', 'mode', 'g', 'b', 'names']) && d.t === 'pong'
     && Number.isInteger(d.humans) && Number.isInteger(d.max)
     && d.humans >= 0 && d.max >= 1 && d.humans <= d.max
     && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && finite(d.g) && finite(d.b)
     && Array.isArray(d.names) && d.names.length <= 10
-    && d.names.every(n => shortString(String(n ?? ''), 64));
+    && d.names.every(n => shortString(n, 64));
 }

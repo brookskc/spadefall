@@ -114,7 +114,7 @@ export class Avatar {
     // the actual frame delta, so high-refresh displays don't slow the gait.
     const fdt = this._lastUpd ? Math.max(1e-3, now - this._lastUpd) : 1 / 60;
     this._lastUpd = now;
-    const speed = this.pos.distanceTo(new THREE.Vector3(nx, ny, nz)) / fdt;
+    const speed = Math.hypot(nx - this.pos.x, ny - this.pos.y, nz - this.pos.z) / fdt;
     this.pos.set(nx, ny, nz);
     this.group.position.copy(this.pos);
     // Footsteps off the interpolated ground truth: 2.2 blocks of travel, one

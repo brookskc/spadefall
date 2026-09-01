@@ -8,13 +8,13 @@ import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
 import { CROUCH_HEIGHT, STAND_HEIGHT, disposeObject, footDust,
-  makeMq9Drone, retintVoxelBoxes } from './entities.js';
+  applySoldierGraphics, makeMq9Drone, retintVoxelBoxes } from './entities.js';
 import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
 import { MAX_HUMANS as HUMAN_CAP, chooseTeam, parseSpawnRow, spawnRow,
   teamSizeForMode,
-  teamCounts, validateMovementReport, normalizeDirection,
+  teamCounts, validateMovementReport, createMovementBudget, normalizeDirection,
   migrationSurvivors, combatDamageAllowed, protectedBuildReason } from './multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './protocol.js';
 import { teamHex } from './settings.js';
@@ -24,7 +24,7 @@ import { modeMatchSeconds, regulationDecision, respawnWaveDelay, scoreLeader,
   tacticalSpawnScore } from './pacing.js';
 import { assistCreditors, CONTRIBUTION, contributionRow,
   rankContributionRows } from './scoring.js';
-import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
+import { HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from './koth.js';
 import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
   OVERCHARGE_WINDUP, availableStreakAbility, balancedMomentumGain,
@@ -52,28 +52,17 @@ import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors
   operationSideForColor, operationSideLabel, operationWinner,
   recordOperationResult } from './operations.js';
 import { balanceHumanTeams, planBotDirector } from './team-balance.js';
+import { da, dx, dy, qa, qx, qy, rowsEqual as rowsEq,
+  mergeSnapshot } from './replication.js';
+import { collapseKey, unsupportedCollapseCells } from './simulation.js';
+import { CAP_TIME, HILL_CYCLE, HOLD_LIMIT, KILL_LIMIT, MATCH_TIME_OVERRIDE,
+  WIN_SCORE, holdClock, modeScoreLimit } from './match-modes.js';
+import { PresentationSchedule } from './presentation.js';
 
-const WIN_SCORE = 3;
+export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
+
 const POST_MATCH_TIME = 14;
-// Team deathmatch: no flags, kills are points. ?killcap= lowers the bar for tests.
-// Module-scope URL params are guarded so the file imports headless (Node
-// test harnesses have no `location`).
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
-const killcapParam = parseInt(QUERY.get('killcap'), 10);
-const KILL_LIMIT = Number.isInteger(killcapParam) ? Math.max(2, killcapParam) : 30;
-// King of the hill: capture and physically occupy the point to accrue time;
-// first to HOLD_LIMIT seconds wins. ?kothtime= shrinks the clock for tests.
-const kothtimeParam = parseInt(QUERY.get('kothtime'), 10);
-const HOLD_LIMIT = Number.isInteger(kothtimeParam) ? Math.max(10, kothtimeParam) : 120;
-const CAP_TIME = 6;
-// Short-cycle visual QA hook; normal rounds move every 45 seconds.
-const hillcycleParam = parseInt(QUERY.get('hillcycle'), 10);
-const HILL_CYCLE = Number.isInteger(hillcycleParam)
-  ? Math.min(120, Math.max(12, hillcycleParam)) : HILL_ACTIVE_TIME;
-// Test hook for exercising regulation/overtime without waiting a full round.
-const matchtimeParam = parseInt(QUERY.get('matchtime'), 10);
-const MATCH_TIME_OVERRIDE = Number.isInteger(matchtimeParam)
-  ? Math.min(3600, Math.max(5, matchtimeParam)) : null;
 const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
 // A client declares the host dead after this much snapshot silence. Chosen
 // against the interval keepalive in main.js: a healthy backgrounded host
@@ -150,14 +139,6 @@ const v3 = a => new THREE.Vector3(a[0], a[1], a[2]);
 const arr = v => [v.x, v.y, v.z];
 const FLAG_CODE = { home: 0, carried: 1, dropped: 2 };
 
-// ---- wire quantization -------------------------------------------------
-// Positions ride the snapshot as fixed-point ints: 1/256 of a block for x
-// and z, 1/512 for y (jumps and slabs want the extra bit). Yaw is a 16-bit
-// turn fraction. Decoded angles land back in atan2's (-pi, pi] so avatar
-// interpolation never sees a 0/2pi wrap.
-export const qx = v => Math.round(v * 256);
-export const qy = v => Math.round(v * 512);
-export const qa = a => Math.round(a / (2 * Math.PI) * 65536) & 0xFFFF;
 // Horizontal bearing from a viewer to a world-space source, expressed in
 // screen convention: 0 ahead, +PI/2 right, -PI/2 left, and PI behind.
 // CSS positive rotation is clockwise, so this value drives the damage
@@ -191,27 +172,6 @@ export function airstrikeDronePose(x, y, z, yaw, remaining,
     progress,
   };
 }
-const dx = v => v / 256, dy = v => v / 512;
-const da = v => { const a = v / 65536 * 2 * Math.PI; return a > Math.PI ? a - 2 * Math.PI : a; };
-const rowsEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-
-// Merge one (partial) snapshot into the reconstructed full-state maps. The
-// host omits unchanged rows, so these maps — not the last packet — are the
-// world as the host sees it, and the replica a promoted client rebuilds
-// from. Decoded row shapes:
-  //   player: [x, y, z, ry, hp, alive, carrier, tool, blocks, crouch, nades,
-  //            authoritative gun ammo, reload milliseconds, gun class]
-//   bot:    [x, y, z, ry, hp, alive, carrier, crouch, difficulty code]
-export function mergeSnapshot(fullP, fullB, d) {
-  for (const r of d.p ?? [])
-    fullP.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7],
-      r[8], r[9], r[10], r[11], r[12], r[13], r[14]]);
-  for (const r of d.b ?? [])
-    fullB.set(r[0], [dx(r[1]), dy(r[2]), dx(r[3]), da(r[4]), r[5], r[6], r[7],
-      r[8], r[9]]);
-  for (const i of d.rm?.p ?? []) fullP.delete(i);
-  for (const i of d.rm?.b ?? []) fullB.delete(i);
-}
 
 // ---------------------------------------------------------------- flags
 class Flag {
@@ -240,6 +200,7 @@ class Flag {
     };
     const poleMat = new THREE.MeshBasicMaterial({ color: 0x8a8d94 });   // stone grey
     const clothMat = new THREE.MeshBasicMaterial({ color });
+    this.clothMat = clothMat;
     box(0.14, 2.4, 0.14, poleMat, 0, 1.2, 0, this.group);
     box(0.26, 0.14, 0.26, poleMat, 0, 2.42, 0, this.group);             // finial
     // Swallowtail banner: three boxes, notch cut from the fly edge.
@@ -1030,64 +991,7 @@ class Chat {
   }
 }
 
-// Hold seconds -> "1:32" for the koth score line.
-const holdClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-
-// The six face-neighbor offsets, for the structural-support flood fill.
-const DIRS6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-const COLLAPSE_TERRAIN_CAP = 4000;
-const COLLAPSE_BUILT_CAP = 12000;
 const COLLAPSE_PACKET_CELLS = 4000;
-const collapseKey = (x, y, z) => x + ',' + y + ',' + z;
-const isBuiltBlock = v => v === BLOCK.GREEN || v === BLOCK.BLUE;
-
-// Find every newly unsupported component touching a removed voxel. Natural
-// terrain keeps the conservative 4k proof budget that prevents a crater from
-// taking half a map with it. A component made entirely from placed team
-// blocks gets a larger budget: wide bridges can legitimately cross the old
-// threshold, and treating that threshold as proof of support left them
-// floating after both anchors were destroyed.
-export function unsupportedCollapseCells(blockAt, holes, {
-  terrainCap = COLLAPSE_TERRAIN_CAP, builtCap = COLLAPSE_BUILT_CAP,
-} = {}) {
-  const seeded = new Set(); // dedupe only — seeds must NOT count as visited
-  const seeds = [];
-  for (const h of holes ?? [])
-    for (const d of DIRS6) {
-      const x = h.x + d[0], y = h.y + d[1], z = h.z + d[2];
-      const k = collapseKey(x, y, z), v = blockAt(x, y, z);
-      if (!seeded.has(k) && v) { seeded.add(k); seeds.push({ x, y, z, v }); }
-    }
-
-  const verdict = new Map(); // cell -> grounded?
-  const doomed = new Set();
-  for (const s of seeds) {
-    const sk = collapseKey(s.x, s.y, s.z);
-    if (verdict.has(sk)) continue;
-    const comp = new Set([sk]);
-    const q = [s];
-    let grounded = false, settled = false, builtOnly = isBuiltBlock(s.v);
-    for (let i = 0; i < q.length && !settled; i++) {
-      const c = q[i];
-      if (c.y === 0) { grounded = true; break; }
-      if (comp.size > (builtOnly ? builtCap : terrainCap)) { grounded = true; break; }
-      for (const d of DIRS6) {
-        const x = c.x + d[0], y = c.y + d[1], z = c.z + d[2];
-        const k = collapseKey(x, y, z);
-        if (comp.has(k)) continue;
-        const v = blockAt(x, y, z);
-        if (!v) continue;
-        const known = verdict.get(k);
-        if (known !== undefined) { grounded = known; settled = true; break; }
-        if (!isBuiltBlock(v)) builtOnly = false;
-        comp.add(k); q.push({ x, y, z, v });
-      }
-    }
-    for (const k of comp) verdict.set(k, grounded);
-    if (!grounded) for (const k of comp) doomed.add(k);
-  }
-  return doomed;
-}
 
 const nameSpan = e => `<span style="color:${teamCss(e.team)}">${e.name}</span>`;
 
@@ -1113,6 +1017,7 @@ export class Game {
     this.scene = scene;
     this.camera = camera;
     this.time = 0;
+    this.presentation = new PresentationSchedule();
     this.over = false;
     this.mode = opts.mode ?? 'solo';       // solo | host | client
     this.net = opts.net ?? null;
@@ -1290,6 +1195,39 @@ export class Game {
     // reads as a distinct shape against the fog/sky rather than blending
     // straight into invisibility at the color it's already fading toward.
     this.world.horizonMat.color.setHex(a.fog).multiplyScalar(0.72);
+  }
+
+  applyGraphics(level) {
+    this.world.applyGraphics(level);
+    this.effects.applyGraphics(level);
+    for (const bot of this.bots) applySoldierGraphics(bot.parts, level);
+    for (const remote of this.remote.values()) applySoldierGraphics(remote.avatar.parts, level);
+    for (const avatar of this.avatars.values()) applySoldierGraphics(avatar.parts, level);
+  }
+
+  applyColorMode() {
+    const green = teamHex('green'), blue = teamHex('blue');
+    const terrainChanged = PALETTE[BLOCK.GREEN].color !== green
+      || PALETTE[BLOCK.BLUE].color !== blue;
+    PALETTE[BLOCK.GREEN].color = green;
+    PALETTE[BLOCK.BLUE].color = blue;
+    this.player.syncBlockColor();
+    for (const flag of Object.values(this.flags ?? {}))
+      flag.clothMat?.color.setHex(teamHex(flag.team));
+    for (const bot of this.bots) bot.parts.teamMaterial?.color.setHex(teamHex(bot.team));
+    for (const remote of this.remote.values())
+      remote.avatar.parts.teamMaterial?.color.setHex(teamHex(remote.team));
+    for (const avatar of this.avatars.values())
+      avatar.parts.teamMaterial?.color.setHex(teamHex(avatar.team));
+    for (const mark of this.teamPings ?? []) mark.mat?.color.setHex(teamHex(mark.team));
+    // Terrain colors are baked into chunk vertex buffers; a user-triggered
+    // palette change is rare and intentionally rebuilds once so placed team
+    // blocks change immediately instead of waiting for the next map.
+    if (terrainChanged) {
+      this.world.buildAll();
+      hud.mapInit(this.world);
+    }
+    hud.score(this);
   }
 
   // Called every frame, every mode — purely local/visual, no host
@@ -2668,7 +2606,9 @@ export class Game {
       const [x, y, z] = k.split(',').map(Number);
       return { x, y, z, v: this.world.get(x, y, z) };
     });
-    for (const c of cells) this.world.set(c.x, c.y, c.z, 0);
+    this.world.batchEdits(() => {
+      for (const c of cells) this.world.set(c.x, c.y, c.z, 0);
+    });
     this.voxelStory?.recordCollapse(cells.length);
     this.effects.blockBurst(cells.filter((_, i) => i % Math.ceil(cells.length / 48) === 0));
     sfx.crumble();
@@ -3812,7 +3752,8 @@ export class Game {
         nz = Math.min(Math.max(d.z, 0), SZ);
       const elapsed = this.time - (p._lastPosT ?? this.time);
       const movement = validateMovementReport(p.body.pos,
-        { x: nx, y: ny, z: nz, yaw: d.yaw }, elapsed);
+        { x: nx, y: ny, z: nz, yaw: d.yaw }, elapsed, undefined,
+        p._movementBudget ??= createMovementBudget());
       if (!movement.ok) {
         this._securityViolation(p, 'move-' + movement.reason, 1, true); return;
       }
@@ -3828,6 +3769,10 @@ export class Game {
       // place, so this only ever catches a dishonest one.
       if (p.body.overlapsSolid(nx, ny, nz)) {
         this._securityViolation(p, 'move-solid', 1.5, true); return;
+      }
+      if (p.body.sweptOverlapsSolid(p.body.pos.x, p.body.pos.y, p.body.pos.z,
+          nx, ny, nz)) {
+        this._securityViolation(p, 'move-sweep', 1.5, true); return;
       }
 
       // A legal jump follows y(t)=y0+v0*t-15*t² (gravity is -30). Track the
@@ -4484,10 +4429,12 @@ export class Game {
     this.editLog = [];
     this._worldHash = WORLD_HASH_SEED;
     this.voxelStory?.reset();
-    for (const e of log ?? []) {
-      this._applyWorldEntry(e);
-      this._appendWorldEdit(e);
-    }
+    this.world.batchEdits(() => {
+      for (const e of log ?? []) {
+        this._applyWorldEntry(e);
+        this._appendWorldEdit(e);
+      }
+    });
   }
 
   _requestResync(scope) {
@@ -4748,8 +4695,7 @@ export class Game {
     }
     this.winner = d.w ?? null;
     hud.score(this);
-    const limit = this.gameMode === 'tdm' ? KILL_LIMIT
-      : this.gameMode === 'koth' ? HOLD_LIMIT : WIN_SCORE;
+    const limit = modeScoreLimit(this.gameMode);
     if (d.o && !this.over) this._end(d.w ?? (d.c[0] >= limit ? 'green'
       : d.c[1] >= limit ? 'blue' : scoreLeader(this.captures) ?? 'green'));
     this._lastGrenades = d.g;
@@ -4823,14 +4769,16 @@ export class Game {
       }
       case 'col': { // host collapsed a structure: replay removal + dust only
         const cells = [];
-        for (let i = 0; i + 2 < d.cells.length; i += 3) {
-          const x = d.cells[i] | 0, y = d.cells[i + 1] | 0, z = d.cells[i + 2] | 0;
-          const v = this.world.get(x, y, z);
-          if (v) this.world.set(x, y, z, 0);
-          this._appendWorldEdit([x, y, z, 0]); // keep stream history exact despite drift
-          if (!v) continue;
-          cells.push({ x, y, z, v });
-        }
+        this.world.batchEdits(() => {
+          for (let i = 0; i + 2 < d.cells.length; i += 3) {
+            const x = d.cells[i] | 0, y = d.cells[i + 1] | 0, z = d.cells[i + 2] | 0;
+            const v = this.world.get(x, y, z);
+            if (v) this.world.set(x, y, z, 0);
+            this._appendWorldEdit([x, y, z, 0]); // keep stream history exact despite drift
+            if (!v) continue;
+            cells.push({ x, y, z, v });
+          }
+        });
         if (cells.length) {
           this.voxelStory?.recordCollapse(cells.length);
           this.effects.blockBurst(cells.filter((_, i) => i % Math.ceil(cells.length / 48) === 0));
@@ -5069,31 +5017,36 @@ export class Game {
     this.world.animateSky(this.time);
     this._updateUnderwaterFog();
     this._updateTeamPings(dt);
-    hud.minimap(this);
-    hud.objective(this);
-    hud.teamPing(this);
-    hud.fieldStation(this);
-    hud.ping(this);
-    hud.streakStatus(this.player);
-    hud.firstMinute(this.firstMinuteGuide?.update({
-      matchSecond: this.matchElapsed,
-      x: this.player.body.pos.x,
-      z: this.player.body.pos.z,
-      alive: this.player.alive && !this.player.aiming && !this.player._piloting
-        && this.player._fallingT <= 0,
-      over: this.over,
-    }));
-    hud.selectedGoal(this.selectedGoal?.view(this.time, {
-      alive: this.player.alive && !this.player._piloting && this.player._fallingT <= 0,
-      over: this.over,
-    }));
+    const presentation = this.presentation.step(dt);
+    if (presentation.fast) {
+      hud.objective(this);
+      hud.teamPing(this);
+    }
+    if (presentation.slow) {
+      hud.minimap(this);
+      hud.fieldStation(this);
+      hud.streakStatus(this.player);
+      hud.firstMinute(this.firstMinuteGuide?.update({
+        matchSecond: this.matchElapsed,
+        x: this.player.body.pos.x,
+        z: this.player.body.pos.z,
+        alive: this.player.alive && !this.player.aiming && !this.player._piloting
+          && this.player._fallingT <= 0,
+        over: this.over,
+      }));
+      hud.selectedGoal(this.selectedGoal?.view(this.time, {
+        alive: this.player.alive && !this.player._piloting && this.player._fallingT <= 0,
+        over: this.over,
+      }));
+    }
+    if (presentation.network) hud.ping(this);
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost
     // to a pointer-lock hiccup or a window switch, the overlay can never
     // strand itself over the screen. Runs while dead too (TAB works there).
     if (!this.player.keys.Tab) hud.statsHide();
     // Positional audio hears from the player's ear, right vector included.
     {
-      const p = this.player, e = p.body.eye();
+      const p = this.player, e = p.body.eye(this._listenerEye ??= new THREE.Vector3());
       setListener({ x: e.x, y: e.y, z: e.z, rx: Math.sin(p.yaw), rz: Math.cos(p.yaw) });
     }
     if (this.mode === 'client') { this._clientUpdate(dt); this.world.flushDirty(); return; }

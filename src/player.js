@@ -116,6 +116,13 @@ export class Player {
     this.swing = 0; // spade chop animation
     this.crouched = false; // hold CTRL: slower, steadier aim, ledge grip
     this.carrier = false; // carrying the enemy flag?
+    // Reused every frame. Keeping movement math in stable vectors avoids
+    // feeding the garbage collector several short-lived objects per player
+    // tick (including airstrike and death-camera modes).
+    this._moveForward = new THREE.Vector3();
+    this._moveRight = new THREE.Vector3();
+    this._moveWish = new THREE.Vector3();
+    this._eye = new THREE.Vector3();
     resetEnvironmentalState(this);
 
     this._buildViewmodel();
@@ -313,9 +320,9 @@ export class Player {
     this.game.hud.refreshTool(this);
   }
 
-  lookDir() {
+  lookDir(target = new THREE.Vector3()) {
     const pitch = this.pitch + this.climb; // recoil climb steers real shots
-    return new THREE.Vector3(
+    return target.set(
       Math.cos(pitch) * Math.cos(this.yaw),
       Math.sin(pitch),
       -Math.cos(pitch) * Math.sin(this.yaw)
@@ -516,9 +523,9 @@ export class Player {
     // ground — no clambering while sneaking — unless you hold SHIFT to
     // climb anyway; a slide skids over nothing.
     b.step = (!this.crouched || shift) && !sliding;
-    const f = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    const r = new THREE.Vector3(-f.z, 0, f.x);
-    const wish = new THREE.Vector3();
+    const f = this._moveForward.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const r = this._moveRight.set(-f.z, 0, f.x);
+    const wish = this._moveWish.set(0, 0, 0);
     if (this.keys['KeyW']) wish.add(f);
     if (this.keys['KeyS']) wish.sub(f);
     if (this.keys['KeyD']) wish.add(r);
@@ -566,7 +573,7 @@ export class Player {
     // sustained spray accumulates it, disciplined bursts never feel it.
     this._sinceShot += dt;
     if (this._sinceShot > 0.12) this.climb = Math.max(0, this.climb - dt * 0.105);
-    const eye = b.eye();
+    const eye = b.eye(this._eye);
     const motion = this.motionScale ?? 1;
     this.camera.position.set(eye.x,
       eye.y + Math.sin(this.bob) * 0.045 * (moving ? 1 : 0) * motion - (this.stepK ?? 0), eye.z);
@@ -679,7 +686,7 @@ export class Player {
   // frame of reference.
   _updatePiloting(dt) {
     const p = this._pilotPos;
-    const wish = new THREE.Vector3();
+    const wish = this._moveWish.set(0, 0, 0);
     if (this.keys['KeyW']) wish.z -= 1;
     if (this.keys['KeyS']) wish.z += 1;
     if (this.keys['KeyD']) wish.x += 1;
@@ -734,7 +741,7 @@ export class Player {
     this._fallingT -= dt;
     if (this._fallingT < 0) this._fallingT = 0;
     const p = this._pilotPos;
-    const wish = new THREE.Vector3();
+    const wish = this._moveWish.set(0, 0, 0);
     if (this.keys['KeyW']) wish.z -= 1;
     if (this.keys['KeyS']) wish.z += 1;
     if (this.keys['KeyD']) wish.x += 1;
@@ -874,10 +881,10 @@ export class Player {
       const eye = this.body.eye();
       this._flyPos = new THREE.Vector3(eye.x, eye.y - 1.2, eye.z);
     }
-    const dir = this.lookDir();
-    const f = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    const r = new THREE.Vector3(-f.z, 0, f.x);
-    const wish = new THREE.Vector3();
+    const dir = this.lookDir(this._moveForward);
+    const f = this._moveRight.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const r = this._eye.set(-f.z, 0, f.x);
+    const wish = this._moveWish.set(0, 0, 0);
     if (this.keys['KeyW']) wish.add(dir);
     if (this.keys['KeyS']) wish.sub(dir);
     if (this.keys['KeyD']) wish.add(r);

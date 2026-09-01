@@ -230,10 +230,11 @@ export class VoxelWorld {
     // One pooled opaque-cube ambience mesh. Density is preset-controlled;
     // map configuration below changes only motion and color.
     this.ambienceMax = gfxPreset().ambience;
+    this.ambienceCapacity = gfxPreset('high').ambience;
     this.ambience = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.13, 0.13, 0.13),
       new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true,
-        opacity: 0.72, depthWrite: false }), this.ambienceMax);
+        opacity: 0.72, depthWrite: false }), this.ambienceCapacity);
     this.ambience.count = 0;
     this.ambience.frustumCulled = false;
     this._ambienceData = [];
@@ -305,6 +306,7 @@ export class VoxelWorld {
   }
 
   configureAtmosphere(mapIndex) {
+    this._atmosphereMapIndex = mapIndex;
     const colors = [0xd9ed9b, 0xe8f8f4, 0xd8d59b, 0xf0bf72, 0xd4e0ed, 0xff8a55];
     const modes = ['motes', 'spray', 'pollen', 'sand', 'dust', 'ash'];
     const rnd = mulberry32(7000 + mapIndex * 97);
@@ -320,6 +322,18 @@ export class VoxelWorld {
     }
     if (this.ambience.instanceColor) this.ambience.instanceColor.needsUpdate = true;
     this._buildFoam();
+  }
+
+  applyGraphics(level) {
+    const preset = gfxPreset(level);
+    this.ambienceMax = Math.min(this.ambienceCapacity, preset.ambience);
+    this.configureAtmosphere(this._atmosphereMapIndex ?? 0);
+    if (!preset.foam && this.foam) {
+      this.foam.visible = false;
+    } else if (preset.foam) {
+      if (this.foam) this.foam.visible = true;
+      else this._buildFoam();
+    }
   }
 
   _buildFoam() {
@@ -360,8 +374,34 @@ export class VoxelWorld {
     // frame, and each used to synchronously remesh up to 5 chunks. The flush
     // at end of Game.update remeshes each dirty chunk once.
     this._markDirty(x, z);
-    this.onEdit?.(x, z); // minimap: this column's pixel may have changed
+    this._notifyEdit(x, z); // minimap: this column's pixel may have changed
     return true;
+  }
+
+  beginEditBatch() { this._editBatchDepth = (this._editBatchDepth ?? 0) + 1; }
+
+  endEditBatch() {
+    this._editBatchDepth = Math.max(0, (this._editBatchDepth ?? 0) - 1);
+    if (this._editBatchDepth || !this._editedColumns?.size) return;
+    for (const key of this._editedColumns) {
+      const x = key % SX, z = (key / SX) | 0;
+      this.onEdit?.(x, z);
+    }
+    this._editedColumns.clear();
+  }
+
+  batchEdits(fn) {
+    this.beginEditBatch();
+    try { return fn(); }
+    finally { this.endEditBatch(); }
+  }
+
+  _notifyEdit(x, z) {
+    if (this._editBatchDepth) {
+      (this._editedColumns ??= new Set()).add((z | 0) * SX + (x | 0));
+      return;
+    }
+    this.onEdit?.(x, z);
   }
 
   // Chunks an edit at (x,z) can visibly affect: the home chunk, the
@@ -555,15 +595,16 @@ export class VoxelWorld {
           removed.push({ x, y, z, v: this.get(x, y, z) });
           this.data[idx(x, y, z)] = 0;
         }
-    // Same neighbor rule as _markDirty, corners included: an explosion
-    // removing a corner voxel changes AO in the diagonal chunk too.
-    const touched = new Set();
-    for (const p of removed) this._markDirty(p.x, p.z, touched);
-    for (const k of touched) {
-      const [cx2, cz2] = k.split(',').map(Number);
-      this.buildChunk(cx2, cz2);
-    }
-    if (this.onEdit) for (const p of removed) this.onEdit(p.x, p.z); // minimap
+    // Join the same end-of-frame dirty queue as set(). Explosions used to
+    // synchronously rebuild every touched chunk here, so a late joiner with
+    // many historical blasts paid for the same chunk repeatedly while
+    // replaying the log. Column notifications are deduplicated too.
+    this.batchEdits(() => {
+      for (const p of removed) {
+        this._markDirty(p.x, p.z);
+        this._notifyEdit(p.x, p.z);
+      }
+    });
     return removed;
   }
 

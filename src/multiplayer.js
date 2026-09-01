@@ -13,9 +13,12 @@ export const teamSizeForMode = mode => mode === 'koth' ? KOTH_TEAM_SIZE : TEAM_S
 
 export const MOVEMENT = Object.freeze({
   horizontalSpeed: 9,
-  horizontalSlack: 3,
+  horizontalSlack: 0.45,
+  horizontalBurst: 1.35,
   maxRiseSpeed: 12,
+  riseBurst: 0.8,
   maxFallSpeed: 40,
+  fallBurst: 2.5,
   verticalSlack: 0.35,
   maxElapsed: 0.25,
 });
@@ -118,23 +121,52 @@ export function protectedBuildReason(x, y, z, areas = {}) {
   return null;
 }
 
-// Validate displacement only. Terrain overlap and ballistic/ground-support
-// checks remain Game responsibilities because they need the live VoxelWorld.
-export function validateMovementReport(previous, report, elapsed, limits = MOVEMENT) {
+export function createMovementBudget(limits = MOVEMENT) {
+  return {
+    horizontal: limits.horizontalBurst,
+    rise: limits.riseBurst,
+    fall: limits.fallBurst,
+  };
+}
+
+// Validate displacement against elapsed-time credit. The optional mutable
+// budget is used by the host for live peers: credit refills with real elapsed
+// simulation time and is capped, so a burst of reports in one frame cannot
+// manufacture a fresh minimum-dt allowance for every packet. Callers that do
+// not supply a budget retain a stateless check for tests and tooling.
+export function validateMovementReport(previous, report, elapsed, limits = MOVEMENT,
+  budget = null) {
   if (!previous || !report || ![previous.x, previous.y, previous.z,
       report.x, report.y, report.z, report.yaw].every(Number.isFinite))
     return { ok: false, reason: 'non-finite' };
 
-  const dt = Math.max(1 / 60, Math.min(limits.maxElapsed, elapsed || 0));
+  const dt = Math.max(0, Math.min(limits.maxElapsed, elapsed || 0));
   const horizontal = Math.hypot(report.x - previous.x, report.z - previous.z);
-  if (horizontal > limits.horizontalSpeed * limits.horizontalSlack * dt)
-    return { ok: false, reason: 'horizontal-speed' };
-
   const dy = report.y - previous.y;
-  if (dy > limits.maxRiseSpeed * dt + limits.verticalSlack)
-    return { ok: false, reason: 'vertical-rise' };
-  if (dy < -(limits.maxFallSpeed * dt + limits.verticalSlack))
-    return { ok: false, reason: 'vertical-fall' };
+
+  if (budget) {
+    const horizontalCredit = Math.min(limits.horizontalBurst,
+      Math.max(0, budget.horizontal ?? limits.horizontalBurst)
+        + limits.horizontalSpeed * dt);
+    const riseCredit = Math.min(limits.riseBurst,
+      Math.max(0, budget.rise ?? limits.riseBurst) + limits.maxRiseSpeed * dt);
+    const fallCredit = Math.min(limits.fallBurst,
+      Math.max(0, budget.fall ?? limits.fallBurst) + limits.maxFallSpeed * dt);
+    if (horizontal > horizontalCredit + 1e-6)
+      return { ok: false, reason: 'horizontal-speed' };
+    if (dy > riseCredit + 1e-6) return { ok: false, reason: 'vertical-rise' };
+    if (-dy > fallCredit + 1e-6) return { ok: false, reason: 'vertical-fall' };
+    budget.horizontal = horizontalCredit - horizontal;
+    budget.rise = riseCredit - Math.max(0, dy);
+    budget.fall = fallCredit - Math.max(0, -dy);
+  } else {
+    if (horizontal > limits.horizontalSpeed * dt + limits.horizontalSlack)
+      return { ok: false, reason: 'horizontal-speed' };
+    if (dy > limits.maxRiseSpeed * dt + limits.verticalSlack)
+      return { ok: false, reason: 'vertical-rise' };
+    if (dy < -(limits.maxFallSpeed * dt + limits.verticalSlack))
+      return { ok: false, reason: 'vertical-fall' };
+  }
 
   return { ok: true, dt };
 }

@@ -112,6 +112,25 @@ try {
   assert.equal(liveSettings.block,
     liveSettings.team === 'green' ? 0xe69f00 : 0x56b4e9);
   assert.ok(liveSettings.hiddenDetail > 0, 'existing soldiers update with the live graphics preset');
+
+  const underwaterHud = await host.evaluate(() => {
+    const hud = document.getElementById('hud');
+    const air = document.getElementById('air');
+    const chat = document.getElementById('chat');
+    const line = document.createElement('div');
+    line.textContent = 'CHAT CLEARANCE TEST';
+    document.getElementById('chatlog').append(line);
+    hud.classList.add('air-visible');
+    air.classList.add('on');
+    const chatRect = chat.getBoundingClientRect();
+    const vitalsRect = document.getElementById('vitals').getBoundingClientRect();
+    line.remove();
+    air.classList.remove('on');
+    hud.classList.remove('air-visible');
+    return { chatBottom: chatRect.bottom, vitalsTop: vitalsRect.top };
+  });
+  assert.ok(underwaterHud.vitalsTop - underwaterHud.chatBottom >= 8,
+    'the breathing meter keeps clear of chat text above it');
   assert.deepEqual(faults, [], faults.join('\n'));
   console.log('two-browser multiplayer: replication and live display settings passed');
 } finally {

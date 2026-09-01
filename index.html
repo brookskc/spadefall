@@ -253,7 +253,8 @@
 
   /* ---------- HUD ---------- */
   #hud { position:fixed; inset:0; pointer-events:none; z-index:10; opacity:0;
-    transition:opacity .3s; --hud-scale:1; --hud-alpha:1; }
+    transition:opacity .3s; --hud-scale:1; --hud-alpha:1; --chat-bottom:102px; }
+  #hud.air-visible { --chat-bottom:140px; }
   #hud.on { opacity:var(--hud-alpha); }
   #hud .panel, #hud #feed, #hud #msg, #hud #respawn, #hud #classPick,
   #hud #chat, #hud #chatkey, #hud #airstrikeReady, #hud #overchargeActive,
@@ -605,7 +606,7 @@
   }
 
   /* chat — lower left, above the vitals panel */
-  #chat { position:absolute; left:22px; bottom:102px; width:380px; max-width:44vw;
+  #chat { position:absolute; left:22px; bottom:var(--chat-bottom); width:380px; max-width:44vw;
     font-size:13px; }
   #chatlog { display:flex; flex-direction:column; align-items:flex-start;
     gap:4px; margin-bottom:6px; }

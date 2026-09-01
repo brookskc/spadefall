@@ -293,7 +293,11 @@ const hud = {
     const el = $('air');
     if (!el) return;
     const seconds = Math.max(0, Math.min(BREATH_MAX, breath));
-    el.classList.toggle('on', !!visible);
+    const shown = !!visible;
+    el.classList.toggle('on', shown);
+    // The vitals panel grows upward when its air meter appears. Move chat by
+    // the same state rather than leaving its lowest line behind the meter.
+    $('hud')?.classList.toggle('air-visible', shown);
     el.classList.toggle('low', seconds <= 4);
     $('airfill').style.width = (seconds / BREATH_MAX * 100) + '%';
     $('airnum').textContent = seconds > 0 ? `${Math.ceil(seconds)}s` : 'EMPTY';

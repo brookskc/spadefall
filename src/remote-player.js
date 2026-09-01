@@ -17,6 +17,7 @@ export class RemotePlayer {
     this.body = new Body(game.world, p.x, p.y, p.z);
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = game.time;
     resetEnvironmentalState(this);
     this.carrier = false;
     this.blocks = 50;
@@ -59,6 +60,7 @@ export class RemotePlayer {
     resetEnvironmentalState(this);
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = this.game.time;
     this.carrier = false;
     this.blocks = 50;
     this.nades = 3;

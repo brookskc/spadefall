@@ -82,6 +82,7 @@ export class Bot {
     game.scene.add(this.parts.group);
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = game.time;
     resetEnvironmentalState(this);
     this.carrier = false;
     this.heading = team === 'blue' ? -1 : 1; // general advance direction
@@ -1003,6 +1004,7 @@ export class Bot {
     this.body.vel.set(0, 0, 0);
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = this.game.time;
     this.protT = 3; // same spawn protection humans get
     this.gunClass = randomClass(); // rerolled each life, same as a human choosing
     setSoldierTool(this.parts, this.gunClass);

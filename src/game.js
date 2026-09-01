@@ -20,7 +20,8 @@ import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './prot
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
   resetEnvironmentalState, stepBreath } from './environment.js';
-import { modeMatchSeconds, regulationDecision, respawnWaveDelay, scoreLeader,
+import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
+  modeMatchSeconds, regulationDecision, respawnWaveDelay, scoreLeader,
   tacticalSpawnScore } from './pacing.js';
 import { assistCreditors, CONTRIBUTION, contributionRow,
   rankContributionRows } from './scoring.js';
@@ -222,7 +223,7 @@ class Flag {
     this.carrier = null;
     this.pos.copy(at);
     this.pos.y = Math.max(this.pos.y, SEA + 0.5);
-    this.dropTimer = 30;
+    this.dropTimer = FLAG_RETURN_TIME;
     sfx.drop();
   }
 
@@ -410,8 +411,15 @@ const hud = {
     let target = null, label = '';
     if (g.hill) { target = g.hill.pos; label = g.hill.label ?? 'HILL'; }
     else if (g.flags) {
-      if (p.carrier) { target = g.flags[p.team].home; label = 'RETURN'; }
-      else { const enemy = p.team === 'green' ? 'blue' : 'green'; target = g.flags[enemy].pos; label = 'FLAG'; }
+      const enemy = p.team === 'green' ? 'blue' : 'green';
+      const ownFlag = g.flags[p.team], enemyFlag = g.flags[enemy];
+      const kind = ctfObjectiveKind({ carrier: p.carrier,
+        ownState: ownFlag.state, enemyState: enemyFlag.state });
+      if (kind === 'return') { target = ownFlag.home; label = 'RETURN'; }
+      else if (kind === 'recover') { target = ownFlag.pos; label = 'RECOVER'; }
+      else if (kind === 'escort') { target = enemyFlag.pos; label = 'ESCORT'; }
+      else if (kind === 'secure') { target = enemyFlag.pos; label = 'SECURE'; }
+      else { target = enemyFlag.home; label = 'ATTACK'; }
     }
     if (!target || !p.alive) { el.style.display = 'none'; return; }
     const dx = target.x - p.body.pos.x, dz = target.z - p.body.pos.z;
@@ -1068,6 +1076,7 @@ export class Game {
     this._botDirectorT = 0;
     this._botBrainCursor = 0;
     this._botThinkSet = null;
+    this._openingDeployment = false;      // new rounds begin at the authored bases
     this._rematchVotes = new Set();
     this._squadVotes = new Set();
     this._activeSquads = [];
@@ -1334,12 +1343,14 @@ export class Game {
     // Start every human through a real new-round lifecycle. Mark guests dead
     // first so spawn scoring never treats stale old-map positions as enemies.
     for (const p of this.remote.values()) p.alive = false;
+    this._openingDeployment = true;
     this.player._momentumCarry = null;
     this.player.respawn();
     if (this.mode !== 'client') {
       for (const p of this.remote.values()) p.resetForRound();
       this._spawnBots();
     }
+    this._openingDeployment = false;
     this.captures = { green: 0, blue: 0 };
     this.matchElapsed = 0;
     this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
@@ -1676,8 +1687,8 @@ export class Game {
     return { x, y: h + 1.02, z };
   }
 
-  // CTF intentionally retains base deployment: crossing the field with the
-  // flag is the mode's core risk. The other modes use _dynamicSpawnPoint.
+  // Authored base deployment remains the opening, full-team-wipe, and unsafe
+  // fallback location in every mode.
   _baseSpawnPoint(team) {
     const b = BASE[team];
     const dir = team === 'green' ? 1 : -1; // just outside the gate, facing the field
@@ -1696,6 +1707,79 @@ export class Game {
     if (best) return best;
     const x = b.x + dir * 12, z = b.z;
     return { x, y: this.world.surface(Math.floor(x), Math.floor(z)) + 1.02, z };
+  }
+
+  // CTF redeploys behind its own midfield line when a safe living teammate
+  // still holds the front. This removes the repeated base-to-midfield commute
+  // without allowing attackers to materialize in enemy territory. A wipe, a
+  // recently fighting squad, or a fully exposed set of candidates naturally
+  // falls back to _baseSpawnPoint(), so breaking an attack still matters.
+  _ctfSpawnPoint(team) {
+    if (this._openingDeployment || !this.flags) return null;
+    const living = this.entities().filter(e => e?.alive && e.body);
+    const foes = living.filter(e => e.team !== team);
+    const allies = living.filter(e => e.team === team);
+    const anchors = allies.filter(e => !e.carrier
+      && this.time - (e._spawnedAt ?? -Infinity) >= CTF_SPAWN.anchorGrace
+      && this.time - (e._combatAt ?? -Infinity) >= CTF_SPAWN.anchorGrace);
+    if (!anchors.length) return null;
+
+    const own = BASE[team], enemy = BASE[this.enemyOf(team)];
+    const dir = Math.sign(enemy.x - own.x);
+    const halfField = Math.abs(enemy.x - own.x) / 2;
+    const maxAdvance = halfField - CTF_SPAWN.midfieldBuffer;
+    const progress = e => (e.body.pos.x - own.x) * dir;
+    const ownSideAnchors = anchors.filter(e => progress(e) >= 0
+      && progress(e) <= maxAdvance);
+    const leading = Math.max(0, ...anchors.map(progress));
+    const frontline = Math.min(maxAdvance, Math.max(28, leading));
+    const raw = [];
+
+    // Prefer real squad positions when they are still on our side, with
+    // enough radial spread that one wave cannot arrive in a grenade knot.
+    for (const ally of ownSideAnchors) for (let i = 0; i < 3; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = 8 + Math.random() * 10;
+      raw.push([ally.body.pos.x + Math.cos(angle) * radius,
+        ally.body.pos.z + Math.sin(angle) * radius]);
+    }
+    // If the surviving squad has crossed midfield, project its lane back to
+    // our frontline rather than spawning the wave beside it in enemy land.
+    for (let i = 0; i < 28; i++) {
+      const lane = anchors[i % anchors.length].body.pos;
+      raw.push([own.x + dir * (frontline + (Math.random() - 0.5) * 24),
+        lane.z + (Math.random() - 0.5) * 70]);
+    }
+
+    const ownFlag = this.flags[team], enemyFlag = this.flags[this.enemyOf(team)];
+    const objective = ownFlag.state !== 'home' ? ownFlag.pos
+      : enemyFlag.state !== 'home' ? enemyFlag.pos : enemyFlag.home;
+    const activeFlags = Object.values(this.flags)
+      .filter(flag => flag.state !== 'home').map(flag => flag.pos);
+    const enemyRows = foes.map(e => e.body.pos);
+    const allyRows = anchors.map(e => e.body.pos);
+    let best = null, bestScore = -Infinity;
+    for (const [x, z] of raw) {
+      const candidate = this._spawnSurface(x, z);
+      if (!candidate) continue;
+      const eye = new THREE.Vector3(candidate.x, candidate.y + 1.4, candidate.z);
+      let visibleEnemies = 0;
+      for (const foe of foes) {
+        const foeEye = foe.body.eye();
+        if (eye.distanceToSquared(foeEye) <= 65 * 65 && this.losClear(eye, foeEye)) {
+          visibleEnemies = 1;
+          break;
+        }
+      }
+      if (!ctfFrontlineAllowed(candidate, { ownX: own.x, enemyX: enemy.x,
+        enemies: enemyRows, activeFlags, visibleEnemies })) continue;
+      const advance = (candidate.x - own.x) * dir;
+      const score = tacticalSpawnScore(candidate, {
+        enemies: enemyRows, allies: allyRows, objective, visibleEnemies,
+      }) + advance * 0.65;
+      if (score > bestScore) { bestScore = score; best = candidate; }
+    }
+    return best;
   }
 
   _dynamicSpawnPoint(team) {
@@ -1755,9 +1839,14 @@ export class Game {
     return best;
   }
 
-  // TDM/KOTH return players to a safe edge of the live battle; CTF keeps the
-  // long base-to-base run because that travel is the objective's structure.
+  // Opening CTF deployments and failed safety searches use the base. Later
+  // CTF waves may reinforce their own frontline; TDM/KOTH continue to use
+  // their less territory-constrained dynamic battlefield spawns.
   spawnPoint(team) {
+    if (this.gameMode === 'ctf') {
+      const frontline = this._ctfSpawnPoint(team);
+      if (frontline) return frontline;
+    }
     if (this.gameMode === 'tdm' || this.gameMode === 'koth') {
       const dynamic = this._dynamicSpawnPoint(team);
       if (dynamic) return dynamic;
@@ -1829,6 +1918,7 @@ export class Game {
 
   // ---------------- combat ----------------
   fireHitscan(shooter, from, dir, spec) {
+    shooter._combatAt = this.time;
     shooter.protT = 0; // firing drops spawn protection
     dir = this._dropCompensate(from, dir, spec, shooter);
     // Crouch steadies aim; iron sights steady it more (rifle ×0.5, SMG ×0.7 —
@@ -2408,6 +2498,8 @@ export class Game {
       prior.at = this.time;
       ledger.set(attacker, prior);
     }
+    victim._combatAt = this.time;
+    if (attacker && attacker !== victim) attacker._combatAt = this.time;
     victim.health -= amount;
     victim.alert?.(attacker); // bots whirl toward whoever shot them
     const src = sourcePos ?? attacker?.body?.pos;
@@ -2669,6 +2761,7 @@ export class Game {
   }
 
   playerDig(p, origin = null, dir = null) {
+    p._combatAt = this.time;
     p.protT = 0; // swinging is firing: melee must not stay invulnerable
     origin = origin ?? p.body.eye();
     dir = dir ?? p.lookDir();
@@ -2748,6 +2841,7 @@ export class Game {
 
   // ---------------- grenades ----------------
   throwGrenade(owner, origin, dir, speed) {
+    owner._combatAt = this.time;
     owner.protT = 0; // covers proxy throws arriving via the host action path
     this.grenades.push({
       pos: origin.clone().addScaledVector(dir, 0.5),
@@ -4130,7 +4224,7 @@ export class Game {
       if (f && f.state === 'carried') {
         const c = this.entities().find(e => e.carrier && e.team === this.enemyOf(team));
         if (c) f.carrier = c;
-        else { f.state = 'dropped'; f.carrier = null; f.dropTimer = 30; }
+        else { f.state = 'dropped'; f.carrier = null; f.dropTimer = FLAG_RETURN_TIME; }
       }
     }
     // The hill keeps its location, owner, capture progress, and relocation

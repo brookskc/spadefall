@@ -349,20 +349,26 @@
     55%{opacity:1; transform:translate(-50%,-50%) rotate(45deg) scale(1.15);}
     100%{opacity:0; transform:translate(-50%,-50%) rotate(45deg) scale(1);} }
 
-  /* Damage direction: a long-shafted, hard-edged arrow at the screen edge,
+  /* Damage direction: a hard-edged source arrow around the reticle,
      rotated by hud.damageDir()'s bearing (0 = the source is straight
-     ahead, so the arrow sits at the top pointing down at you — the
-     rotation carries the shape with it, so it always points inward
-     toward center no matter which edge it lands on). One shared element,
+     ahead, so the arrow sits above the reticle and points up toward the
+     attacker). Three square steps widen into the head while a narrow voxel
+     stem reaches back toward center; there are no curves, glow, gradients,
+     or smooth diagonal edges to interrupt the game's block-built language.
+     Position and shape now communicate the same thing.
+     One shared element,
      not one per hit: a new hit snaps opacity back to 1 and restarts the
      fade rather than stacking a second arrow, so a stream of hits from
      the same direction reads as "still under fire" instead of clutter.
      Same danger red as the kill hitmark, same flat/no-blur language as
      the rest of this HUD — no gradient, no glow. */
   #dmgDir { position:fixed; left:50%; top:50%; width:0; height:0; pointer-events:none; }
-  #dmgDir .chevron { position:absolute; left:-11px; top:-205px; opacity:0;
-    width:22px; height:40px; background:rgba(224,90,74,.92);
-    clip-path:polygon(35% 0,65% 0,65% 57%,100% 57%,50% 100%,0 57%,35% 57%); }
+  #dmgDir .chevron { position:absolute; left:-15px;
+    top:clamp(-190px,-24vh,-130px); width:30px; height:44px; opacity:0;
+    background:rgba(224,90,74,.96);
+    clip-path:polygon(40% 0,60% 0,60% 18%,80% 18%,80% 36%,100% 36%,
+      100% 55%,63% 55%,63% 100%,37% 100%,37% 55%,0 55%,0 36%,20% 36%,
+      20% 18%,40% 18%); }
   html[data-damageqa="on"] #dmgDir { transform:rotate(1.05rad); }
   html[data-damageqa="on"] #dmgDir .chevron { opacity:1; }
 

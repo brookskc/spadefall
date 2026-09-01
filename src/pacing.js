@@ -1,7 +1,15 @@
 // pacing.js — pure round pacing rules shared by the game and headless tests.
 
-export const RESPAWN_WAVE = Object.freeze({ ctf: 8, tdm: 6, koth: 7 });
+export const RESPAWN_WAVE = Object.freeze({ ctf: 7, tdm: 6, koth: 7 });
 export const MATCH_DURATION = Object.freeze({ ctf: 12 * 60, tdm: 9 * 60, koth: 10 * 60 });
+export const FLAG_RETURN_TIME = 15;
+export const CTF_SPAWN = Object.freeze({
+  anchorGrace: 3,
+  minProgress: 18,
+  midfieldBuffer: 10,
+  enemyClearance: 20,
+  activeFlagClearance: 24,
+});
 
 export const modeWaveSeconds = mode => RESPAWN_WAVE[mode] ?? RESPAWN_WAVE.ctf;
 export const modeMatchSeconds = mode => MATCH_DURATION[mode] ?? MATCH_DURATION.ctf;
@@ -19,6 +27,38 @@ export function respawnWaveDelay(mode, elapsed, grace = 0.6) {
 }
 
 const distance2d = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+
+// CTF can redeploy a wave near its own frontline, but never across midfield
+// or directly into a live fight. The rendered controller supplies terrain
+// and line-of-sight facts; this pure boundary keeps the mode rules testable.
+export function ctfFrontlineAllowed(candidate, {
+  ownX, enemyX, enemies = [], activeFlags = [], visibleEnemies = 0,
+} = {}) {
+  if (!candidate || !Number.isFinite(candidate.x) || !Number.isFinite(candidate.z)
+      || !Number.isFinite(ownX) || !Number.isFinite(enemyX) || ownX === enemyX
+      || visibleEnemies !== 0) return false;
+  const dir = Math.sign(enemyX - ownX);
+  const halfField = Math.abs(enemyX - ownX) / 2;
+  const progress = (candidate.x - ownX) * dir;
+  if (progress < CTF_SPAWN.minProgress
+      || progress > halfField - CTF_SPAWN.midfieldBuffer) return false;
+  const near = (point, distance) => point && Number.isFinite(point.x)
+    && Number.isFinite(point.z) && distance2d(candidate, point) < distance;
+  if (enemies.some(enemy => near(enemy, CTF_SPAWN.enemyClearance))) return false;
+  if (activeFlags.some(flag => near(flag, CTF_SPAWN.activeFlagClearance))) return false;
+  return true;
+}
+
+// The local objective cue should always point at the action required to make
+// a capture possible. Recovering your missing flag outranks another attack.
+export function ctfObjectiveKind({ carrier = false, ownState = 'home',
+  enemyState = 'home' } = {}) {
+  if (carrier) return 'return';
+  if (ownState !== 'home') return 'recover';
+  if (enemyState === 'carried') return 'escort';
+  if (enemyState === 'dropped') return 'secure';
+  return 'attack';
+}
 
 // Score a terrain-valid dynamic spawn. Safety dominates; action distance and
 // squad cohesion only decide among candidates that are not immediate traps.

@@ -13,7 +13,7 @@ import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, applySoldierGraphics, disposeObject, makeMq9Drone, makeSoldier,
   setCrouch, setSoldierTool } from '../src/entities.js';
-import { airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
+import { Game, airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
 import { Avatar } from '../src/avatar.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
@@ -38,7 +38,8 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty, botDifficultyCode,
   botDifficultyKey, botSeparation, botsForSquadOrder, botTargetScore,
   botTelemetrySummary, chooseLocalRoute, hillPost, rememberedEnemyPosition,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { modeMatchSeconds, regulationDecision, respawnWaveDelay,
+import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
+  modeMatchSeconds, regulationDecision, respawnWaveDelay,
   tacticalSpawnScore } from '../src/pacing.js';
 import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
@@ -616,8 +617,61 @@ function pacingRuleTests() {
   ok('deaths in one TDM wave share its six-second boundary',
     Math.abs(respawnWaveDelay('tdm', 12.2) - 5.8) < 1e-9
       && Math.abs(respawnWaveDelay('tdm', 14.5) - 3.5) < 1e-9);
-  ok('CTF and KOTH use distinct eight- and seven-second waves',
-    respawnWaveDelay('ctf', 8) === 8 && respawnWaveDelay('koth', 7) === 7);
+  ok('CTF now matches KOTH at a brisk seven-second team wave',
+    respawnWaveDelay('ctf', 7) === 7 && respawnWaveDelay('koth', 7) === 7);
+
+  const ctfCandidate = { x: 96, z: 128 };
+  ok('CTF permits a clear frontline spawn inside the team half',
+    ctfFrontlineAllowed(ctfCandidate, { ownX: 36, enemyX: 220 })
+      && ctfFrontlineAllowed({ x: 160, z: 128 }, { ownX: 220, enemyX: 36 }));
+  ok('CTF frontline spawning never crosses the buffered midfield line',
+    !ctfFrontlineAllowed({ x: 124, z: 128 }, { ownX: 36, enemyX: 220 })
+      && !ctfFrontlineAllowed({ x: 132, z: 128 }, { ownX: 220, enemyX: 36 }));
+  ok('CTF rejects exposed, enemy-adjacent, and active-flag-adjacent spawns',
+    !ctfFrontlineAllowed(ctfCandidate, { ownX: 36, enemyX: 220, visibleEnemies: 1 })
+      && !ctfFrontlineAllowed(ctfCandidate, { ownX: 36, enemyX: 220,
+        enemies: [{ x: 96 + CTF_SPAWN.enemyClearance - 0.1, z: 128 }] })
+      && !ctfFrontlineAllowed(ctfCandidate, { ownX: 36, enemyX: 220,
+        activeFlags: [{ x: 96, z: 128 + CTF_SPAWN.activeFlagClearance - 0.1 }] }));
+  ok('CTF objective guidance prioritizes return, recovery, escort, and re-grab',
+    ctfObjectiveKind({ carrier: true, ownState: 'carried' }) === 'return'
+      && ctfObjectiveKind({ ownState: 'carried', enemyState: 'home' }) === 'recover'
+      && ctfObjectiveKind({ ownState: 'home', enemyState: 'carried' }) === 'escort'
+      && ctfObjectiveKind({ ownState: 'home', enemyState: 'dropped' }) === 'secure'
+      && ctfObjectiveKind({ ownState: 'home', enemyState: 'home' }) === 'attack');
+  ok('dropped CTF flags reset quickly enough to prevent long dead plays',
+    FLAG_RETURN_TIME === 15);
+
+  const anchor = { team: 'green', alive: true, carrier: false,
+    _spawnedAt: 0, _combatAt: 0,
+    body: { pos: new THREE.Vector3(90, 20, 128) } };
+  const fakeCtf = {
+    _openingDeployment: false, time: 10,
+    flags: {
+      green: { state: 'home', pos: new THREE.Vector3(36, 20, 128),
+        home: new THREE.Vector3(36, 20, 128) },
+      blue: { state: 'home', pos: new THREE.Vector3(220, 20, 128),
+        home: new THREE.Vector3(220, 20, 128) },
+    },
+    entities: () => [anchor],
+    enemyOf: Game.prototype.enemyOf,
+    _spawnSurface: (x, z) => ({ x, y: 20, z }),
+    losClear: () => true,
+  };
+  const savedRandom = Math.random;
+  Math.random = () => 0.5;
+  let frontline;
+  try { frontline = Game.prototype._ctfSpawnPoint.call(fakeCtf, 'green'); }
+  finally { Math.random = savedRandom; }
+  ok('a surviving safe teammate enables a terrain-valid own-half CTF redeploy',
+    frontline && frontline.x >= 54 && frontline.x <= 118);
+  fakeCtf.entities = () => [];
+  ok('a full CTF team wipe falls back to authored base deployment',
+    Game.prototype._ctfSpawnPoint.call(fakeCtf, 'green') === null);
+  fakeCtf.entities = () => [anchor];
+  fakeCtf._openingDeployment = true;
+  ok('opening CTF deployments remain at the authored team bases',
+    Game.prototype._ctfSpawnPoint.call(fakeCtf, 'green') === null);
 
   const safe = tacticalSpawnScore({ x: 30, z: 0 }, {
     enemies: [{ x: 70, z: 0 }], allies: [{ x: 18, z: 0 }],
@@ -1344,7 +1398,7 @@ function operationTests() {
 
 // ---------------------------------------------------------------------------
 function damageDirectionTests() {
-  group('damage direction: source bearing to screen edge');
+  group('damage direction: source-facing indicator around the reticle');
   const close = (a, b) => Math.abs(a - b) < 1e-9;
   ok('source ahead maps to the top edge', close(relativeBearing(0, 10, 10, 20, 10), 0));
   ok('source on the right maps clockwise to the right edge',

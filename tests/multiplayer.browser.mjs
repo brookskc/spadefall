@@ -131,6 +131,16 @@ try {
   });
   assert.ok(underwaterHud.vitalsTop - underwaterHud.chatBottom >= 8,
     'the breathing meter keeps clear of chat text above it');
+
+  const damageArrowStyle = await host.evaluate(() => {
+    const style = getComputedStyle(document.querySelector('#dmgDir .chevron'));
+    return { clipPath: style.clipPath, backgroundImage: style.backgroundImage,
+      borderRadius: style.borderRadius };
+  });
+  assert.ok(damageArrowStyle.clipPath.startsWith('polygon('),
+    'damage direction uses a stepped voxel silhouette');
+  assert.equal(damageArrowStyle.backgroundImage, 'none');
+  assert.equal(damageArrowStyle.borderRadius, '0px');
   assert.deepEqual(faults, [], faults.join('\n'));
   console.log('two-browser multiplayer: replication and live display settings passed');
 } finally {

@@ -81,6 +81,7 @@ export class Player {
     this.body = new Body(game.world, b.x, b.y, b.z);
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = game.time;
     this.yaw = 0; // face the enemy base (+x)
     this.pitch = 0;
     this.keys = {};
@@ -1000,6 +1001,7 @@ export class Player {
     this.aiming = false; this.aimK = 0;
     this.health = 100;
     this.alive = true;
+    this._spawnedAt = this.game.time;
     this.protT = 3; // spawn protection: 3s, drains twice as fast moving, gone if you fire
     this.slideT = 0; this.slideCd = 0;
     this.stepK = 0;

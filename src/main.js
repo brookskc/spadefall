@@ -1336,7 +1336,8 @@ if (deathRecapQa) {
 if (selectedGoalQa && game.selectedGoal) {
   game.setSelectedGoal('sapper');
   setPlaying(true);
-  game.selectedGoal.record('terrain', params.get('goalqa') === 'complete' ? 12 : 7, game.time);
+  game.selectedGoal.recordFieldwork('built', params.get('goalqa') === 'complete' ? 24 : 14,
+    params.get('goalqa') === 'complete' ? 24 : 14, game.time);
 }
 // Representative post-match composition without waiting through a full
 // automated round. Uses the real scoreboard rows, report rules, persistence,

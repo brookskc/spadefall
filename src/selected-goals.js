@@ -10,8 +10,8 @@ export const SELECTED_GOALS = Object.freeze({
     description: 'Secure three eliminations',
   }),
   sapper: Object.freeze({
-    id: 'sapper', name: 'SAPPER', menu: '12 EDITS', metric: 'terrain', target: 12,
-    description: 'Make twelve direct voxel edits',
+    id: 'sapper', name: 'SAPPER', menu: '24 FIELDWORK', metric: 'fieldwork', target: 24,
+    description: 'Build, break, blast, or collapse terrain',
   }),
   wingman: Object.freeze({
     id: 'wingman', name: 'WINGMAN', menu: '3 TEAM PLAYS', metric: 'teamplay', target: 3,
@@ -25,9 +25,22 @@ export const validSelectedGoal = value => SELECTED_GOAL_IDS.includes(value);
 const safeTotal = value => Number.isFinite(value) ? Math.max(0, value) : 0;
 const totals = value => ({
   kills: safeTotal(value?.kills),
-  terrain: safeTotal(value?.terrain),
+  fieldwork: safeTotal(value?.fieldwork),
   teamplay: safeTotal(value?.teamplay),
 });
+
+export const FIELDWORK_KINDS = Object.freeze(['built', 'broken', 'blasted', 'collapsed']);
+export const validFieldworkKind = value => FIELDWORK_KINDS.includes(value);
+const fieldworkTotals = value => Object.fromEntries(
+  FIELDWORK_KINDS.map(kind => [kind,
+    Math.min(1_000_000, Math.floor(safeTotal(value?.[kind])))]));
+
+export function fieldworkCredit(kind, voxels, { airstrike = false } = {}) {
+  if (!validFieldworkKind(kind) || !Number.isFinite(voxels) || voxels <= 0) return 0;
+  const cap = kind === 'collapsed' || (kind === 'blasted' && airstrike) ? 8
+    : kind === 'blasted' ? 6 : 1;
+  return Math.min(cap, Math.floor(voxels));
+}
 
 export class SelectedGoalTracker {
   constructor(selection = 'sapper') {
@@ -48,6 +61,7 @@ export class SelectedGoalTracker {
     this.progress = 0;
     this.completed = false;
     this.completedAt = null;
+    this.fieldwork = fieldworkTotals();
   }
 
   start(current = {}, at = 0) {
@@ -70,10 +84,22 @@ export class SelectedGoalTracker {
   }
 
   record(metric, amount = 1, at = 0) {
-    if (!this.active || !['kills', 'terrain', 'teamplay'].includes(metric)
+    if (!this.active || !['kills', 'fieldwork', 'teamplay'].includes(metric)
         || !Number.isFinite(amount) || amount <= 0) return false;
     this.current[metric] += Math.min(1000, amount);
     return this._refresh(at);
+  }
+
+  // Raw voxels describe what the player actually changed; credit is capped
+  // per action by the authoritative game so one giant collapse cannot finish
+  // the goal by itself. Keeping both makes the result honest and the target
+  // balanced without throwing useful accomplishment data away.
+  recordFieldwork(kind, voxels, credit, at = 0) {
+    if (!this.active || !validFieldworkKind(kind)
+        || !Number.isInteger(voxels) || voxels <= 0
+        || !Number.isInteger(credit) || credit <= 0) return false;
+    this.fieldwork[kind] = Math.min(1_000_000, this.fieldwork[kind] + voxels);
+    return this.record('fieldwork', Math.min(32, credit), at);
   }
 
   _refresh(at) {
@@ -97,6 +123,7 @@ export class SelectedGoalTracker {
       progress: this.progress,
       target: goal.target,
       complete: this.completed,
+      fieldwork: fieldworkTotals(this.fieldwork),
     };
   }
 
@@ -109,6 +136,7 @@ export class SelectedGoalTracker {
       progress: this.progress,
       target: goal.target,
       complete: this.completed,
+      fieldwork: fieldworkTotals(this.fieldwork),
     };
   }
 }

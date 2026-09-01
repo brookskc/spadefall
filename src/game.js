@@ -47,7 +47,7 @@ import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReloa
 import { FirstMinuteGuide } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
-import { SelectedGoalTracker } from './selected-goals.js';
+import { SelectedGoalTracker, fieldworkCredit } from './selected-goals.js';
 import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
   operationComplete, operationFromRow, operationLeg, operationRow,
   operationSideForColor, operationSideLabel, operationWinner,
@@ -715,15 +715,32 @@ const hud = {
     $('selectedGoalName').textContent = view.complete ? `${view.name} COMPLETE` : view.name;
     $('selectedGoalProgress').textContent = `${view.progress} / ${view.target}`;
     $('selectedGoalFill').style.width = `${Math.round(100 * view.progress / view.target)}%`;
+    const detail = $('selectedGoalDetail');
+    if (detail) {
+      const f = view.fieldwork;
+      const changed = f && Object.values(f).some(Boolean);
+      detail.textContent = view.id === 'sapper' && changed
+        ? `BUILT ${f.built} · BROKE ${f.broken} · BLASTED ${f.blasted} · FELL ${f.collapsed}`
+        : '';
+    }
   },
   selectedGoalResult(result) {
     const el = $('endGoal');
     if (!el) return;
     el.className = result ? `on${result.complete ? ' complete' : ''}` : '';
+    const fieldwork = $('endFieldwork');
+    if (fieldwork) fieldwork.className = '';
     if (!result) return;
     $('endGoalName').textContent = result.name;
     $('endGoalResult').textContent = result.complete
-      ? 'COMPLETE' : `${result.progress} / ${result.target}`;
+      ? `COMPLETE · ${result.progress} / ${result.target}` : `${result.progress} / ${result.target}`;
+    const f = result.fieldwork;
+    const changed = f && Object.values(f).some(Boolean);
+    if (fieldwork) {
+      fieldwork.className = changed ? 'on' : '';
+      if (changed) $('endFieldworkDetail').textContent =
+        `BUILT ${f.built} · BROKEN ${f.broken} · BLASTED ${f.blasted} · COLLAPSED ${f.collapsed}`;
+    }
   },
   // Highlights which class is currently PENDING for the next life — called
   // once on death (to show the persisted/previous choice) and again each
@@ -2353,7 +2370,7 @@ export class Game {
     const row = this.kd.get(this._kdKey(this.player));
     return {
       kills: row?.k ?? 0,
-      terrain: this.selectedGoal?.current?.terrain ?? 0,
+      fieldwork: this.selectedGoal?.current?.fieldwork ?? 0,
       teamplay: (row?.a ?? 0) + (row?.objective ?? 0),
     };
   }
@@ -2374,12 +2391,14 @@ export class Game {
     this._announceSelectedGoal(this.selectedGoal.observe(this._selectedGoalTotals(), this.time));
   }
 
-  _recordSelectedGoal(metric, amount, who) {
+  _recordFieldwork(kind, voxels, credit, who) {
     if (!this.selectedGoal || !who) return;
     if (who === this.player) {
-      this._announceSelectedGoal(this.selectedGoal.record(metric, amount, this.time));
+      this._announceSelectedGoal(
+        this.selectedGoal.recordFieldwork(kind, voxels, credit, this.time));
     } else if (this.mode === 'host' && who.isRemote) {
-      this.net.sendTo(who.id, { t: 'e', k: 'goal', metric, amount });
+      this.net.sendTo(who.id,
+        { t: 'e', k: 'goal', metric: 'fieldwork', kind, voxels, amount: credit });
     }
   }
 
@@ -2666,7 +2685,10 @@ export class Game {
     this.world.set(x, y, z, v);
     const after = this.world.get(x, y, z);
     this.voxelStory?.recordEdit(before, after);
-    if (before !== after) this._recordSelectedGoal('terrain', 1, who);
+    if (before !== after) {
+      const kind = after ? 'built' : 'broken';
+      this._recordFieldwork(kind, 1, fieldworkCredit(kind, 1), who);
+    }
     this.navRevision++;
     if (this.mode === 'host') {
       this._appendWorldEdit([x, y, z, v]);
@@ -2706,6 +2728,8 @@ export class Game {
       for (const c of cells) this.world.set(c.x, c.y, c.z, 0);
     });
     this.voxelStory?.recordCollapse(cells.length);
+    this._recordFieldwork('collapsed', cells.length,
+      fieldworkCredit('collapsed', cells.length), who);
     this.effects.blockBurst(cells.filter((_, i) => i % Math.ceil(cells.length / 48) === 0));
     sfx.crumble();
     for (const e of this.entities()) {
@@ -2815,7 +2839,7 @@ export class Game {
           z + 1 > b.pos.z - b.half.x && z < b.pos.z + b.half.x &&
           y + 1 > b.pos.y && y < b.pos.y + b.half.h) return false;
     }
-    this.applyEdit(x, y, z, p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN);
+    this.applyEdit(x, y, z, p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN, p);
     p.blocks--;
     return true;
   }
@@ -3200,6 +3224,9 @@ export class Game {
     sfx.at(sound, pos);
     const removed = this.world.carve(Math.floor(x), Math.floor(y), Math.floor(z), r);
     this.voxelStory?.recordBlast(removed.length, { airstrike: sound === 'airstrikeImpact' });
+    if (removed.length) this._recordFieldwork('blasted', removed.length,
+      fieldworkCredit('blasted', removed.length,
+        { airstrike: sound === 'airstrikeImpact' }), owner);
     this.effects.blockBurst(removed);
     this.effects.addShake(Math.max(0, 0.5 - pos.distanceTo(this.player.body.pos) * 0.012));
     this.pingIntel(pos, owner?.team); // explosions echo on the intel feed
@@ -4901,7 +4928,8 @@ export class Game {
         else d.kill ? sfx.kill() : sfx.hit();
         break;
       case 'goal':
-        this._announceSelectedGoal(this.selectedGoal?.record(d.metric, d.amount, this.time));
+        this._announceSelectedGoal(
+          this.selectedGoal?.recordFieldwork(d.kind, d.voxels, d.amount, this.time));
         break;
       case 'dmgdir': hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
       case 'envdmg': hud.damage(); sfx.hurt(); break;

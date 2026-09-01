@@ -67,7 +67,7 @@ import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
-import { SELECTED_GOALS, SelectedGoalTracker,
+import { SELECTED_GOALS, SelectedGoalTracker, fieldworkCredit,
   validSelectedGoal } from '../src/selected-goals.js';
 
 let pass = 0, fail = 0;
@@ -1176,11 +1176,11 @@ function selectedGoalTests() {
 
   const combat = new SelectedGoalTracker('vanguard');
   ok('a match baseline prevents prior-round contribution from counting',
-    combat.start({ kills: 8, terrain: 20, teamplay: 4 }, 10)
-      && !combat.observe({ kills: 10, terrain: 200, teamplay: 40 }, 20)
+    combat.start({ kills: 8, fieldwork: 20, teamplay: 4 }, 10)
+      && !combat.observe({ kills: 10, fieldwork: 200, teamplay: 40 }, 20)
       && combat.progress === 2);
   ok('authoritative totals cannot roll progress backward',
-    !combat.observe({ kills: 9, terrain: 0, teamplay: 0 }, 21)
+    !combat.observe({ kills: 9, fieldwork: 0, teamplay: 0 }, 21)
       && combat.progress === 2);
   ok('completion fires once at the exact target',
     combat.observe({ kills: 11 }, 22) && combat.completed
@@ -1195,9 +1195,16 @@ function selectedGoalTests() {
     combat.selection === 'vanguard' && !combat.active && combat.progress === 0);
   ok('selection can change before a round but not during one',
     combat.select('sapper') && combat.start({}, 0) && !combat.select('wingman'));
-  for (let i = 0; i < 11; i++) combat.record('terrain', 1, i);
-  ok('direct voxel edits advance only the fieldwork goal',
-    combat.progress === 11 && combat.record('terrain', 1, 12) && combat.completed);
+  for (let i = 0; i < 23; i++) combat.recordFieldwork('built', 1, 1, i);
+  ok('all fieldwork types advance one clear Sapper goal with a raw breakdown',
+    combat.progress === 23 && combat.recordFieldwork('collapsed', 17, 1, 24)
+      && combat.completed && combat.result().fieldwork.built === 23
+      && combat.result().fieldwork.collapsed === 17);
+  ok('large terrain events have honest raw totals but bounded goal credit',
+    fieldworkCredit('blasted', 40) === 6
+      && fieldworkCredit('blasted', 40, { airstrike: true }) === 8
+      && fieldworkCredit('collapsed', 40) === 8
+      && fieldworkCredit('built', 40) === 1);
 
   const wingman = new SelectedGoalTracker('wingman');
   wingman.start({ teamplay: 6 }, 0);
@@ -1207,10 +1214,14 @@ function selectedGoalTests() {
   ok('death and post-match states suppress the live card without losing the result',
     wingman.view(3, { alive: false }) === null
       && wingman.view(3, { over: true }) === null && wingman.result().complete);
-  ok('terrain progress signals are bounded at the server trust boundary',
-    validServerMessage({ t: 'e', k: 'goal', metric: 'terrain', amount: 1 })
-      && !validServerMessage({ t: 'e', k: 'goal', metric: 'kills', amount: 1 })
-      && !validServerMessage({ t: 'e', k: 'goal', metric: 'terrain', amount: 1000 }));
+  const fieldworkEvent = { t: 'e', k: 'goal', metric: 'fieldwork', amount: 6,
+    kind: 'blasted', voxels: 31 };
+  ok('fieldwork signals require bounded credit, raw voxels, and a known action type',
+    validServerMessage(fieldworkEvent)
+      && !validServerMessage({ ...fieldworkEvent, metric: 'kills' })
+      && !validServerMessage({ ...fieldworkEvent, kind: 'painted' })
+      && !validServerMessage({ ...fieldworkEvent, amount: 1000 })
+      && !validServerMessage({ ...fieldworkEvent, voxels: 1_000_001 }));
 }
 
 function stayAsSquadTests() {

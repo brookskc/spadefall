@@ -5,8 +5,9 @@ import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
+import { validFieldworkKind } from './selected-goals.js';
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -160,7 +161,7 @@ function validEvent(d) {
     shot: ['t', 'k', 'sid', 'f', 'e', 'hit', 'hex', 'gun'],
     feed: ['t', 'k', 'html'], msg: ['t', 'k', 'text', 'color', 'team'],
     supply: ['t', 'k', 'blocks', 'nades'], hit: ['t', 'k', 'kill', 'tier'],
-    goal: ['t', 'k', 'metric', 'amount'], dmgdir: ['t', 'k', 'x', 'z'],
+    goal: ['t', 'k', 'metric', 'amount', 'kind', 'voxels'], dmgdir: ['t', 'k', 'x', 'z'],
     chat: ['t', 'k', 'name', 'text', 'team', 'scope'],
     mark: ['t', 'k', 'id', 'name', 'team', 'x', 'y', 'z', 'kind'],
     rematch: ['t', 'k', 'voters', 'needed'], squad: ['t', 'k', 'voters'],
@@ -197,8 +198,9 @@ function validEvent(d) {
       && Number.isInteger(d.nades) && d.nades >= 0 && d.nades <= 1;
     case 'hit': return typeof d.kill === 'boolean'
       && (d.tier === null || d.tier === undefined || ['double', 'triple', 'multi'].includes(d.tier));
-    case 'goal': return d.metric === 'terrain' && Number.isInteger(d.amount)
-      && d.amount >= 1 && d.amount <= 32;
+    case 'goal': return d.metric === 'fieldwork' && Number.isInteger(d.amount)
+      && d.amount >= 1 && d.amount <= 32 && validFieldworkKind(d.kind)
+      && Number.isInteger(d.voxels) && d.voxels >= 1 && d.voxels <= 1_000_000;
     case 'dmgdir': return finite(d.x) && finite(d.z);
     case 'chat': return shortString(d.name, 64)
       && shortString(d.text, 512) && team(d.team)

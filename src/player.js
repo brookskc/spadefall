@@ -4,7 +4,7 @@ import { Body, CROUCH_HEIGHT, STAND_HEIGHT, faceTintedBox } from './entities.js'
 import { sfx } from './audio.js';
 import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
-import { getMotionScale, teamHex } from './settings.js';
+import { getMotionScale, getMouseSensitivity, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
 import { retainedMomentum } from './streaks.js';
 
@@ -75,6 +75,7 @@ export class Player {
     this.camera = camera;
     this.baseFov = BASE_FOV;
     this.motionScale = getMotionScale();
+    this.mouseSensitivity = getMouseSensitivity();
     this.dom = dom;
     this.team = 'green';
     const b = game.spawnPoint('green');
@@ -259,7 +260,7 @@ export class Player {
       if (document.pointerLockElement !== dom) return;
       // Sensitivity follows the zoom: sighted in, the same mouse travel
       // covers less view, so fine aim stays reachable.
-      const sens = 0.0022 * (this.camera.fov / this.baseFov);
+      const sens = 0.0022 * this.mouseSensitivity * (this.camera.fov / this.baseFov);
       this.yaw -= e.movementX * sens;
       this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - e.movementY * sens));
     });

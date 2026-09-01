@@ -36,7 +36,9 @@ import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
   stepFieldStation } from './field-stations.js';
 import { buildMatchReport } from './match-report.js';
 import { rematchVotesNeeded, staySquadGroups, staySquadState,
-  TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL } from './social.js';
+  TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL,
+  VOTE_KICK_COOLDOWN, VOTE_KICK_DURATION, voteKickVotesNeeded } from './social.js';
+import { sanitizeCallsign } from './callsign.js';
 import { assignBotRoles, botsForSquadOrder, botDifficultyCode, botDifficultyKey,
   botTelemetrySummary, scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
@@ -983,14 +985,16 @@ const hud = {
 class Chat {
   constructor(game) {
     this.game = game;
-    this.scope = 'all';
+    this.scope = 'team';
     this.box = $('chat');
     this.input = $('chatin');
     addEventListener('keydown', e => {
       if (e.target.tagName === 'INPUT') return;        // typing elsewhere
       if (this.isOpen) return;                          // input captures its own keys
       if (!$('hud').classList.contains('on')) return;   // menus own the keyboard
-      if (e.code === 'KeyT') { e.preventDefault(); this.open('all'); }
+      if (e.code === 'KeyT' && this.game.publicChatEnabled()) {
+        e.preventDefault(); this.open('all');
+      }
       else if (e.code === 'KeyY') { e.preventDefault(); this.open('team'); }
     });
     this.input.addEventListener('keydown', e => {
@@ -1002,6 +1006,7 @@ class Chat {
   }
   get isOpen() { return this.box.classList.contains('open'); }
   open(scope) {
+    if (scope === 'all' && !this.game.publicChatEnabled()) return;
     this.scope = scope;
     $('chatscope').textContent = scope === 'team' ? 'TEAM' : 'ALL';
     this.box.classList.add('open');
@@ -1026,8 +1031,7 @@ const nameSpan = e => `<span style="color:${teamCss(e.team)}">${e.name}</span>`;
 
 // Names arrive over the network and land in HTML (kill feed) and canvas
 // (nametags): keep them to the same alphabet the callsign box enforces.
-const cleanName = n =>
-  String(n ?? '').replace(/[^\w \-]/g, '').trim().slice(0, 12) || 'Player';
+const cleanName = n => sanitizeCallsign(n);
 
 // Feed rows arrive as host-composed HTML and land in innerHTML — and the
 // host is untrusted input like anyone else (a malicious room host could
@@ -1096,6 +1100,8 @@ export class Game {
     this._openingDeployment = false;      // new rounds begin at the authored bases
     this._rematchVotes = new Set();
     this._squadVotes = new Set();
+    this._voteKick = null;
+    this._voteKickTimer = null;
     this._activeSquads = [];
     this._squadHostEnabled = false;
     this.operation = null;                // optional host-authored three-match arc
@@ -1156,7 +1162,6 @@ export class Game {
     this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
     this.overtime = false;
     this.winner = null;
-    this.mapLock = null;               // host map pref: fixed index, or null = rotate
     this.hill = null;                  // koth: occupied rotating objective state
     this.flags = { green: new Flag(this, 'green'), blue: new Flag(this, 'blue') };
     this.captures = { green: 0, blue: 0 };
@@ -1301,6 +1306,7 @@ export class Game {
     this._clearTeamPings();
     this._rematchVotes.clear();
     this._squadVotes.clear();
+    this._clearVoteKick();
     if (this.mode === 'client') this._squadHostEnabled = false;
     hud.staySquad(this, []);
     this._clearAirstrikeDrones();
@@ -1405,7 +1411,6 @@ export class Game {
   startOperation(plan = 0) {
     this.operation = createOperation(plan);
     this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
-    this.mapLock = null;
     const leg = operationLeg(this.operation);
     this.gameMode = leg.mode;
     hud.operation(this);
@@ -2282,10 +2287,13 @@ export class Game {
   // Host/solo diagnostics and the harmless local /netstats readout are
   // checked before the chat rate limit because they are never real chat
   // messages and are never relayed.
+  publicChatEnabled() { return !!this.engagementFeatures.publicChat; }
+
   sendChat(text, scope) {
     // Network telemetry is local and harmless on guests too; gameplay state
     // commands remain host/solo-only as described above.
     if ((this.mode !== 'client' || text.trim() === '/netstats') && this._devCommand(text)) return;
+    scope = scope === 'all' && this.publicChatEnabled() ? 'all' : 'team';
     const now = performance.now();
     if (now < this._chatCd) return;         // easy on the enter key
     this._chatCd = now + 1200;
@@ -2411,6 +2419,7 @@ export class Game {
   // Host side: show it here, then forward to everyone the message is for —
   // the whole room, or just the sender's team — never back to the sender.
   _hostRelayChat(fromId, team, text, scope) {
+    if (scope === 'all' && !this.publicChatEnabled()) return;
     const m = { t: 'e', k: 'chat', name: fromId == null ? this.player.name
       : this.remote.get(fromId)?.name, team, text, scope };
     for (const [id, p] of this.remote) {
@@ -2428,7 +2437,7 @@ export class Game {
     p._chatCd = now + 1200;
     text = String(text ?? '').trim().slice(0, 120);
     if (!text) return;
-    scope = scope === 'team' ? 'team' : 'all';
+    scope = scope === 'all' && this.publicChatEnabled() ? 'all' : 'team';
     // Team chatter is for teammates only — the host included.
     if (scope === 'all' || p.team === this.player.team)
       hud.chatMsg({ name: p.name, team: p.team, text, scope });
@@ -3526,13 +3535,10 @@ export class Game {
     if (this.mode !== 'client') this._rotateT = operationDone ? null : POST_MATCH_TIME;
   }
 
-  // Next map in the rotation for the CURRENT mode: a host pin wins if it's
-  // mode-compatible, otherwise cycle the maps that support this mode.
+  // Next map in the rotation for the current mode.
   _nextMap() {
     if (this.operation) return operationLeg(this.operation,
       operationComplete(this.operation) ? 0 : 1)?.map ?? this.mapIndex;
-    if (this.mapLock != null && MAPS[this.mapLock].modes.includes(this.gameMode))
-      return this.mapLock;
     const pool = mapsForMode(this.gameMode);
     return pool[(pool.indexOf(this.mapIndex) + 1) % pool.length];
   }
@@ -3544,7 +3550,6 @@ export class Game {
       this.operation = next;
       const leg = operationLeg(this.operation);
       this.gameMode = leg.mode;
-      this.mapLock = null;
       this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
       return;
     }
@@ -3650,6 +3655,101 @@ export class Game {
     return ['p' + this._hostIdx, ...[...this.remote.values()].map(p => 'p' + p.ridx)];
   }
 
+  // The elected browser remains authoritative, so a malicious host cannot
+  // honestly be vote-kicked in a peer-hosted room. Every other human is a
+  // bounded candidate and the target never counts among eligible voters.
+  voteKickCandidates() {
+    if (this.mode === 'solo') return [];
+    if (this.mode === 'host') return [...this.remote.values()].map(p => ({
+      target: p.ridx, key: 'p' + p.ridx, name: p.name, team: p.team,
+    }));
+    return [...(this._rosterP ?? new Map())]
+      .filter(([idx, meta]) => idx !== this.myIdx && meta.pid !== 'HOST')
+      .map(([idx, meta]) => ({ target: idx, key: 'p' + idx,
+        name: meta.name, team: meta.team }));
+  }
+
+  voteKickState() {
+    if (!this._voteKick) return { active: false };
+    const remaining = this.mode === 'client' ? this._voteKick.remaining
+      : Math.max(0, Math.ceil((this._voteKick.expiresAt - performance.now()) / 1000));
+    return { active: true, target: this._voteKick.target, name: this._voteKick.name,
+      voters: [...this._voteKick.voters], needed: this._voteKick.needed, remaining };
+  }
+
+  requestVoteKick(target) {
+    if (!Number.isInteger(target)) return false;
+    if (this.mode === 'client') {
+      return !!this.net?.send({ t: 'a', k: 'votekick', target });
+    }
+    if (this.mode === 'host') return this._hostVoteKick(this.player, target);
+    return false;
+  }
+
+  _publishVoteKickState() {
+    const state = this.voteKickState();
+    this.onVoteKickState?.(state);
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'votekick', ...state });
+  }
+
+  _clearVoteKick(publish = false) {
+    if (this._voteKickTimer) clearTimeout(this._voteKickTimer);
+    this._voteKickTimer = null;
+    this._voteKick = null;
+    this.onVoteKickState?.({ active: false });
+    if (publish && this.mode === 'host')
+      this.net.broadcast({ t: 'e', k: 'votekick', active: false });
+  }
+
+  _passVoteKick() {
+    const kicked = this._voteKick;
+    if (!kicked) return false;
+    this.feed(`<b>${kicked.name}</b> WAS REMOVED BY PLAYER VOTE`);
+    this.net.sendTo(kicked.id, { t: 'e', k: 'kick', reason: 'vote' });
+    this._clearVoteKick(true);
+    this.net.kick(kicked.id);
+    return true;
+  }
+
+  _hostVoteKick(voter, targetIdx) {
+    if (this.mode !== 'host' || !voter || this.remote.size + 1 < 3) {
+      if (voter) this.messageTo(voter, 'VOTE-KICK NEEDS AT LEAST 3 HUMANS', '#ffd97a');
+      return false;
+    }
+    const target = [...this.remote.values()].find(p => p.ridx === targetIdx);
+    if (!target || target === voter) return false;
+    const key = this._kdKey(voter);
+    if (this._voteKick && this._voteKick.target !== targetIdx) {
+      this.messageTo(voter, `VOTE ALREADY OPEN FOR ${this._voteKick.name}`, '#ffd97a');
+      return false;
+    }
+    if (!this._voteKick) {
+      const now = performance.now();
+      if (now < (voter._voteKickCooldownAt ?? 0)) {
+        const wait = Math.ceil((voter._voteKickCooldownAt - now) / 1000);
+        this.messageTo(voter, `VOTE-KICK COOLDOWN · ${wait}s`, '#ffd97a');
+        return false;
+      }
+      voter._voteKickCooldownAt = now + VOTE_KICK_COOLDOWN * 1000;
+      this._voteKick = { target: targetIdx, id: target.id, name: target.name,
+        voters: new Set(), needed: voteKickVotesNeeded(this.remote.size + 1),
+        expiresAt: now + VOTE_KICK_DURATION * 1000 };
+      const ballot = this._voteKick;
+      this._voteKickTimer = setTimeout(() => {
+        if (this._voteKick !== ballot) return;
+        this.feed(`VOTE-KICK FOR <b>${ballot.name}</b> EXPIRED`);
+        this._clearVoteKick(true);
+      }, VOTE_KICK_DURATION * 1000);
+      this.feed(`<b>${cleanName(voter.name)}</b> STARTED A VOTE-KICK FOR <b>${target.name}</b>`);
+    }
+    if (key === 'p' + targetIdx || this._voteKick.voters.has(key)) return false;
+    this._voteKick.voters.add(key);
+    this._voteKick.needed = voteKickVotesNeeded(this.remote.size + 1);
+    this._publishVoteKickState();
+    if (this._voteKick.voters.size < this._voteKick.needed) return true;
+    return this._passVoteKick();
+  }
+
   _publishRematchState() {
     const humans = this.mode === 'client'
       ? Math.max(1, this._rosterP?.size ?? 1) : this.remote.size + 1;
@@ -3722,9 +3822,9 @@ export class Game {
       this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
       return;
     }
-    // A rematch restores the same authored battlefield and procedural seed,
-    // but swaps sides so asymmetric cover never becomes a permanent edge.
-    this._restartRound(this.mapIndex, this.seed);
+    // A successful vote skips the intermission but still advances the room's
+    // rotation. Public rooms never become one-map grind lobbies.
+    this._restartRound(this._nextMap(), Math.floor(Math.random() * 1e9));
   }
 
   // ---------------- host networking ----------------
@@ -3851,6 +3951,10 @@ export class Game {
     }
     if (d.t === 'a' && d.k === 'resync') return this._hostResync(id, d.scope);
     if (d.t === 'a' && d.k === 'chat') return this._hostOnChat(id, d.text, d.scope);
+    if (d.t === 'a' && d.k === 'votekick') {
+      this._hostVoteKick(p, d.target);
+      return;
+    }
     if (d.t === 'a' && d.k === 'mark') {
       this._hostPlaceTeamPing(p, d.d);
       return;
@@ -4130,6 +4234,8 @@ export class Game {
       bd: this._botDirectorRow(),
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
+    if (this._voteKick) this.net.sendTo(id,
+      { t: 'e', k: 'votekick', ...this.voteKickState() });
     if (this.over) {
       this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner,
         op: this._operationRow() });
@@ -4338,6 +4444,14 @@ export class Game {
     this.feed(`${nameSpan(p)} left the battle`);
     p.avatar.dispose();
     this.remote.delete(id);
+    if (this._voteKick?.id === id) this._clearVoteKick(true);
+    else if (this._voteKick) {
+      this._voteKick.voters.delete('p' + p.ridx);
+      this._voteKick.needed = voteKickVotesNeeded(this.remote.size + 1);
+      if (this._voteKick.needed < 2) this._clearVoteKick(true);
+      else if (this._voteKick.voters.size >= this._voteKick.needed) this._passVoteKick();
+      else this._publishVoteKickState();
+    }
     this._rematchVotes.delete('p' + p.ridx);
     this._squadVotes.delete('p' + p.ridx);
     this.respawnTimers.delete(p);
@@ -4934,6 +5048,7 @@ export class Game {
       case 'dmgdir': hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
       case 'envdmg': hud.damage(); sfx.hurt(); break;
       case 'chat':
+        if (d.scope === 'all' && !this.publicChatEnabled()) break;
         hud.chatMsg({ name: cleanName(d.name), team: d.team === 'blue' ? 'blue' : 'green',
                       text: String(d.text ?? '').slice(0, 120), scope: d.scope });
         break;
@@ -4953,6 +5068,11 @@ export class Game {
         this._squadHostEnabled = true;
         this._squadVotes = new Set(d.voters);
         hud.staySquad(this, d.voters);
+        break;
+      case 'votekick':
+        this._voteKick = d.active ? { target: d.target, name: d.name,
+          voters: new Set(d.voters), needed: d.needed, remaining: d.remaining } : null;
+        this.onVoteKickState?.(this.voteKickState());
         break;
       case 'corr':
         if ([d.x, d.y, d.z].every(Number.isFinite)) {

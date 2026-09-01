@@ -58,7 +58,7 @@ export const MAPS = [
     ],
     atmosphere: { sky: ['#4d9fc9', '#9bcbd8', '#e8eee4'], fog: 0xd3e3dc, cloud: 0xf8f4e8, water: 0x248fa4,
       sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] },
-    paletteOverrides: { grass: 0x689c52, dirt: 0x79563c, sand: 0xd0b97d, stone: 0x7f8584, moss: 0x55745d } },
+    paletteOverrides: { grass: 0x6f9f55, dirt: 0x89684d, sand: 0xd2b977, stone: 0x737b80, moss: 0x4d7459 } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
     stations: [
       { x: 127.5, z: 82, label: 'NORTH FORD' },
@@ -363,7 +363,28 @@ function genBeach(world, seed) {
     }
 
   flattenBases(height);
-  fillColumns(world, height, (x, z, h) => h <= SEA + 5 ? BLOCK.SAND : BLOCK.GRASS);
+  // Broad coastal material zones replace the old hard sand/grass split.
+  // The bands are deliberately low-frequency: they read as damp shoreline,
+  // churned bluff earth, meadow, scrub, and exposed ridge rock—not as a
+  // texture sprayed across individual cubes.
+  fillColumns(world, height, (x, z, h) => {
+    const broad = 0.72 * noise(x * 0.016 + 19, z * 0.016 + 7)
+      + 0.28 * noise(x * 0.038 + 43, z * 0.038 + 29);
+    if (h <= SEA + 5) {
+      // Darker damp-sand shelves follow long, irregular tide bands. The dry
+      // upper beach stays predominantly gold so the coastline remains clear.
+      const damp = noise(x * 0.012 + 4, z * 0.012 + 51);
+      if ((x < 72 && h <= SEA + 2 && damp > 0.48)
+          || (x >= 84 && broad < 0.27)) return BLOCK.DIRT;
+      return BLOCK.SAND;
+    }
+    // Scrub settles in the lower bluff hollows; bare earth interrupts the
+    // climb; the highest ridge sheds soil and exposes broad slate caps.
+    if (h >= SEA + 17 && broad < 0.38) return BLOCK.STONE;
+    if (h <= SEA + 12 && broad > 0.67) return BLOCK.MOSS;
+    if (broad < 0.3) return BLOCK.DIRT;
+    return BLOCK.GRASS;
+  });
 
   // Landing craft in the surf — U-shaped stone hulls with the bow ramp open
   // toward the beach. Hard cover the moment you wade ashore.

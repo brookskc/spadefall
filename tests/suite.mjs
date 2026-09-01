@@ -53,8 +53,10 @@ import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
   stationCanSupply, stepFieldStation } from '../src/field-stations.js';
 import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
 import { masteryProgress } from '../src/mastery.js';
-import { rematchVotesNeeded, staySquadGroups, staySquadState,
+import { rematchVotesNeeded, staySquadGroups, staySquadState, voteKickVotesNeeded,
   validPingDirection } from '../src/social.js';
+import { callsignHasProfanity, callsignIssue, normalizeCallsign,
+  sanitizeCallsign } from '../src/callsign.js';
 import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
 import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
@@ -94,6 +96,7 @@ const lcg = seed => () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x
 function mapgenTests() {
   group('mapgen: determinism, bounds, spawn sanity');
   const hashes = [];
+  let beachSurfaceCounts = null;
   for (let m = 0; m < MAPS.length; m++) {
     const name = MAPS[m].name;
     const a = new VoxelWorld(scene());
@@ -108,6 +111,14 @@ function mapgenTests() {
     ok(`${name}: a different seed gives different terrain`, dataHash(c) !== dataHash(a));
     generateMap(a, 12345, m); // restore BASE for this map before reading it
     hashes.push(dataHash(a));
+    if (m === 1) {
+      beachSurfaceCounts = new Map();
+      for (let z = 24; z < SZ - 24; z++)
+        for (let x = 48; x < SX - 24; x++) {
+          const block = a.get(x, a.surface(x, z), z);
+          beachSurfaceCounts.set(block, (beachSurfaceCounts.get(block) ?? 0) + 1);
+        }
+    }
 
     for (const team of ['green', 'blue']) {
       const f = BASE[team].flag;
@@ -144,6 +155,10 @@ function mapgenTests() {
     ok(`${name}: every voxel indexes PALETTE`, bad === 0, `${bad} out of range`);
   }
   ok('all six maps are distinct', new Set(hashes).size === MAPS.length);
+  ok('BEACHHEAD exposes broad sand, earth, grass, scrub, and rock surface zones',
+    [BLOCK.SAND, BLOCK.DIRT, BLOCK.GRASS, BLOCK.MOSS, BLOCK.STONE]
+      .every(block => (beachSurfaceCounts?.get(block) ?? 0) >= 100),
+    JSON.stringify(Object.fromEntries(beachSurfaceCounts ?? [])));
   ok('mapsForMode(ctf) = [0,1,2]', JSON.stringify(mapsForMode('ctf')) === '[0,1,2]');
   ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
   ok('mapsForMode(tdm) covers every map',
@@ -941,6 +956,26 @@ function socialProgressionTests() {
     validClientMessage({ t: 'a', k: 'rematch' })
       && validServerMessage({ t: 'e', k: 'rematch', voters: ['p0', 'p2'], needed: 2 })
       && !validServerMessage({ t: 'e', k: 'rematch', voters: ['p0'], needed: 0 }));
+  ok('vote-kick needs three humans and a strict eligible-voter majority',
+    voteKickVotesNeeded(2) === 0 && voteKickVotesNeeded(3) === 2
+      && voteKickVotesNeeded(4) === 2 && voteKickVotesNeeded(10) === 5);
+  ok('vote-kick requests and live ballots are strictly bounded',
+    validClientMessage({ t: 'a', k: 'votekick', target: 3 })
+      && !validClientMessage({ t: 'a', k: 'votekick', target: -1 })
+      && validServerMessage({ t: 'e', k: 'votekick', active: true, target: 3,
+        name: 'Griefer', voters: ['p0', 'p2'], needed: 3, remaining: 24 })
+      && validServerMessage({ t: 'e', k: 'votekick', active: false })
+      && !validServerMessage({ t: 'e', k: 'votekick', active: false, target: 3 }));
+  ok('vote removals use a bounded explicit reason',
+    validServerMessage({ t: 'e', k: 'kick', reason: 'vote' })
+      && !validServerMessage({ t: 'e', k: 'kick', reason: 'host-dislikes-you' }));
+  ok('callsigns normalize consistently and reject obvious decorated profanity',
+    normalizeCallsign('  Àce!!  Unit  ') === 'Ace Unit'
+      && callsignIssue('') === 'empty'
+      && callsignHasProfanity('sh1t') && callsignHasProfanity('f-u-c-k')
+      && callsignHasProfanity('bad-f4gg0t-name') && callsignHasProfanity('fuckyou')
+      && !callsignHasProfanity('Scunthorpe')
+      && sanitizeCallsign('sh1t', 'Player') === 'Player');
   ok('mastery tier boundaries advance rank without weapon decoration',
     masteryProgress(999).tier.name === 'RECRUIT'
       && masteryProgress(1000).tier.name === 'FIELD'
@@ -954,11 +989,11 @@ function engagementFoundationTests() {
   group('phase zero: bounded diagnostics and production feature rollout');
   const defaults = parseEngagementFeatures('');
   const selected = parseEngagementFeatures(
-    '?features=FIRSTMINUTE,deathRecap&features=operations,notAFeature');
+    '?features=FIRSTMINUTE,deathRecap&features=operations,publicChat,notAFeature');
   ok('completed engagement features default on while experiments remain opt-in',
     DEFAULT_ENGAGEMENT_FEATURES.every(name => defaults[name] === true)
-      && !defaults.operations && !defaults.botDirector
-      && selected.firstMinute && selected.deathRecap && selected.operations
+      && !defaults.operations && !defaults.botDirector && !defaults.publicChat
+      && selected.firstMinute && selected.deathRecap && selected.operations && selected.publicChat
       && !('notAFeature' in selected));
 
   const clean = sanitizeEngagementEvent('match_start', {

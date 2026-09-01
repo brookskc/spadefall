@@ -1,7 +1,7 @@
 // main.js — boot, renderer, sky, lobby flow (solo / host / join), main loop.
 import * as THREE from 'three';
 import { Game } from './game.js';
-import { initAudio } from './audio.js';
+import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume } from './audio.js';
 import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
 import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
@@ -11,15 +11,19 @@ import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
 import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
   getMotionScale, getMotionLevel, setMotionLevel,
-  getColorMode, setColorMode } from './settings.js';
+  getColorMode, setColorMode, getMouseSensitivity, setMouseSensitivity,
+  getMasterVolume, setMasterVolume, getMuted, setMuted } from './settings.js';
 import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
 import { OPERATION_PLANS } from './operations.js';
+import { callsignIssue, normalizeCallsign } from './callsign.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
+if (engagementFeatures.publicChat)
+  document.documentElement.dataset.publicChat = 'on';
 if (engagementFeatures.selectedGoals)
   document.documentElement.dataset.selectedGoals = 'on';
 if (engagementFeatures.operations)
@@ -64,6 +68,9 @@ const game = new Game(scene, camera, renderer.domElement, { engagement, engageme
 window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
 game.player.vmRoot.visible = false; // hidden until first deploy
+applyMasterVolume(getMasterVolume());
+setAudioMuted(getMuted());
+if (engagementFeatures.publicChat) $('chatkey').textContent = 'T room chat · Y team · TAB scores';
 // Browser screenshot hook: force the sniper loadout and hold ADS without
 // relying on pointer lock, which automated browsers cannot grant reliably.
 if (params.has('scopeqa')) {
@@ -128,21 +135,29 @@ window.addEventListener('pagehide', e => {
 const CALLSIGNS = ['Ace', 'Deuce', 'Trey', 'Joker', 'King', 'Queen', 'Jack', 'Ten'];
 
 function rawName() {
-  return $('nameInput').value.trim().replace(/[^\w \-]/g, '').slice(0, 12);
+  return normalizeCallsign($('nameInput').value);
 }
 function callsign() {
   return rawName() || CALLSIGNS[Math.floor(Math.random() * CALLSIGNS.length)] + Math.floor(Math.random() * 90 + 10);
 }
-// No anonymous soldiers: every lobby action needs a callsign first, so the
-// name above your head means something to the people shooting at you.
-function requireName() {
-  if (rawName()) return true;
-  status('enter a callsign first — your squad needs to know you');
-  $('nameInput').classList.add('need');
-  $('nameInput').focus();
-  return false;
+function ensureCallsign() {
+  const issue = callsignIssue($('nameInput').value);
+  if (issue === 'profanity') {
+    status('choose a different callsign');
+    $('nameInput').classList.add('need');
+    $('nameInput').focus();
+    return false;
+  }
+  if (issue === 'empty') $('nameInput').value = callsign();
+  $('nameInput').value = rawName();
+  try { localStorage.setItem('tos.name', $('nameInput').value); } catch { /* best effort */ }
+  return true;
 }
-$('nameInput').addEventListener('input', () => $('nameInput').classList.remove('need'));
+try { $('nameInput').value = normalizeCallsign(localStorage.getItem('tos.name')); }
+catch { /* best effort */ }
+$('nameInput').addEventListener('input', () => {
+  $('nameInput').classList.remove('need');
+});
 function status(html) { $('lobbyStatus').innerHTML = html; }
 
 function inviteUrl() {
@@ -359,8 +374,9 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
   game.onHostSilent = () => startMigration(n);
   game.onVersion = v => rejectClientSession(n,
     `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
-  game.onKicked = () => rejectClientSession(n,
-    'connection closed after sustained invalid gameplay input');
+  game.onKicked = reason => rejectClientSession(n, reason === 'vote'
+    ? 'players in that room voted to remove you'
+    : 'connection closed after sustained invalid gameplay input');
   console.debug(`[mig] rejoined migrated room ${code} as client`);
   game.clientOnData(welcome); // migrated welcome: world and kit kept as-is
   $('roomcode').querySelector('b').textContent = code;
@@ -445,8 +461,9 @@ function adoptJoin(n, code) {
   game.onHostSilent = () => startMigration(n);
   game.onVersion = v => rejectClientSession(n,
     `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
-  game.onKicked = () => rejectClientSession(n,
-    'connection closed after sustained invalid gameplay input');
+  game.onKicked = reason => rejectClientSession(n, reason === 'vote'
+    ? 'players in that room voted to remove you'
+    : 'connection closed after sustained invalid gameplay input');
   n.handlers.onError = e => {
     // Join failed before the match started — reset so the lobby still works.
     if (net === n) { net = null; game.net = null; game.mode = 'solo'; }
@@ -469,40 +486,21 @@ function adoptJoin(n, code) {
   };
 }
 
-// --- host preferences: map + mode, remembered across visits ---
+// --- host preferences: mode-first, with maps always rotating ---
 // Applied whenever this player hosts — a private HOST or a quick-match slot
 // claim — never on migration promotion, so a replica keeps the room's
 // running map and mode. gameMode must be set BEFORE rebuild(), since flags
-// only exist in CTF. ?map=2&mode=tdm are test hooks that force the selects.
-const mapPref = $('mapPref'), modePref = $('modePref'), operationPref = $('operationPref');
+// only exist in CTF. ?map=2&mode=tdm remain QA hooks for the starting map.
+const modePref = $('modePref'), operationPref = $('operationPref');
 {
-  // The map list follows the mode: each map declares which modes it supports
-  // (DUNES is retired from the CTF rotation; CROWN and CALDERA are hill-first).
-  function rebuildMapPref(keep = mapPref.value) {
-    mapPref.innerHTML = '';
-    const rot = document.createElement('option');
-    rot.value = '-1'; rot.textContent = 'rotate';
-    mapPref.appendChild(rot);
-    MAPS.forEach((m, i) => {
-      if (!m.modes.includes(modePref.value)) return;
-      const o = document.createElement('option');
-      o.value = String(i); o.textContent = m.name;
-      mapPref.appendChild(o);
-    });
-    mapPref.value = [...mapPref.options].some(o => o.value === keep) ? keep : '-1';
-  }
-  modePref.value = localStorage.getItem('tos.mode') ?? 'ctf';
-  rebuildMapPref(localStorage.getItem('tos.map') ?? '-1');
-  const save = () => {
-    localStorage.setItem('tos.map', mapPref.value);
-    localStorage.setItem('tos.mode', modePref.value);
-  };
-  mapPref.addEventListener('change', save);
-  modePref.addEventListener('change', () => { rebuildMapPref(); save(); });
-  if (params.get('mode')) modePref.value = params.get('mode');
-  rebuildMapPref();
-  const pm = parseInt(params.get('map'), 10);
-  if (Number.isInteger(pm) && pm >= 0 && pm < MAPS.length) mapPref.value = String(pm);
+  const allowedModes = ['any', 'ctf', 'tdm', 'koth'];
+  let savedMode = 'any';
+  try { savedMode = localStorage.getItem('tos.mode') ?? savedMode; } catch { /* best effort */ }
+  modePref.value = allowedModes.includes(savedMode) ? savedMode : 'any';
+  if (allowedModes.includes(params.get('mode'))) modePref.value = params.get('mode');
+  modePref.addEventListener('change', () => {
+    try { localStorage.setItem('tos.mode', modePref.value); } catch { /* best effort */ }
+  });
 
   const renderOperationPref = () => {
     const enabled = engagementFeatures.operations && operationPref.value === 'operation';
@@ -722,6 +720,19 @@ choiceRow('colorOpts', getColorMode, setColorMode, value => {
   document.body.dataset.colors = value;
   game.applyColorMode();
 });
+choiceRow('mouseSensitivityOpts', () => Math.round(getMouseSensitivity() * 100),
+  setMouseSensitivity, () => { game.player.mouseSensitivity = getMouseSensitivity(); });
+choiceRow('masterVolumeOpts', () => Math.round(getMasterVolume() * 100),
+  setMasterVolume, () => { applyMasterVolume(getMasterVolume()); });
+
+addEventListener('keydown', e => {
+  if (e.code !== 'KeyM' || e.repeat || e.ctrlKey || e.metaKey || e.altKey
+      || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const next = !isAudioMuted();
+  setMuted(next);
+  setAudioMuted(next);
+  if (playing) game.hud.message(next ? 'AUDIO MUTED' : 'AUDIO ON', '#ffd97a');
+});
 
 // Reads the preference the picker above sets, or undefined if the player
 // never touched it ('auto') — this is what every fresh-join call site
@@ -735,8 +746,8 @@ function teamPref() {
   } catch { return undefined; }
 }
 
-// Returns the map index to start the new room on: the pinned map if it's
-// mode-compatible, else a random pick from the maps this mode supports.
+// Returns a random compatible starting map. The room advances through that
+// mode's map rotation after every match; there is no public one-map pin.
 function applyHostPrefs() {
   if (engagementFeatures.operations && operationPref.value === 'operation') {
     const requested = Number.parseInt(params.get('operation'), 10);
@@ -745,11 +756,12 @@ function applyHostPrefs() {
     return game.startOperation(plan).map;
   }
   game.clearOperation();
-  const mode = ['ctf', 'tdm', 'koth'].includes(modePref.value) ? modePref.value : 'ctf';
+  const modes = ['ctf', 'tdm', 'koth'];
+  const mode = modes.includes(modePref.value) ? modePref.value
+    : modes[Math.floor(Math.random() * modes.length)];
   game.gameMode = mode;
-  const v = parseInt(mapPref.value, 10);
-  game.mapLock = (v >= 0 && MAPS[v]?.modes.includes(mode)) ? v : null;
-  if (game.mapLock != null) return game.mapLock;
+  const qaMap = Number.parseInt(params.get('map'), 10);
+  if (Number.isInteger(qaMap) && MAPS[qaMap]?.modes.includes(mode)) return qaMap;
   const pool = MAPS.map((m, i) => i).filter(i => MAPS[i].modes.includes(mode));
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -757,7 +769,7 @@ function applyHostPrefs() {
 $('hostBtn').addEventListener('click', () => {
   if (net || matchmaking) return;
   migrationGen = 0; // a fresh room starts the baton count over
-  if (!requireName()) return;
+  if (!ensureCallsign()) return;
   engagementSource = 'host';
   engagement.record('lobby_action', { action: 'host' });
   initAudio();
@@ -782,7 +794,7 @@ $('joinBtn').addEventListener('click', () => {
   const code = $('codeInput').value.trim().toUpperCase();
   if (!/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(code)) return status('enter a valid room code');
   migrationGen = 0;
-  if (!requireName()) return;
+  if (!ensureCallsign()) return;
   engagementSource = 'join';
   engagement.record('lobby_action', { action: 'join' });
   initAudio();
@@ -825,7 +837,7 @@ function bailToMenu() {
 
 $('quickBtn').addEventListener('click', async () => {
   if (net || matchmaking) return;
-  if (!requireName()) return;
+  if (!ensureCallsign()) return;
   engagementSource = 'quick';
   engagement.record('lobby_action', { action: 'quick' });
   matchmaking = true;
@@ -974,7 +986,7 @@ async function joinFromBrowser(room) {
 
 $('browseBtn').addEventListener('click', () => {
   if (net || matchmaking || scanning) return;
-  if (!requireName()) return;
+  if (!ensureCallsign()) return;
   engagementSource = 'browse';
   engagement.record('lobby_action', { action: 'browse' });
   initAudio();
@@ -1030,11 +1042,45 @@ document.addEventListener('pointerlockerror', () => {
   enterPause();
 });
 
+function renderPlayerSafety() {
+  const root = $('safetyPlayers');
+  if (!root) return;
+  root.replaceChildren();
+  const candidates = game.voteKickCandidates();
+  const humans = game.mode === 'client' ? Math.max(1, game._rosterP?.size ?? 1)
+    : game.remote.size + 1;
+  const state = game.voteKickState();
+  const myKey = game.mode === 'client' ? 'p' + game.myIdx : 'p' + game._hostIdx;
+  if (!candidates.length) {
+    const empty = document.createElement('span');
+    empty.textContent = game.mode === 'solo' ? 'AVAILABLE IN MULTIPLAYER'
+      : 'NO ELIGIBLE PLAYERS';
+    root.appendChild(empty);
+    return;
+  }
+  for (const candidate of candidates) {
+    const button = document.createElement('button');
+    const selected = state.active && state.target === candidate.target;
+    const voted = selected && state.voters.includes(myKey);
+    button.textContent = selected
+      ? `${voted ? 'VOTED' : 'VOTE'} ${candidate.name} · ${state.voters.length}/${state.needed} · ${state.remaining}s`
+      : `VOTE OUT ${candidate.name}`;
+    button.disabled = humans < 3 || (state.active && !selected) || voted;
+    button.addEventListener('click', () => {
+      game.requestVoteKick(candidate.target);
+      renderPlayerSafety();
+    });
+    root.appendChild(button);
+  }
+}
+game.onVoteKickState = renderPlayerSafety;
+
 function enterPause() {
   // Drop all held inputs so nobody runs/shoots blind while the menu is up.
   game.player.keys = {};
   game.player.mouseDown = [false, false, false];
   game.hud.statsHide(); // a Tab keyup lost to the unlock can't strand it
+  renderPlayerSafety();
   if (matchmaking && !net) { // Esc mid-search, before any room adopted us
     searchCanceled = true;
     $('menu').classList.remove('searching');
@@ -1218,23 +1264,15 @@ function frame() {
   } else {
     // Slow cinematic orbit behind the menu.
     menuT += dt * 0.05;
-    // The backdrop follows the host prefs: a pinned map shows ONLY that map;
-    // "rotate" cycles just the maps the selected mode supports. The old
-    // carousel ignored both and cycled all six every 30s.
+    // The backdrop previews the same rotation a hosted room will use.
     if (carouselOn && game.mode === 'solo' && !net && !matchmaking) {
-      const pinned = parseInt(mapPref.value, 10);
-      const pool = MAPS.map((m, i) => i).filter(i => MAPS[i].modes.includes(modePref.value));
+      const pool = MAPS.map((m, i) => i).filter(i => modePref.value === 'any'
+        || MAPS[i].modes.includes(modePref.value));
       let next = -1;
-      if (pinned >= 0 && MAPS[pinned]?.modes.includes(modePref.value)) {
-        menuMapT = 0;                          // pinned: no rotation, ever
-        if (game.mapIndex !== pinned) next = pinned;
-      } else {
-        menuMapT += wallDt; // wall-clock: a stalled frame still counts its time
-        // Also jump when the mode switch stranded the backdrop off-pool.
-        if (menuMapT >= MENU_MAP_EVERY || !pool.includes(game.mapIndex)) {
-          menuMapT = 0;
-          next = pool[(pool.indexOf(game.mapIndex) + 1) % pool.length];
-        }
+      menuMapT += wallDt; // wall-clock: a stalled frame still counts its time
+      if (menuMapT >= MENU_MAP_EVERY || !pool.includes(game.mapIndex)) {
+        menuMapT = 0;
+        next = pool[(pool.indexOf(game.mapIndex) + 1) % pool.length];
       }
       if (next >= 0) {
         game.rebuild(Math.floor(Math.random() * 1e9), next);

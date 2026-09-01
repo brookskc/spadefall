@@ -24,7 +24,7 @@ Terrain changes remain in the match state. Late joiners receive the current batt
 
 Each battlefield also has two neutral field caches built from ordinary voxels. Hold one uncontested for two seconds to replenish construction blocks and a grenade for nearby teammates. Once used, the cache takes 30 seconds to recharge.
 
-After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players can vote for an immediate rematch; otherwise the room continues through its map rotation.
+After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players can vote to skip the intermission; the room still advances through its map rotation.
 
 ## Loadouts and tools
 
@@ -60,7 +60,9 @@ Each map has its own terrain generator, atmosphere, sight lines, water layout, a
 
 ## Multiplayer
 
-Spadefall uses a host-authoritative WebRTC room. The host validates combat, movement, objectives, terrain edits, tactical pings, and rematch votes; other players connect directly through PeerJS. Public matchmaking scans a fixed pool of quick-match rooms, while private rooms have copyable invite links and four-character codes. If a host leaves, another player can take over from the replicated match state.
+Spadefall uses a host-authoritative WebRTC room. The host validates combat, movement, objectives, terrain edits, tactical pings, and votes; other players connect directly through PeerJS. Public matchmaking scans a fixed pool of quick-match rooms, while private rooms have copyable invite links and four-character codes. If a host leaves, another player can take over from the replicated match state. With at least three humans, players can call a short, majority vote to remove a non-host cheater or griefer. Because the host owns the simulation, the safe response to a malicious host is to leave that room.
+
+Room-wide chat is disabled by default; `Y` opens transient team chat. Callsigns are normalized and checked for profanity on the joining browser and again by the room host. The current [privacy notice, terms, and community rules](legal.html) describe what the shipped peer-to-peer game stores and shares.
 
 ## Controls
 
@@ -81,7 +83,8 @@ Spadefall uses a host-authoritative WebRTC room. The host validates combat, move
 | `F` | Use the available streak ability |
 | `G` | Place a team-only tactical ping |
 | `Tab` | Scoreboard |
-| `T` / `Y` | Room chat / team chat |
+| `Y` | Team chat |
+| `M` | Mute or unmute all game audio |
 
 ## Display settings
 
@@ -91,6 +94,7 @@ Low, Medium, and High graphics presets adjust render resolution, antialiasing, a
 - Reduced camera motion
 - An accessible orange and blue team palette
 - Optional FPS and performance counters
+- Mouse sensitivity and master volume
 
 ## How it is built
 

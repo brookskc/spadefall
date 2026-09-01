@@ -40,8 +40,9 @@ const executablePath = process.env.SPADEFALL_BROWSER
 const browser = await chromium.launch({ headless: true, executablePath });
 const host = await browser.newPage();
 const guest = await browser.newPage();
+const target = await browser.newPage();
 const faults = [];
-for (const [name, page] of [['host', host], ['guest', guest]]) {
+for (const [name, page] of [['host', host], ['guest', guest], ['target', target]]) {
   page.on('pageerror', error => faults.push(`${name}: ${error.message}`));
   page.on('response', response => {
     const path = new URL(response.url()).pathname;
@@ -141,8 +142,33 @@ try {
     'damage direction uses a stepped voxel silhouette');
   assert.equal(damageArrowStyle.backgroundImage, 'none');
   assert.equal(damageArrowStyle.borderRadius, '0px');
+
+  const chatDefault = await guest.evaluate(() => {
+    window.__game.chat.open('all');
+    const allOpen = window.__game.chat.isOpen;
+    window.__game.chat.open('team');
+    const teamOpen = window.__game.chat.isOpen;
+    window.__game.chat.close();
+    return { allOpen, teamOpen };
+  });
+  assert.deepEqual(chatDefault, { allOpen: false, teamOpen: true },
+    'public chat is off while team chat remains available');
+
+  await target.goto(`${base}&mp=join`, { waitUntil: 'domcontentloaded' });
+  await target.waitForFunction(() => window.__game?.myId && window.__game?.myIdx != null,
+    null, { timeout: 25_000 });
+  await host.waitForFunction(() => window.__game?.remote?.size === 2,
+    null, { timeout: 10_000 });
+  const targetIndex = await target.evaluate(() => window.__game.myIdx);
+  assert.equal(await host.evaluate(index => window.__game.requestVoteKick(index), targetIndex), true);
+  await guest.evaluate(index => window.__game.requestVoteKick(index), targetIndex);
+  await target.waitForFunction(() => document.getElementById('lobbyStatus')?.textContent
+    ?.includes('voted to remove you'), null, { timeout: 8_000 });
+  await host.waitForFunction(() => window.__game?.remote?.size === 1,
+    null, { timeout: 8_000 });
+
   assert.deepEqual(faults, [], faults.join('\n'));
-  console.log('two-browser multiplayer: replication and live display settings passed');
+  console.log('multiplayer browsers: replication, live settings, chat policy, and vote-kick passed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

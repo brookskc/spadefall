@@ -70,6 +70,8 @@ export const HUD_SCALES = ['80', '100', '120'];
 export const HUD_OPACITIES = ['75', '100'];
 export const MOTION_LEVELS = ['full', 'reduced'];
 export const COLOR_MODES = ['standard', 'accessible'];
+export const MOUSE_SENSITIVITIES = ['60', '80', '100', '120', '140'];
+export const MASTER_VOLUMES = ['0', '50', '75', '100'];
 const TEAM_PALETTES = {
   standard: { green: 0x4a9e4a, blue: 0x4a6cd4 },
   // Okabe-Ito inspired orange/sky pairing: distinct under the common red/
@@ -86,5 +88,15 @@ export const getMotionLevel = () => choice('motion', MOTION_LEVELS, 'full');
 export const setMotionLevel = value => saveChoice('motion', value, MOTION_LEVELS);
 export const getColorMode = () => choice('colors', COLOR_MODES, 'standard');
 export const setColorMode = value => saveChoice('colors', value, COLOR_MODES);
+export const getMouseSensitivity = () => Number(choice('mouseSensitivity', MOUSE_SENSITIVITIES, '100')) / 100;
+export const setMouseSensitivity = value => saveChoice('mouseSensitivity', value, MOUSE_SENSITIVITIES);
+export const getMasterVolume = () => Number(choice('masterVolume', MASTER_VOLUMES, '100')) / 100;
+export const setMasterVolume = value => saveChoice('masterVolume', value, MASTER_VOLUMES);
+export function getMuted() {
+  try { return localStorage.getItem('tos.muted') === 'on'; } catch { return false; }
+}
+export function setMuted(on) {
+  try { localStorage.setItem('tos.muted', on ? 'on' : 'off'); } catch { /* best effort */ }
+}
 export const teamHex = (team, mode = getColorMode()) =>
   TEAM_PALETTES[mode]?.[team] ?? TEAM_PALETTES.standard[team] ?? 0xffffff;

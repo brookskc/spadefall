@@ -2,6 +2,19 @@
 // compact sine/triangle bodies keep it tactile and stylized without drifting
 // into either realistic sample-pack foley or thin chiptune square-wave chirps.
 let ctx = null, master = null;
+let masterLevel = 1, muted = false;
+const applyMaster = () => {
+  if (master) master.gain.value = 0.48 * masterLevel * (muted ? 0 : 1);
+};
+
+export function setMasterVolume(value) {
+  const n = Number(value);
+  masterLevel = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1;
+  applyMaster();
+}
+
+export function setAudioMuted(value) { muted = !!value; applyMaster(); }
+export function isAudioMuted() { return muted; }
 
 export function initAudio() {
   if (ctx) {
@@ -12,7 +25,7 @@ export function initAudio() {
   if (!AudioCtor) return;
   ctx = new AudioCtor();
   master = ctx.createGain();
-  master.gain.value = 0.48;
+  applyMaster();
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = -9;
   limiter.knee.value = 2;

@@ -452,6 +452,15 @@ export class Net {
     const c = this.conns.get(id);
     return this._sendConn(c, obj);
   }
+  kick(id, delay = 250) {
+    const c = this.conns?.get(id);
+    if (!c) return false;
+    setTimeout(() => {
+      if (this.conns?.get(id) !== c) return;
+      try { c.close(); } catch { /* already closing */ }
+    }, Math.max(0, Math.min(1000, Number(delay) || 0)));
+    return true;
+  }
   send(obj) { // client -> host
     return this._sendConn(this.conn, obj);
   }

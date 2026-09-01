@@ -7,7 +7,7 @@ import { validDeathRecap } from './death-recap.js';
 import { validOperationRow } from './operations.js';
 import { validFieldworkKind } from './selected-goals.js';
 
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -68,6 +68,7 @@ export function validClientMessage(d) {
     chat: ['t', 'k', 'text', 'scope'], class: ['t', 'k', 'cls'],
     strike: ['t', 'k', 'n', 'x', 'z', 'yaw'], overcharge: ['t', 'k', 'n'],
     mark: ['t', 'k', 'd'], rematch: ['t', 'k'], squad: ['t', 'k'],
+    votekick: ['t', 'k', 'target'],
     resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n'],
     shoot: ['t', 'k', 'n', 'd', 'o'], dig: ['t', 'k', 'n', 'd', 'o'],
     place: ['t', 'k', 'n', 'd', 'o'], nade: ['t', 'k', 'n', 'd', 'o'],
@@ -81,6 +82,7 @@ export function validClientMessage(d) {
   if (d.k === 'mark') return validPingDirection(d.d);
   if (d.k === 'rematch') return true;
   if (d.k === 'squad') return true;
+  if (d.k === 'votekick') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
   if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
   if (d.k === 'reload') return true;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)
@@ -165,6 +167,7 @@ function validEvent(d) {
     chat: ['t', 'k', 'name', 'text', 'team', 'scope'],
     mark: ['t', 'k', 'id', 'name', 'team', 'x', 'y', 'z', 'kind'],
     rematch: ['t', 'k', 'voters', 'needed'], squad: ['t', 'k', 'voters'],
+    votekick: ['t', 'k', 'active', 'target', 'name', 'voters', 'needed', 'remaining'],
     spawn: ['t', 'k', 'x', 'y', 'z', 'yaw'], corr: ['t', 'k', 'x', 'y', 'z'],
     kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
     end: ['t', 'k', 'winner', 'story', 'op'],
@@ -217,9 +220,17 @@ function validEvent(d) {
     case 'squad': return Array.isArray(d.voters) && d.voters.length <= 10
       && d.voters.every(v => shortString(v, 16))
       && new Set(d.voters).size === d.voters.length;
+    case 'votekick': return d.active === false
+      ? exactKeys(d, ['t', 'k', 'active'], ['t', 'k', 'active'])
+      : d.active === true && Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000
+        && shortString(d.name, 12) && Array.isArray(d.voters) && d.voters.length <= 10
+        && d.voters.every(v => shortString(v, 16))
+        && new Set(d.voters).size === d.voters.length
+        && Number.isInteger(d.needed) && d.needed >= 2 && d.needed <= 9
+        && Number.isInteger(d.remaining) && d.remaining >= 0 && d.remaining <= 30;
     case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw));
     case 'corr': return [d.x, d.y, d.z].every(finite);
-    case 'kick': return d.reason === 'integrity';
+    case 'kick': return d.reason === 'integrity' || d.reason === 'vote';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
       && d.rows.every(r => Array.isArray(r) && r.length === 8 && shortString(r[0], 16)
         && shortString(r[1], 64) && team(r[2]) && r.slice(3).every(finite));

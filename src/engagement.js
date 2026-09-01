@@ -16,6 +16,7 @@ export const ENGAGEMENT_FEATURES = Object.freeze([
   'momentumBalance',
   'teamBalance',
   'botDirector',
+  'publicChat',
 ]);
 
 // These features have completed their isolated rollout and are now part of

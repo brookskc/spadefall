@@ -29,6 +29,71 @@ export const SERVER_MESSAGE_BYTES = 2 * 1024 * 1024;
 export const SNAPSHOT_MESSAGE_BYTES = 64 * 1024;
 export const EVENT_MESSAGE_BYTES = 128 * 1024;
 
+// --- ICE configuration ------------------------------------------------------
+// Direct browser-to-browser still wins wherever it can: STUN is tried first
+// and the relay only carries players who cannot connect any other way —
+// symmetric NAT and locked-down corporate networks, which is exactly where a
+// browser game played on a work laptop lands. Credentials are minted by a
+// Worker so the long-lived TURN API token never ships to a client.
+//
+// Net.host and Net.join are synchronous factories, so the fetch is primed once
+// at boot and read from cache when a peer is built. A cold or failed cache is
+// not fatal: peers fall back to PeerJS's default STUN-only configuration,
+// which is what every build before this one shipped.
+const ICE_ENDPOINT = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
+  .get('ice') || 'https://spadefall-turn.REPLACE-ME.workers.dev/ice';
+const ICE_CACHE_MS = 60 * 60 * 1000;
+let iceServers = null, iceExpiresAt = 0, icePending = null;
+
+// Validate what the credential service returned before handing it to
+// RTCPeerConnection, which throws on a malformed entry. Cloudflare returns an
+// array; a bare object is accepted too so a different provider can be dropped
+// in without touching call sites.
+export function usableIceServers(payload) {
+  const list = payload?.iceServers;
+  const entries = Array.isArray(list) ? list : isRecord(list) ? [list] : [];
+  const clean = [];
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    const urls = typeof entry.urls === 'string' ? [entry.urls]
+      : Array.isArray(entry.urls) ? entry.urls.filter(u => typeof u === 'string' && u) : [];
+    if (!urls.length) continue;
+    const server = { urls };
+    if (typeof entry.username === 'string') server.username = entry.username;
+    if (typeof entry.credential === 'string') server.credential = entry.credential;
+    clean.push(server);
+  }
+  return clean;
+}
+
+// Options for every Peer we construct. undefined means "PeerJS defaults",
+// which is the pre-TURN behaviour.
+export const peerOptions = () => iceServers ? { config: { iceServers } } : undefined;
+
+export function resetIce() { iceServers = null; iceExpiresAt = 0; icePending = null; }
+
+// Fetch relay credentials once and cache them. Never throws: every failure
+// path — offline, CORS, a 502 from the Worker — resolves to an empty list and
+// leaves the game on STUN only.
+export function primeIce(opts = {}) {
+  const endpoint = opts.endpoint ?? ICE_ENDPOINT;
+  const doFetch = opts.fetch ?? (typeof fetch === 'function' ? fetch : null);
+  const now = opts.now ?? Date.now();
+  if (!doFetch || !endpoint || endpoint.includes('REPLACE-ME')) return Promise.resolve([]);
+  if (iceServers && now < iceExpiresAt) return Promise.resolve(iceServers);
+  if (icePending) return icePending;
+  icePending = (async () => {
+    try {
+      const res = await doFetch(endpoint, { headers: { accept: 'application/json' } });
+      if (!res.ok) return [];
+      const clean = usableIceServers(await res.json());
+      if (clean.length) { iceServers = clean; iceExpiresAt = now + ICE_CACHE_MS; }
+      return clean;
+    } catch { return []; } finally { icePending = null; }
+  })();
+  return icePending;
+}
+
 export function wireBytes(obj) {
   try { return new TextEncoder().encode(JSON.stringify(obj)).byteLength; }
   catch { return 0; }
@@ -151,7 +216,7 @@ export class Net {
     net.id = 'HOST';
     net.conns = new Map(); // peerId -> DataConnection
     net.handlers = handlers;
-    net.peer = new Peer(PREFIX + code);
+    net.peer = new Peer(PREFIX + code, peerOptions());
     window.__net = net; // debug handle
     net.peer.on('open', () => net.handlers.onOpen?.());
     net.peer.on('error', e => net.handlers.onError?.(e));
@@ -207,7 +272,7 @@ export class Net {
     const net = new Net();
     net.isHost = false;
     net.handlers = handlers;
-    net.peer = new Peer();
+    net.peer = new Peer(peerOptions());
     window.__net = net; // debug handle
     net.peer.on('error', e => net.handlers.onError?.(e));
     net.peer.on('open', () => {
@@ -360,7 +425,7 @@ export class Net {
   // leave. The deadline is checked only before each SEQUENTIAL step (the
   // concurrent probe phase is already bounded by timeoutMs on its own).
   static async quickScan(name, team, timeoutMs = 9000, overallMs = 20000) {
-    const guest = new Peer();
+    const guest = new Peer(peerOptions());
     const ready = new Promise((res, rej) => {
       guest.on('open', res);
       guest.on('error', rej); // pre-open error = broker unreachable
@@ -434,7 +499,7 @@ export class Net {
   static async roomScan(page = 0, timeoutMs = 9000) {
     const slots = publicPageSlots(page);
     if (!slots.length) return { kind: 'invalid-page' };
-    const guest = new Peer();
+    const guest = new Peer(peerOptions());
     const ready = new Promise((res, rej) => {
       guest.on('open', res);
       guest.on('error', rej);

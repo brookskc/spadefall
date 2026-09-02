@@ -4,7 +4,7 @@ import { Game } from './game.js';
 import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume } from './audio.js';
 import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
-import { Net, makeCode, PUBLIC_PAGES, PUBLIC_SLOTS, slotCode } from './net.js';
+import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { BASE_FOV, GUN_CLASSES } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
@@ -33,8 +33,14 @@ engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
   protocol: PROTOCOL_VERSION, startedAt: new Date().toISOString(), faults: [],
   metrics: null, soakCycles: 0, features: engagementFeatures,
-  engagement: engagement.snapshot(),
+  engagement: engagement.snapshot(), iceServers: 0,
 };
+
+// Warm the relay credentials while the player is still reading the menu, so
+// the first connection does not wait on a round trip. Failure is silent by
+// design: without a relay the game still connects for everyone whose network
+// allows a direct route, which is most of them.
+primeIce().then(list => { diagnostics.iceServers = list.length; });
 const rememberFault = (kind, value) => {
   diagnostics.faults.push({ kind, at: new Date().toISOString(),
     message: String(value?.message ?? value ?? 'unknown').slice(0, 500) });

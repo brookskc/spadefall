@@ -21,9 +21,9 @@ import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, claimPeerChannel, Net, PUBLIC_PAGES, PUBLIC_ROOMS,
-  PUBLIC_SLOTS, publicPageSlots, shouldSend, slotCode, wireBytes,
-  withinWireBudget } from '../src/net.js';
+import { allowInbound, claimPeerChannel, Net, peerOptions, primeIce, PUBLIC_PAGES,
+  PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce, shouldSend, slotCode,
+  usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -2121,7 +2121,53 @@ function releasePhaseTests() {
     `${lifecycleScene.children.length - baselineChildren} leaked scene nodes`);
 }
 
+// ---------------------------------------------------------------------------
+async function iceConfigTests() {
+  group('ice configuration');
+  const cloudflare = { iceServers: [{
+    urls: ['stun:stun.cloudflare.com:3478', 'turn:turn.cloudflare.com:3478?transport=udp',
+      'turns:turn.cloudflare.com:5349?transport=tcp'],
+    username: 'user', credential: 'secret' }] };
+
+  ok('a cloudflare credential payload validates into one server entry',
+    usableIceServers(cloudflare).length === 1
+      && usableIceServers(cloudflare)[0].urls.length === 3
+      && usableIceServers(cloudflare)[0].credential === 'secret');
+  ok('a single object payload is accepted like a one-entry list',
+    usableIceServers({ iceServers: { urls: 'turn:turn.cloudflare.com:3478',
+      username: 'u', credential: 'c' } }).length === 1);
+  ok('entries without a usable url are dropped before reaching WebRTC',
+    usableIceServers({ iceServers: [{ username: 'u' }, { urls: [] }, null, 'nope',
+      { urls: [7] }] }).length === 0);
+  ok('a junk payload yields no servers',
+    usableIceServers(null).length === 0 && usableIceServers({}).length === 0);
+
+  resetIce();
+  ok('peers take PeerJS defaults until credentials arrive', peerOptions() === undefined);
+
+  let calls = 0;
+  const stub = async () => { calls++; return { ok: true, json: async () => cloudflare }; };
+  const primed = await primeIce({ endpoint: 'https://ice.test/ice', fetch: stub, now: 1000 });
+  ok('primed credentials reach peer options',
+    primed.length === 1 && peerOptions()?.config?.iceServers?.length === 1);
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: stub, now: 2000 });
+  ok('a warm cache is not refetched', calls === 1);
+
+  resetIce();
+  const offline = async () => { throw new Error('offline'); };
+  ok('a failed credential fetch falls back to stun rather than throwing',
+    (await primeIce({ endpoint: 'https://ice.test/ice', fetch: offline, now: 1000 })).length === 0
+      && peerOptions() === undefined);
+
+  resetIce();
+  const refused = async () => ({ ok: false, json: async () => ({}) });
+  ok('a non-200 from the credential worker yields no servers',
+    (await primeIce({ endpoint: 'https://ice.test/ice', fetch: refused, now: 1000 })).length === 0);
+  resetIce();
+}
+
 export async function run() {
+  await iceConfigTests();
   collapseTests();
   wireTests();
   networkSyncTests();

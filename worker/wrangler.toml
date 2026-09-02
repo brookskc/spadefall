@@ -1,0 +1,7 @@
+name = "spadefall-turn"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# TURN_API_TOKEN is deliberately absent: it is a secret, set once with
+#   wrangler secret put TURN_API_TOKEN
+# so it never lands in this file or in git.

@@ -13,8 +13,14 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 // Slots are scanned one page at a time: quiet hours cost one 8-slot probe,
 // peak hours spill into the next page instead of bouncing players off a cap.
 export const PUBLIC_SLOTS = 8;   // slots per scan page
-export const PUBLIC_PAGES = 2;   // 16 slots = 128 concurrent quick-matchers
+export const PUBLIC_PAGES = 8;   // 64 rooms = 512–640 concurrent quick-matchers
+export const PUBLIC_ROOMS = PUBLIC_SLOTS * PUBLIC_PAGES;
 export const slotCode = i => 'PUB' + i;
+export const publicPageSlots = page => {
+  if (!Number.isInteger(page) || page < 0 || page >= PUBLIC_PAGES) return [];
+  const start = page * PUBLIC_SLOTS;
+  return Array.from({ length: PUBLIC_SLOTS }, (_, i) => start + i);
+};
 export const STATE_BUFFER_LIMIT = 64 * 1024;
 export const INBOUND_RATE = 120;
 export const INBOUND_BURST = 180;
@@ -367,9 +373,8 @@ export class Net {
       // earlier room is full, so ordinary load costs one cheap page.
       for (let page = 0; page < PUBLIC_PAGES; page++) {
         if (outOfTime()) break;
-        const results = await Promise.all(
-          Array.from({ length: PUBLIC_SLOTS }, (_, i) => page * PUBLIC_SLOTS + i)
-            .map(i => Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
+        const results = await Promise.all(publicPageSlots(page)
+          .map(i => Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
         const open = [], dead = [];
         for (const { slot, p } of results) {
           console.debug(`[qm] probe ${slotCode(slot)} -> ${p.kind}${p.kind === 'room' ? ` ${p.humans}/${p.max}` : ''}`);
@@ -417,30 +422,33 @@ export class Net {
     }
   }
 
-  // Room browser: probe EVERY public slot over one anon guest peer and report
-  // what's live, fullest first. Unlike quickScan this never joins and never
-  // claims — the guest peer stays open so the caller can knock on the room
-  // the player picks (and must destroy it if nobody picks anything).
+  // Room browser: probe one eight-room page over one anon guest peer and
+  // report what's live, fullest first. Unlike quickScan this never joins and
+  // never claims — the guest peer stays open so the caller can knock on the
+  // room the player picks (and must destroy it if nobody picks anything).
+  // Keeping this paged matters now that the public pool has 64 rooms: opening
+  // a temporary RTC connection to every room just to draw a list would turn
+  // discovery into the most expensive networking action in the game.
   // Resolves { kind: 'rooms', guest, rooms: [{ slot, humans, max, map, mode,
-  // g, b, names }] } or { kind: 'down' }.
-  static async roomScan(timeoutMs = 9000) {
+  // g, b, names }], page, pages } or { kind: 'down' }.
+  static async roomScan(page = 0, timeoutMs = 9000) {
+    const slots = publicPageSlots(page);
+    if (!slots.length) return { kind: 'invalid-page' };
     const guest = new Peer();
     const ready = new Promise((res, rej) => {
       guest.on('open', res);
       guest.on('error', rej);
     });
     try { await ready; } catch { guest.destroy(); return { kind: 'down' }; }
-    const total = PUBLIC_SLOTS * PUBLIC_PAGES;
-    const results = await Promise.all(
-      Array.from({ length: total }, (_, i) =>
-        Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
+    const results = await Promise.all(slots.map(i =>
+      Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
     const rooms = [];
     for (const { slot, p } of results) {
       if (p.kind === 'room') rooms.push({ slot, ...p });
       else if (p.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
     }
     rooms.sort((a, b) => b.humans - a.humans || a.slot - b.slot);
-    return { kind: 'rooms', guest, rooms };
+    return { kind: 'rooms', guest, rooms, page, pages: PUBLIC_PAGES };
   }
 
   get clientIds() { return [...this.conns.keys()]; }

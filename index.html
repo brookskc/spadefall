@@ -96,6 +96,8 @@
   .brow .bjoin { font-size:11px; letter-spacing:2px; color:#ffd97a; opacity:.8; }
   .bfoot { margin-top:22px; display:flex; gap:28px; font-size:13px;
     letter-spacing:2px; opacity:.7; }
+  .bfoot .disabled { opacity:.25; pointer-events:none; }
+  #browsePage { opacity:.55; font-variant-numeric:tabular-nums; }
   .private input { width:104px; background:transparent; border:none;
     border-bottom:1px solid rgba(255,255,255,.4); color:#fff; padding:2px 4px;
     font-size:13px; letter-spacing:2px; text-transform:uppercase; text-align:center;
@@ -906,6 +908,9 @@
     <div id="browsestatus">scanning…</div>
     <div id="browselist"></div>
     <div class="bfoot">
+      <span class="plink disabled" id="browsePrev">PREVIOUS</span>
+      <span id="browsePage">1 / 8</span>
+      <span class="plink" id="browseNext">NEXT</span>
       <span class="plink" id="browseRefresh">RESCAN</span>
       <span class="plink" id="browseBack">BACK</span>
     </div>

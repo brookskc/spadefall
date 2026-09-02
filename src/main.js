@@ -4,7 +4,7 @@ import { Game } from './game.js';
 import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume } from './audio.js';
 import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
-import { Net, makeCode, PUBLIC_SLOTS, slotCode } from './net.js';
+import { Net, makeCode, PUBLIC_PAGES, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { BASE_FOV, GUN_CLASSES } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
@@ -888,12 +888,20 @@ $('quickBtn').addEventListener('click', async () => {
   } finally { matchmaking = false; }
 });
 
-// --- room browser: scan every public slot and list what answers ---
+// --- room browser: scan one eight-room page and list what answers ---
 // Unlike quick match this shows the player what's live and lets them pick.
-// The scan's guest peer stays open between scans so a row click can knock
-// immediately; it's destroyed on BACK or consumed by the join.
+// Pagination prevents the expanded 64-room pool from creating 64 temporary
+// peer connections at once. The page's guest peer stays open so a row click
+// can knock immediately; it is destroyed on navigation/BACK or consumed by
+// the join.
 const browserEl = $('browser'), browseSt = $('browsestatus'), browseListEl = $('browselist');
-let browseGuest = null, scanning = false;
+let browseGuest = null, scanning = false, browsePage = 0;
+
+function updateBrowsePager() {
+  $('browsePage').textContent = `${browsePage + 1} / ${PUBLIC_PAGES}`;
+  $('browsePrev').classList.toggle('disabled', browsePage === 0);
+  $('browseNext').classList.toggle('disabled', browsePage === PUBLIC_PAGES - 1);
+}
 
 function roomRow(room) {
   const row = document.createElement('div');
@@ -931,19 +939,26 @@ async function scanRooms() {
   scanning = true;
   browseGuest?.destroy(); browseGuest = null;
   browseListEl.innerHTML = '';
-  browseSt.textContent = 'scanning public rooms…';
+  updateBrowsePager();
+  browseSt.textContent = `scanning rooms ${browsePage * PUBLIC_SLOTS + 1}–${(browsePage + 1) * PUBLIC_SLOTS}…`;
   try {
-    const r = await Net.roomScan(qmTimeout);
+    const r = await Net.roomScan(browsePage, qmTimeout);
     if (r.kind === 'down') {
       browseSt.textContent = 'cannot reach the matchmaking service — check your connection';
       return;
     }
-    browseGuest = r.guest; // kept warm for the join knock
-    if (!r.rooms.length) {
-      browseSt.innerHTML = 'no public rooms right now — hit <b>QUICK MATCH</b> and one starts with you as host';
+    if (r.kind !== 'rooms') {
+      browseSt.textContent = 'that room page is unavailable';
       return;
     }
-    browseSt.textContent = `${r.rooms.length} room${r.rooms.length === 1 ? '' : 's'} online — click one to join`;
+    browseGuest = r.guest; // kept warm for the join knock
+    if (!r.rooms.length) {
+      browseSt.innerHTML = browsePage === 0
+        ? 'no public rooms right now — hit <b>QUICK MATCH</b> and one starts with you as host'
+        : `no active rooms on page ${browsePage + 1}`;
+      return;
+    }
+    browseSt.textContent = `${r.rooms.length} room${r.rooms.length === 1 ? '' : 's'} online on page ${browsePage + 1} — click one to join`;
     for (const room of r.rooms) browseListEl.appendChild(roomRow(room));
   } finally { scanning = false; }
 }
@@ -990,6 +1005,7 @@ $('browseBtn').addEventListener('click', () => {
   engagementSource = 'browse';
   engagement.record('lobby_action', { action: 'browse' });
   initAudio();
+  browsePage = 0;
   $('menu').classList.add('hidden');
   browserEl.classList.remove('hidden');
   scanRooms();
@@ -998,6 +1014,16 @@ $('browseBack').addEventListener('click', () => {
   browserEl.classList.add('hidden');
   $('menu').classList.remove('hidden');
   browseGuest?.destroy(); browseGuest = null;
+});
+$('browsePrev').addEventListener('click', () => {
+  if (scanning || browsePage <= 0) return;
+  browsePage--;
+  scanRooms();
+});
+$('browseNext').addEventListener('click', () => {
+  if (scanning || browsePage >= PUBLIC_PAGES - 1) return;
+  browsePage++;
+  scanRooms();
 });
 $('browseRefresh').addEventListener('click', () => scanRooms());
 

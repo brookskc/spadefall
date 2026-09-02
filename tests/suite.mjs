@@ -21,7 +21,8 @@ import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, claimPeerChannel, Net, shouldSend, wireBytes,
+import { allowInbound, claimPeerChannel, Net, PUBLIC_PAGES, PUBLIC_ROOMS,
+  PUBLIC_SLOTS, publicPageSlots, shouldSend, slotCode, wireBytes,
   withinWireBudget } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
@@ -369,6 +370,17 @@ function audioPaletteTests() {
 // ---------------------------------------------------------------------------
 function multiplayerRuleTests() {
   group('multiplayer authority rules');
+  ok('public matchmaking exposes sixty-four rooms in eight-room probe pages',
+    PUBLIC_SLOTS === 8 && PUBLIC_PAGES === 8 && PUBLIC_ROOMS === 64);
+  const publicSlots = Array.from({ length: PUBLIC_PAGES }, (_, page) =>
+    publicPageSlots(page)).flat();
+  ok('public room pages cover every slot exactly once',
+    publicSlots.length === PUBLIC_ROOMS
+      && new Set(publicSlots).size === PUBLIC_ROOMS
+      && publicSlots[0] === 0 && publicSlots.at(-1) === 63
+      && slotCode(publicSlots.at(-1)) === 'PUB63');
+  ok('invalid public room pages cannot fan out probes',
+    publicPageSlots(-1).length === 0 && publicPageSlots(PUBLIC_PAGES).length === 0);
   ok('preferred team is honored while it has capacity',
     chooseTeam('blue', { green: 3, blue: 4 }) === 'blue');
   ok('a full preferred team falls back to the open side',

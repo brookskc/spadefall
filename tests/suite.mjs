@@ -21,9 +21,9 @@ import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, claimPeerChannel, Net, peerOptions, primeIce, probeErrorKind,
-  PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce, shouldSend,
-  slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
+import { allowInbound, claimErrorKind, claimPeerChannel, Net, peerOptions, primeIce,
+  probeErrorKind, PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce,
+  shouldSend, slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -2177,6 +2177,17 @@ async function iceConfigTests() {
       .every(t => probeErrorKind(t) === 'down'));
   ok('peer-unavailable stays distinguishable so a miss can be attributed',
     probeErrorKind('peer-unavailable') === 'unavailable');
+
+  // Regression: claiming had the same asymmetry as probing. A slot that would
+  // not take — a lost race, an ICE failure, or a claim that simply timed out —
+  // reported the whole matchmaking service as unreachable instead of moving on.
+  ok('a claim timing out or failing on ICE frees the search to try the next slot',
+    claimErrorKind('webrtc') === 'busy' && claimErrorKind('anything-else') === 'busy');
+  ok('losing the race for an id is still reported as taken, not as an outage',
+    claimErrorKind('unavailable-id') === 'taken');
+  ok('only signaling transport failures abandon the whole search',
+    ['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']
+      .every(t => claimErrorKind(t) === 'down'));
 }
 
 export async function run() {

@@ -167,6 +167,15 @@ export const probeErrorKind = type =>
   type === 'peer-unavailable' ? 'unavailable'
     : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'dead';
 
+// Claiming a slot has the same failure asymmetry as probing it. Losing a race
+// for one id, or an ICE failure while registering it, says nothing about
+// whether the matchmaking service is reachable — the next slot may claim
+// instantly. Only a signaling transport failure justifies giving up on the
+// whole search.
+export const claimErrorKind = type =>
+  type === 'unavailable-id' ? 'taken'
+    : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'busy';
+
 export function makeCode() {
   return Array.from({ length: 4 }, () =>
     CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
@@ -359,10 +368,11 @@ export class Net {
         resolve(v); // settle FIRST: if destroy() throws on a half-dead peer,
         try { if (v.kind !== 'host') net.destroy(); } catch { /* already gone */ }
       };
-      const timer = setTimeout(() => done({ kind: 'down' }), timeoutMs);
+      // A claim that never resolves means this slot did not work out, not that
+      // signaling is broken: move on to the next one.
+      const timer = setTimeout(() => done({ kind: 'busy' }), timeoutMs);
       net.peer.on('open', () => done({ kind: 'host', net }));
-      net.peer.on('error', e =>
-        done({ kind: e.type === 'unavailable-id' ? 'taken' : 'down' }));
+      net.peer.on('error', e => done({ kind: claimErrorKind(e.type) }));
     });
   }
 
@@ -481,6 +491,7 @@ export class Net {
           console.debug(`[qm] claim ${slotCode(i)} -> ${c.kind}`);
           if (c.kind === 'host') { guest.destroy(); return { kind: 'host', net: c.net, slot: i }; }
           if (c.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
+          if (c.kind === 'busy') continue; // this slot would not take — try the next
           // 'taken': the probe said dead but the id is registered — the broker
           // never lies about that, so the probe was a false negative (slow net).
           // Give a proven-live room one direct knock before moving on.

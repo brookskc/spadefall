@@ -41,7 +41,7 @@ export const EVENT_MESSAGE_BYTES = 128 * 1024;
 // not fatal: peers fall back to PeerJS's default STUN-only configuration,
 // which is what every build before this one shipped.
 const ICE_ENDPOINT = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
-  .get('ice') || ''; // TURN is opt-in via ?ice= until the probe fix is proven
+  .get('ice') || 'https://spadefall-turn.spadefall.workers.dev/ice';
 const ICE_CACHE_MS = 60 * 60 * 1000;
 let iceServers = null, iceExpiresAt = 0, icePending = null;
 

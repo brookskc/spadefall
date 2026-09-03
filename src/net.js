@@ -152,6 +152,21 @@ export function allowInbound(conn, now = performance.now(), rate = INBOUND_RATE,
   return true;
 }
 
+// Only a real signaling failure means "the matchmaking service is
+// unreachable". A WebRTC/ICE error means this one connection could not be
+// established, which with a relay configured happens routinely while probing
+// empty slots. Probes share a single guest peer, so every probe's error
+// handler sees every peer-level error — classifying an ICE failure as 'down'
+// failed all eight probes at once and reported the service as offline.
+export const SIGNALING_ERROR_TYPES = new Set([
+  'network', 'server-error', 'socket-error', 'socket-closed',
+  'ssl-unavailable', 'disconnected', 'browser-incompatible',
+]);
+
+export const probeErrorKind = type =>
+  type === 'peer-unavailable' ? 'unavailable'
+    : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'dead';
+
 export function makeCode() {
   return Array.from({ length: 4 }, () =>
     CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
@@ -389,11 +404,12 @@ export class Net {
       };
       const timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
       const onErr = e => {
-        if (e.type === 'peer-unavailable') {
+        const kind = probeErrorKind(e.type);
+        if (kind === 'unavailable') {
           if (String(e.message).includes(target)) done({ kind: 'dead' });
           return; // somebody else's miss — not ours
         }
-        done({ kind: 'down' });
+        done({ kind });
       };
       peer.on('error', onErr);
       const conn = peer.connect(target, { reliable: true });

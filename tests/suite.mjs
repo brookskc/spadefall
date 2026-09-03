@@ -21,9 +21,9 @@ import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, claimPeerChannel, Net, peerOptions, primeIce, PUBLIC_PAGES,
-  PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce, shouldSend, slotCode,
-  usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
+import { allowInbound, claimPeerChannel, Net, peerOptions, primeIce, probeErrorKind,
+  PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce, shouldSend,
+  slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -2164,6 +2164,19 @@ async function iceConfigTests() {
   ok('a non-200 from the credential worker yields no servers',
     (await primeIce({ endpoint: 'https://ice.test/ice', fetch: refused, now: 1000 })).length === 0);
   resetIce();
+
+  // Regression: probes share one guest peer, so every probe's handler sees
+  // every peer-level error. Treating an ICE failure as signaling failure took
+  // down all eight probes and reported quick match as offline.
+  ok('a webrtc error kills only its own probe, never the whole scan',
+    probeErrorKind('webrtc') === 'dead');
+  ok('an unknown error type is treated as a dead slot, not a dead service',
+    probeErrorKind('something-new') === 'dead' && probeErrorKind(undefined) === 'dead');
+  ok('genuine signaling failures still report the service down',
+    ['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']
+      .every(t => probeErrorKind(t) === 'down'));
+  ok('peer-unavailable stays distinguishable so a miss can be attributed',
+    probeErrorKind('peer-unavailable') === 'unavailable');
 }
 
 export async function run() {

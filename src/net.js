@@ -41,7 +41,7 @@ export const EVENT_MESSAGE_BYTES = 128 * 1024;
 // not fatal: peers fall back to PeerJS's default STUN-only configuration,
 // which is what every build before this one shipped.
 const ICE_ENDPOINT = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
-  .get('ice') || 'https://spadefall-turn.REPLACE-ME.workers.dev/ice';
+  .get('ice') || 'https://spadefall-turn.spadefall.workers.dev/ice';
 const ICE_CACHE_MS = 60 * 60 * 1000;
 let iceServers = null, iceExpiresAt = 0, icePending = null;
 
@@ -79,7 +79,7 @@ export function primeIce(opts = {}) {
   const endpoint = opts.endpoint ?? ICE_ENDPOINT;
   const doFetch = opts.fetch ?? (typeof fetch === 'function' ? fetch : null);
   const now = opts.now ?? Date.now();
-  if (!doFetch || !endpoint || endpoint.includes('REPLACE-ME')) return Promise.resolve([]);
+  if (!doFetch || !endpoint) return Promise.resolve([]);
   if (iceServers && now < iceExpiresAt) return Promise.resolve(iceServers);
   if (icePending) return icePending;
   icePending = (async () => {

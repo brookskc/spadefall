@@ -6,7 +6,7 @@
 // account, so it lives only in this Worker's secret store. Clients get
 // credentials that expire instead.
 
-const TURN_KEY_ID = 'd558183ffb1a429fa63fdf33dcda9494';
+const TURN_KEY_ID = '0a266bb92241c6f8f68a8068f72e4c45';
 const TURN_API = `https://rtc.live.cloudflare.com/v1/turn/keys/${TURN_KEY_ID}/credentials/generate-ice-servers`;
 
 // Longer than the longest match (CTF regulation is 12 minutes plus overtime)

@@ -26,12 +26,22 @@ let cachedUntil = 0;
 const ALLOWED_ORIGINS = new Set([
   'https://spadefall.io',
   'https://www.spadefall.io',
+  'https://spadefall.pages.dev',
   'http://localhost:8000',
   'http://127.0.0.1:8000',
 ]);
 
+// Every Cloudflare Pages build also gets its own <hash>.spadefall.pages.dev
+// host, so preview deployments are matched by suffix rather than enumerated.
+// Without this the browser blocks the credential fetch and the game quietly
+// falls back to STUN only — a relay that looks configured but never engages.
+const PREVIEW_SUFFIX = '.spadefall.pages.dev';
+const originAllowed = origin =>
+  ALLOWED_ORIGINS.has(origin)
+  || (origin.startsWith('https://') && origin.endsWith(PREVIEW_SUFFIX));
+
 const corsHeaders = origin => ({
-  'access-control-allow-origin': ALLOWED_ORIGINS.has(origin) ? origin : 'https://spadefall.io',
+  'access-control-allow-origin': originAllowed(origin) ? origin : 'https://spadefall.io',
   'access-control-allow-methods': 'GET, OPTIONS',
   'access-control-allow-headers': 'content-type, accept',
   'access-control-max-age': '86400',

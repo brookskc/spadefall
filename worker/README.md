@@ -22,13 +22,22 @@ into `ICE_ENDPOINT` at the top of `../src/net.js`.
 curl https://spadefall-turn.<your-subdomain>.workers.dev/ice
 ```
 
-Expect JSON with an `iceServers` array containing `stun:` and `turn:` URLs plus
-a `username` and `credential`. A 502 means the API token is wrong or unset.
+The endpoint only answers CORS requests from the production site, Pages
+deployments, and the listed local development origins. A successful request
+returns an `iceServers` array containing `stun:` and `turn:` URLs plus a
+`username` and `credential`. A 502 means the upstream credential service is
+unavailable; a missing secret or rate-limit binding returns 500.
 
 ## Notes
 
 - Credentials live 2 hours, comfortably longer than the 12-minute CTF
-  regulation, and are cached per isolate to avoid an upstream call per load.
-- `ALLOWED_ORIGINS` in `src/index.js` gates CORS. Add any new origin there.
+  regulation. Each browser receives a separate credential; the game caches it
+  locally for one hour.
+- `ALLOWED_ORIGINS` rejects requests from unexpected browser origins. It is a
+  traffic guard, not authentication: non-browser clients can forge an Origin
+  header. The `TURN_RATE_LIMITER` binding therefore also caps minting per
+  source address. For stronger guarantees, put an account/session service in
+  front of this endpoint.
 - Rotating the key: create a new TURN key in the dashboard, update
-  `TURN_KEY_ID`, re-run `wrangler secret put`, redeploy.
+  `DEFAULT_TURN_KEY_ID` (or provide `TURN_KEY_ID` as a Worker variable), re-run
+  `wrangler secret put`, and redeploy.

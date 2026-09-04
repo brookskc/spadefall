@@ -24,6 +24,7 @@ import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } f
 import { allowInbound, claimErrorKind, claimPeerChannel, Net, peerOptions, primeIce,
   probeErrorKind, PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce,
   shouldSend, slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
+import { handleRequest as handleTurnRequest, originAllowed } from '../worker/src/index.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -2139,6 +2140,12 @@ async function iceConfigTests() {
   ok('entries without a usable url are dropped before reaching WebRTC',
     usableIceServers({ iceServers: [{ username: 'u' }, { urls: [] }, null, 'nope',
       { urls: [7] }] }).length === 0);
+  ok('non-ICE urls and credential-free TURN entries are rejected',
+    usableIceServers({ iceServers: [
+      { urls: ['https://relay.invalid', 'turn:relay.invalid'] },
+      { urls: ['stun:stun.example.test', 'turns:turn.example.test'],
+        username: 'u', credential: 'c' },
+    ] }).flatMap(s => s.urls).join(',') === 'stun:stun.example.test,turns:turn.example.test');
   ok('a junk payload yields no servers',
     usableIceServers(null).length === 0 && usableIceServers({}).length === 0);
 
@@ -2152,6 +2159,12 @@ async function iceConfigTests() {
     primed.length === 1 && peerOptions()?.config?.iceServers?.length === 1);
   await primeIce({ endpoint: 'https://ice.test/ice', fetch: stub, now: 2000 });
   ok('a warm cache is not refetched', calls === 1);
+
+  const refreshFailed = async () => { throw new Error('expired'); };
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: refreshFailed,
+    now: 1000 + 60 * 60 * 1000 });
+  ok('expired relay credentials are not reused after a failed refresh',
+    peerOptions() === undefined);
 
   resetIce();
   const offline = async () => { throw new Error('offline'); };
@@ -2168,10 +2181,10 @@ async function iceConfigTests() {
   // Regression: probes share one guest peer, so every probe's handler sees
   // every peer-level error. Treating an ICE failure as signaling failure took
   // down all eight probes and reported quick match as offline.
-  ok('a webrtc error kills only its own probe, never the whole scan',
-    probeErrorKind('webrtc') === 'dead');
-  ok('an unknown error type is treated as a dead slot, not a dead service',
-    probeErrorKind('something-new') === 'dead' && probeErrorKind(undefined) === 'dead');
+  ok('connection-level errors wait for the affected data channel',
+    probeErrorKind('webrtc') === 'ignore');
+  ok('an unknown peer error cannot kill every probe sharing that peer',
+    probeErrorKind('something-new') === 'ignore' && probeErrorKind(undefined) === 'ignore');
   ok('genuine signaling failures still report the service down',
     ['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']
       .every(t => probeErrorKind(t) === 'down'));
@@ -2190,8 +2203,61 @@ async function iceConfigTests() {
       .every(t => claimErrorKind(t) === 'down'));
 }
 
+async function turnWorkerTests() {
+  group('turn credential worker');
+  ok('production, Pages previews, and local development origins are recognized',
+    originAllowed('https://spadefall.io')
+      && originAllowed('https://build-123.spadefall.pages.dev')
+      && originAllowed('http://localhost:8000'));
+  ok('lookalike, insecure, and absent origins are rejected',
+    !originAllowed('https://spadefall.io.attacker.test')
+      && !originAllowed('http://spadefall.io') && !originAllowed(undefined));
+
+  const payload = { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] },
+    { urls: ['turn:turn.cloudflare.com:3478'], username: 'user', credential: 'secret' }] };
+  let minted = 0, limited = 0;
+  const fetcher = async () => { minted++; return new Response(JSON.stringify(payload), {
+    status: 201, headers: { 'content-type': 'application/json' } }); };
+  const env = { TURN_API_TOKEN: 'server-secret', TURN_RATE_LIMITER: {
+    limit: async ({ key }) => { limited++; return { success: key === '203.0.113.5' }; },
+  } };
+  const request = () => new Request('https://turn.example/ice', { headers: {
+    origin: 'https://spadefall.io', 'cf-connecting-ip': '203.0.113.5',
+  } });
+  const response = await handleTurnRequest(request(), env, fetcher);
+  const body = await response.json();
+  ok('an allowed, rate-limited request receives an uncached credential response',
+    response.status === 200 && body.iceServers.length === 2
+      && response.headers.get('cache-control') === 'no-store' && minted === 1 && limited === 1);
+  await handleTurnRequest(request(), env, fetcher);
+  ok('credentials are minted per request instead of shared across players', minted === 2);
+
+  const forbidden = await handleTurnRequest(new Request('https://turn.example/ice', {
+    headers: { origin: 'https://attacker.test' },
+  }), env, fetcher);
+  ok('unexpected origins are rejected before rate limiting or minting',
+    forbidden.status === 403 && minted === 2 && limited === 2
+      && !forbidden.headers.has('access-control-allow-origin'));
+  const wrongPath = await handleTurnRequest(new Request('https://turn.example/nope', {
+    headers: { origin: 'https://spadefall.io' },
+  }), env, fetcher);
+  ok('only the credential route is exposed', wrongPath.status === 404);
+  const missingBinding = await handleTurnRequest(request(), { TURN_API_TOKEN: 'server-secret' }, fetcher);
+  ok('a missing edge rate limiter fails closed', missingBinding.status === 500);
+  const rateLimited = await handleTurnRequest(request(), { ...env, TURN_RATE_LIMITER: {
+    limit: async () => ({ success: false }),
+  } }, fetcher);
+  ok('excess credential requests receive a bounded retry response',
+    rateLimited.status === 429 && rateLimited.headers.get('retry-after') === '60');
+  const limiterDown = await handleTurnRequest(request(), { ...env, TURN_RATE_LIMITER: {
+    limit: async () => { throw new Error('edge binding down'); },
+  } }, fetcher);
+  ok('a failed edge limiter cannot fail open', limiterDown.status === 503);
+}
+
 export async function run() {
   await iceConfigTests();
+  await turnWorkerTests();
   collapseTests();
   wireTests();
   networkSyncTests();

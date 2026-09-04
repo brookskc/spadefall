@@ -248,6 +248,7 @@ function deploy() {
 // After a dead connection the button becomes a way back to a clean menu.
 let netDead = false;
 let matchmaking = false;   // quick-match scan in flight — lobby buttons hold
+let connecting = false;    // private host/join waiting for relay credentials
 let searchCanceled = false; // Esc pressed mid-search: discard the result
 let suppressResume = false; // unlock came from a failed search, not the player
 $('playBtn').addEventListener('click', () => {
@@ -773,31 +774,37 @@ function applyHostPrefs() {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-$('hostBtn').addEventListener('click', () => {
-  if (net || matchmaking) return;
+$('hostBtn').addEventListener('click', async () => {
+  if (net || matchmaking || connecting) return;
   migrationGen = 0; // a fresh room starts the baton count over
   if (!ensureCallsign()) return;
   engagementSource = 'host';
   engagement.record('lobby_action', { action: 'host' });
   initAudio();
-  game.mode = 'host';
   game.player.name = callsign();
-  game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
   // Pointer lock is only gesture-valid inside this click — take it now and
   // drop straight in; a refused lock leaves the DEPLOY button as fallback.
   const lock = renderer.domElement.requestPointerLock();
   lock?.catch?.(() => {});
+  connecting = true;
+  status('preparing network…');
+  await primeIce();
+  // Stay in solo mode while awaiting credentials: host-mode simulation
+  // assumes game.net already exists and can otherwise tick into a null peer.
+  game.mode = 'host';
+  game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
   const tryCode = () => {
     const code = params.get('code')?.toUpperCase() ?? makeCode();
     adoptHost(Net.host(code, {}), code, { onTaken: tryCode });
   };
   tryCode();
+  connecting = false;
   status('creating room…');
   if (document.pointerLockElement === renderer.domElement) setPlaying(true);
 });
 
-$('joinBtn').addEventListener('click', () => {
-  if (net || matchmaking) return;
+$('joinBtn').addEventListener('click', async () => {
+  if (net || matchmaking || connecting) return;
   const code = $('codeInput').value.trim().toUpperCase();
   if (!/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(code)) return status('enter a valid room code');
   migrationGen = 0;
@@ -805,14 +812,18 @@ $('joinBtn').addEventListener('click', () => {
   engagementSource = 'join';
   engagement.record('lobby_action', { action: 'join' });
   initAudio();
-  game.mode = 'client';
   game.player.name = callsign();
   // Lock in the click, drop straight in: the world snaps to the host's map
   // when the welcome lands a moment later (same warm-up as quick match).
   const lock = renderer.domElement.requestPointerLock();
   lock?.catch?.(() => {});
-  status('connecting…');
+  connecting = true;
+  status('preparing network…');
+  await primeIce();
+  game.mode = 'client';
   const n = Net.join(code, {});
+  connecting = false;
+  status('connecting…');
   adoptJoin(n, code);
   n.handlers.onOpen = () => n.send({ t: 'hi', v: PROTOCOL_VERSION,
     name: game.player.name, team: teamPref() });
@@ -831,7 +842,8 @@ $('joinBtn').addEventListener('click', () => {
 // later — so lock NOW and hold it behind a searching ticker; when the room
 // is ready the menu drops away and you're already playing. If the browser
 // refuses the lock, the DEPLOY button flow is the fallback.
-const qmTimeout = parseInt(params.get('qmt'), 10) || 9000;
+const qmTimeout = Math.max(1000, Math.min(30000,
+  parseInt(params.get('qmt'), 10) || 9000));
 
 // Back to a clean menu with no session: nothing to resume into.
 function bailToMenu() {
@@ -843,7 +855,7 @@ function bailToMenu() {
 }
 
 $('quickBtn').addEventListener('click', async () => {
-  if (net || matchmaking) return;
+  if (net || matchmaking || connecting) return;
   if (!ensureCallsign()) return;
   engagementSource = 'quick';
   engagement.record('lobby_action', { action: 'quick' });
@@ -1007,7 +1019,7 @@ async function joinFromBrowser(room) {
 }
 
 $('browseBtn').addEventListener('click', () => {
-  if (net || matchmaking || scanning) return;
+  if (net || matchmaking || connecting || scanning) return;
   if (!ensureCallsign()) return;
   engagementSource = 'browse';
   engagement.record('lobby_action', { action: 'browse' });

@@ -5,3 +5,14 @@ compatibility_date = "2026-09-01"
 # TURN_API_TOKEN is deliberately absent: it is a secret, set once with
 #   wrangler secret put TURN_API_TOKEN
 # so it never lands in this file or in git.
+
+# Credential minting is limited per source address at Cloudflare's edge. The
+# browser fetches once per hour, so this leaves ample headroom for shared home
+# or office networks while bounding automated abuse.
+[[ratelimits]]
+name = "TURN_RATE_LIMITER"
+namespace_id = "764001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60

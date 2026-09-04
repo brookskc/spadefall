@@ -40,9 +40,12 @@ export const EVENT_MESSAGE_BYTES = 128 * 1024;
 // at boot and read from cache when a peer is built. A cold or failed cache is
 // not fatal: peers fall back to PeerJS's default STUN-only configuration,
 // which is what every build before this one shipped.
-const ICE_ENDPOINT = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
-  .get('ice') || 'https://spadefall-turn.spadefall.workers.dev/ice';
+// Keep the production credential source fixed. Accepting an arbitrary
+// endpoint from a shared ?ice= URL let another site supply a victim with its
+// own relay configuration. Tests can still inject an endpoint into primeIce.
+const ICE_ENDPOINT = 'https://spadefall-turn.spadefall.workers.dev/ice';
 const ICE_CACHE_MS = 60 * 60 * 1000;
+const ICE_FETCH_TIMEOUT_MS = 4000;
 let iceServers = null, iceExpiresAt = 0, icePending = null;
 
 // Validate what the credential service returned before handing it to
@@ -55,12 +58,21 @@ export function usableIceServers(payload) {
   const clean = [];
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
-    const urls = typeof entry.urls === 'string' ? [entry.urls]
+    let urls = typeof entry.urls === 'string' ? [entry.urls]
       : Array.isArray(entry.urls) ? entry.urls.filter(u => typeof u === 'string' && u) : [];
+    const username = typeof entry.username === 'string' && entry.username
+      ? entry.username : null;
+    const credential = typeof entry.credential === 'string' && entry.credential
+      ? entry.credential : null;
+    // RTCPeerConnection only understands ICE schemes here. TURN entries also
+    // need both credentials; otherwise they can trigger slow, guaranteed-to-
+    // fail gathering attempts.
+    urls = urls.filter(url => /^(?:stun|stuns|turn|turns):/i.test(url)
+      && (!/^turns?:/i.test(url) || (username && credential)));
     if (!urls.length) continue;
     const server = { urls };
-    if (typeof entry.username === 'string') server.username = entry.username;
-    if (typeof entry.credential === 'string') server.credential = entry.credential;
+    if (username) server.username = username;
+    if (credential) server.credential = credential;
     clean.push(server);
   }
   return clean;
@@ -79,17 +91,26 @@ export function primeIce(opts = {}) {
   const endpoint = opts.endpoint ?? ICE_ENDPOINT;
   const doFetch = opts.fetch ?? (typeof fetch === 'function' ? fetch : null);
   const now = opts.now ?? Date.now();
+  const timeoutMs = Math.max(1, Number(opts.timeoutMs) || ICE_FETCH_TIMEOUT_MS);
   if (!doFetch || !endpoint) return Promise.resolve([]);
   if (iceServers && now < iceExpiresAt) return Promise.resolve(iceServers);
+  // Never hand a new peer an expired credential when its refresh fails.
+  if (iceServers) { iceServers = null; iceExpiresAt = 0; }
   if (icePending) return icePending;
   icePending = (async () => {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const res = await doFetch(endpoint, { headers: { accept: 'application/json' } });
+      const res = await doFetch(endpoint, { headers: { accept: 'application/json' },
+        cache: 'no-store', credentials: 'omit', signal: controller?.signal });
       if (!res.ok) return [];
       const clean = usableIceServers(await res.json());
       if (clean.length) { iceServers = clean; iceExpiresAt = now + ICE_CACHE_MS; }
       return clean;
-    } catch { return []; } finally { icePending = null; }
+    } catch { return []; } finally {
+      if (timer) clearTimeout(timer);
+      icePending = null;
+    }
   })();
   return icePending;
 }
@@ -165,7 +186,7 @@ export const SIGNALING_ERROR_TYPES = new Set([
 
 export const probeErrorKind = type =>
   type === 'peer-unavailable' ? 'unavailable'
-    : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'dead';
+    : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'ignore';
 
 // Claiming a slot has the same failure asymmetry as probing it. Losing a race
 // for one id, or an ICE failure while registering it, says nothing about
@@ -175,6 +196,25 @@ export const probeErrorKind = type =>
 export const claimErrorKind = type =>
   type === 'unavailable-id' ? 'taken'
     : SIGNALING_ERROR_TYPES.has(type) ? 'down' : 'busy';
+
+// Open a signaling peer within a bounded time and remove both temporary
+// listeners on every path. PeerJS does not guarantee an error event for every
+// stalled socket, so callers must not wait forever before matchmaking begins.
+function peerReady(peer, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      peer.off('open', onOpen);
+      peer.off('error', onError);
+    };
+    const onOpen = () => { cleanup(); resolve(); };
+    const onError = error => { cleanup(); reject(error); };
+    timer = setTimeout(() => { cleanup(); reject(new Error('peer open timeout')); }, timeoutMs);
+    peer.on('open', onOpen);
+    peer.on('error', onError);
+  });
+}
 
 export function makeCode() {
   return Array.from({ length: 4 }, () =>
@@ -320,12 +360,17 @@ export class Net {
   //   { kind: 'down' }  — signaling unreachable
   static _knock(peer, code, name, team, timeoutMs) {
     return new Promise(resolve => {
+      const target = PREFIX + code;
       let settled = false;
       const done = v => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         peer.off('error', onErr);
+        conn.off?.('open', onOpen);
+        conn.off?.('data', onData);
+        conn.off?.('close', onClose);
+        conn.off?.('error', onConnError);
         // A failed knock must close its channel deterministically: an
         // abandoned one can still complete the handshake later and shambling
         // into the room as a zombie — half-open, never welcomed, and wedging
@@ -334,14 +379,24 @@ export class Net {
         resolve(v);
       };
       const timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
-      const onErr = e => done({ kind: e.type === 'peer-unavailable' ? 'dead' : 'down' });
+      const onErr = e => {
+        const kind = probeErrorKind(e.type);
+        if (kind === 'unavailable') {
+          if (String(e.message).includes(target)) done({ kind: 'dead' });
+          return;
+        }
+        // Connection-level errors are emitted on both Peer and DataConnection.
+        // The latter identifies the affected knock; acting here would let a
+        // stale channel failure kill the current one.
+        if (kind === 'down') done({ kind });
+      };
       peer.on('error', onErr); // the broker reports unknown room ids on the peer
-      const conn = peer.connect(PREFIX + code, { reliable: true });
+      const conn = peer.connect(target, { reliable: true });
       // team is the player's own OPTIONAL side preference (undefined when
       // they never set one) — the host honors it if given, falls back to
       // its own balance pick otherwise. See Game#_hostAddPlayer.
-      conn.on('open', () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team }));
-      conn.on('data', d => {
+      const onOpen = () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team });
+      const onData = d => {
         if (!isRecord(d)) return;
         // Do not adopt a channel on a merely welcome-shaped packet. A stale
         // or incompatible host used to make matchmaking report success, then
@@ -349,9 +404,13 @@ export class Net {
         if (d.t === 'w' && validServerMessage(d)) done({ kind: 'join', conn, welcome: d });
         else if (d.t === 'full') done({ kind: 'full' });
         else if (d.t === 'version') done({ kind: 'version', v: d.v });
-      });
-      conn.on('close', () => done({ kind: 'dead' }));
-      conn.on('error', () => done({ kind: 'dead' }));
+      };
+      const onClose = () => done({ kind: 'dead' });
+      const onConnError = () => done({ kind: 'dead' });
+      conn.on('open', onOpen);
+      conn.on('data', onData);
+      conn.on('close', onClose);
+      conn.on('error', onConnError);
     });
   }
 
@@ -365,14 +424,18 @@ export class Net {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        net.peer.off('open', onOpen);
+        net.peer.off('error', onError);
         resolve(v); // settle FIRST: if destroy() throws on a half-dead peer,
         try { if (v.kind !== 'host') net.destroy(); } catch { /* already gone */ }
       };
       // A claim that never resolves means this slot did not work out, not that
       // signaling is broken: move on to the next one.
       const timer = setTimeout(() => done({ kind: 'busy' }), timeoutMs);
-      net.peer.on('open', () => done({ kind: 'host', net }));
-      net.peer.on('error', e => done({ kind: claimErrorKind(e.type) }));
+      const onOpen = () => done({ kind: 'host', net });
+      const onError = e => done({ kind: claimErrorKind(e.type) });
+      net.peer.on('open', onOpen);
+      net.peer.on('error', onError);
     });
   }
 
@@ -419,7 +482,9 @@ export class Net {
           if (String(e.message).includes(target)) done({ kind: 'dead' });
           return; // somebody else's miss — not ours
         }
-        done({ kind });
+        // Connection-level failures are handled by this probe's conn below.
+        // A shared peer cannot attribute them to a target, so ignore them here.
+        if (kind === 'down') done({ kind });
       };
       peer.on('error', onErr);
       const conn = peer.connect(target, { reliable: true });
@@ -451,21 +516,26 @@ export class Net {
   // leave. The deadline is checked only before each SEQUENTIAL step (the
   // concurrent probe phase is already bounded by timeoutMs on its own).
   static async quickScan(name, team, timeoutMs = 9000, overallMs = 20000) {
-    const guest = new Peer(peerOptions());
-    const ready = new Promise((res, rej) => {
-      guest.on('open', res);
-      guest.on('error', rej); // pre-open error = broker unreachable
-    });
-    try { await ready; } catch { guest.destroy(); return { kind: 'down' }; }
+    timeoutMs = Math.max(1, Number(timeoutMs) || 9000);
+    overallMs = Math.max(1, Number(overallMs) || 20000);
     const deadline = Date.now() + overallMs;
-    const outOfTime = () => Date.now() > deadline;
+    const outOfTime = () => Date.now() >= deadline;
+    const stepTimeout = () => Math.max(1, Math.min(timeoutMs, deadline - Date.now()));
+    // The boot-time warm-up is an optimization, not a race the user must win.
+    // An immediate click still waits briefly for TURN before constructing the
+    // peer; failure remains a bounded STUN-only fallback.
+    await primeIce({ timeoutMs: stepTimeout() });
+    if (outOfTime()) return { kind: 'timeout' };
+    const guest = new Peer(peerOptions());
+    try { await peerReady(guest, stepTimeout()); }
+    catch { guest.destroy(); return { kind: outOfTime() ? 'timeout' : 'down' }; }
     try {
       // Page through the slots: later pages are only probed once every
       // earlier room is full, so ordinary load costs one cheap page.
       for (let page = 0; page < PUBLIC_PAGES; page++) {
         if (outOfTime()) break;
         const results = await Promise.all(publicPageSlots(page)
-          .map(i => Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
+          .map(i => Net._probe(guest, slotCode(i), stepTimeout()).then(p => ({ slot: i, p }))));
         const open = [], dead = [];
         for (const { slot, p } of results) {
           console.debug(`[qm] probe ${slotCode(slot)} -> ${p.kind}${p.kind === 'room' ? ` ${p.humans}/${p.max}` : ''}`);
@@ -477,7 +547,7 @@ export class Net {
         open.sort((a, b) => b.humans - a.humans || a.slot - b.slot);
         for (const room of open) {
           if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
-          const k = await Net._knock(guest, slotCode(room.slot), name, team, timeoutMs);
+          const k = await Net._knock(guest, slotCode(room.slot), name, team, stepTimeout());
           console.debug(`[qm] knock ${slotCode(room.slot)} -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: room.slot, welcome: k.welcome };
@@ -487,7 +557,7 @@ export class Net {
         }
         for (const i of dead) {
           if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
-          const c = await Net._claim(slotCode(i), timeoutMs);
+          const c = await Net._claim(slotCode(i), stepTimeout());
           console.debug(`[qm] claim ${slotCode(i)} -> ${c.kind}`);
           if (c.kind === 'host') { guest.destroy(); return { kind: 'host', net: c.net, slot: i }; }
           if (c.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
@@ -496,7 +566,7 @@ export class Net {
           // never lies about that, so the probe was a false negative (slow net).
           // Give a proven-live room one direct knock before moving on.
           if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
-          const k = await Net._knock(guest, slotCode(i), name, team, timeoutMs);
+          const k = await Net._knock(guest, slotCode(i), name, team, stepTimeout());
           console.debug(`[qm] knock ${slotCode(i)} (taken) -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: i, welcome: k.welcome };
@@ -526,12 +596,11 @@ export class Net {
   static async roomScan(page = 0, timeoutMs = 9000) {
     const slots = publicPageSlots(page);
     if (!slots.length) return { kind: 'invalid-page' };
+    timeoutMs = Math.max(1, Number(timeoutMs) || 9000);
+    await primeIce({ timeoutMs });
     const guest = new Peer(peerOptions());
-    const ready = new Promise((res, rej) => {
-      guest.on('open', res);
-      guest.on('error', rej);
-    });
-    try { await ready; } catch { guest.destroy(); return { kind: 'down' }; }
+    try { await peerReady(guest, timeoutMs); }
+    catch { guest.destroy(); return { kind: 'down' }; }
     const results = await Promise.all(slots.map(i =>
       Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
     const rooms = [];

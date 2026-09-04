@@ -254,6 +254,7 @@ $('playBtn').addEventListener('click', () => {
   if (netDead) return location.reload();
   if (matchmaking) return;
   if (game.mode === 'client' && !game.myId) return; // still connecting
+  stopRotationCountdown(); // clicking through is just skipping the wait
   engagement.record('lobby_action', { action: 'deploy' });
   deploy();
 });
@@ -1043,18 +1044,64 @@ if (/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(invitedCode) && !params.get('mp')) {
   status(`squad invite ready — enter a callsign and join <b>${invitedCode}</b>`);
 }
 
-// Map rotation: the room moves to the next map after each match. The end
-// screen offers no choices while it turns — only once the new map is built
-// does the lobby come back with DEPLOY ready (pointer lock needs a fresh
-// click anyway). The old PLAY AGAIN reloaded the page, which for the host
-// tore the whole room down mid-rotation.
+// Map rotation: the room moves to the next map after each match. The old
+// PLAY AGAIN reloaded the page, which for the host tore the whole room down
+// mid-rotation.
+//
+// Rotation used to end on the DEPLOY button and wait there indefinitely. The
+// room had already built the next map and picked the teams; the only thing
+// standing between the player and the match was a click that carried no
+// decision. Now the countdown takes you in on its own, and the window exists
+// for the one choice that IS worth making between rounds: your class.
+const ROTATION_DEPLOY_SECONDS = 6;
+let rotateTimer = null;
+
+function stopRotationCountdown() {
+  if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; }
+  $('menu').classList.remove('rotating');
+}
+
+// Pointer lock normally wants a user gesture. Re-requesting it moments after
+// the game itself released it usually succeeds, but any browser is free to
+// refuse — so a refusal must land the player back on a working DEPLOY button
+// rather than stranded in a menu that has stopped counting.
+function deployAuto() {
+  initAudio();
+  let lock;
+  try { lock = renderer.domElement.requestPointerLock(); }
+  catch { lock = Promise.reject(new Error('refused')); }
+  Promise.resolve(lock).catch(() => {
+    showPlay('DEPLOY');
+    status('press <b>DEPLOY</b> to drop in');
+  });
+}
+
+function startRotationCountdown() {
+  stopRotationCountdown();
+  let left = ROTATION_DEPLOY_SECONDS;
+  $('menu').classList.add('rotating');
+  const tick = () => {
+    if (playing) return stopRotationCountdown(); // already dropped in
+    if (left <= 0) {
+      stopRotationCountdown();
+      showPlay('DEPLOY');
+      deployAuto();
+      return;
+    }
+    showPlay(`DEPLOYING IN ${left}`);
+    left--;
+  };
+  tick();
+  rotateTimer = setInterval(tick, 1000);
+}
+
 game.onRestart = mapName => {
   engagementSource = 'rotation';
   $('end').classList.add('hidden');
   $('pausedTitle').textContent = '— MATCH OVER —';
   if (playing) setPlaying(false);
-  showPlay('DEPLOY');
-  status(`new map — <b>${mapName}</b>`);
+  status(`new map — <b>${mapName}</b> · pick a class`);
+  startRotationCountdown();
 };
 
 // Tab (and Shift+Tab) can force pointer lock closed on some browsers as an
@@ -1133,7 +1180,12 @@ document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === renderer.domElement;
   // While a quick-match search runs, the lock is held behind the searching
   // ticker — don't start playing until the room is actually ready.
-  if (locked) { tabRelockPending = false; if (!(matchmaking && !net)) setPlaying(true); return; }
+  if (locked) {
+    tabRelockPending = false;
+    stopRotationCountdown(); // in the match — the window has served its purpose
+    if (!(matchmaking && !net)) setPlaying(true);
+    return;
+  }
   if (playing && performance.now() - (game._tabUnlockAt ?? 0) < 200) {
     tabRelockPending = true;
     renderer.domElement.requestPointerLock();

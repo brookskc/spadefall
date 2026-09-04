@@ -112,6 +112,11 @@
   .only-paused, .only-searching { display:none; }
   #menu.paused .only-paused { display:block; }
   #menu.paused .home-only { display:none; }
+  /* Between rounds the menu is the paused screen, which hides every home-lobby
+     preference. The class picker is the exception: the rotation window exists
+     precisely so the player can change class before the next round drops them
+     in, so it comes back for exactly as long as that countdown runs. */
+  #menu.paused.rotating #startClassPick { display:block; }
   #menu.searching .only-searching { display:block; }
   #menu.searching .home-only, #menu.searching #playBtn { display:none; }
   #pausedTitle { margin-top:10px; font-size:15px; letter-spacing:6px; opacity:.6; }

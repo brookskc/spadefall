@@ -7,7 +7,7 @@ const boundedParam = (key, fallback, min, max = Infinity) => {
 };
 
 export const WIN_SCORE = 3;
-export const KILL_LIMIT = boundedParam('killcap', 30, 2);
+export const KILL_LIMIT = boundedParam('killcap', 50, 2);
 export const HOLD_LIMIT = boundedParam('kothtime', 120, 10);
 export const CAP_TIME = 6;
 export const HILL_CYCLE = boundedParam('hillcycle', HILL_ACTIVE_TIME, 12, 120);

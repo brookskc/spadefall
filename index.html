@@ -334,11 +334,16 @@
   #scopeFrame .tr { right:0; top:0; clip-path:polygon(0 0,100% 0,100% 100%); }
   #scopeFrame .bl { left:0; bottom:0; clip-path:polygon(0 0,0 100%,100% 100%); }
   #scopeFrame .br { right:0; bottom:0; clip-path:polygon(100% 0,0 100%,100% 100%); }
+  /* The hairs meet at the middle rather than stopping short of it. The old
+     8px setback left a 16px void that read as a square sitting in the sight
+     picture — the one shape on screen the player hadn't asked for. A 1px
+     intersection covers almost nothing of the target, so the reason the BDC
+     notches below keep their gap (see there) doesn't apply at dead center. */
   #scopeFrame .hair { position:absolute; background:rgba(228,235,240,.72); }
-  #scopeFrame .h-left { right:calc(50% + 8px); top:50%; width:calc(50% - 8px); height:1px; }
-  #scopeFrame .h-right { left:calc(50% + 8px); top:50%; width:calc(50% - 8px); height:1px; }
-  #scopeFrame .v-top { left:50%; bottom:calc(50% + 8px); width:1px; height:calc(50% - 8px); }
-  #scopeFrame .v-bottom { left:50%; top:calc(50% + 8px); width:1px; height:calc(50% - 8px); }
+  #scopeFrame .h-left { right:50%; top:50%; width:50%; height:1px; }
+  #scopeFrame .h-right { left:50%; top:50%; width:50%; height:1px; }
+  #scopeFrame .v-top { left:50%; bottom:50%; width:1px; height:50%; }
+  #scopeFrame .v-bottom { left:50%; top:50%; width:1px; height:50%; }
   #scopeReadout { position:absolute; right:20px; top:20px; min-width:128px;
     padding:9px 11px; background:rgba(5,8,12,.68); border-left:3px solid #ffd97a;
     text-align:left; text-transform:uppercase; font:10px/1.25 ui-monospace,Consolas,monospace;
@@ -354,9 +359,8 @@
   #scopeNotches { position:absolute; left:50%; top:50%; transform:translateX(-50%);
     z-index:1; display:none; pointer-events:none; }
   #scopeNotches.on { display:block; }
-  #scopeNotches .center { position:absolute; left:50%; top:0;
-    transform:translate(-50%,-50%); width:6px; height:6px;
-    background:rgba(255,255,255,.95); }
+  /* No center mark: the crosshair intersection is the zero-range aiming
+     point now, so a separate dot there would only sit on top of it. */
   /* Each notch is two 8px segments with a 6px gap dead center, not one solid
      22px bar — a solid line would cover exactly the point on the target the
      notch exists to line up with. The gap is what a real BDC/mil reticle
@@ -712,7 +716,7 @@
         <div id="scopeLegend">BDC · 40 / 70 / 100 / 130m</div>
       </div>
     </div>
-    <div id="scopeNotches"><div class="center"></div></div>
+    <div id="scopeNotches"></div>
     <div class="panel" id="roomcode">ROOM <b>····</b></div>
     <div id="ping"></div>
     <div id="fps"></div>

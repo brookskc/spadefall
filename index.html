@@ -58,8 +58,6 @@
     border:1px solid rgba(255,255,255,.4); border-radius:4px; padding:4px 8px;
     font-size:12px; letter-spacing:1px; text-transform:uppercase; outline:none; }
   .prefs select:focus { border-color:#ffd97a; }
-  #operationPick { display:none; }
-  html[data-operations="on"] #operationPick { display:block; }
 
   /* lifetime stats + gun color unlocks — client-side only, see stats.js */
   #statsPanel { margin-top:18px; font-size:12px; letter-spacing:1.5px; opacity:.8; }
@@ -156,7 +154,8 @@
   .setting .opt { opacity:.5; cursor:pointer; }
   .setting .opt:hover { opacity:.8; }
   .setting .opt.picked { opacity:1; color:#ffd97a; }
-  #roomcode { left:22px; top:16px; font-size:13px; letter-spacing:2px; display:none; }
+  #roomcode { display:none; margin:8px 0 2px; font-size:11px; letter-spacing:2px;
+    opacity:.68; }
   #roomcode b { color:#ffd97a; letter-spacing:4px; }
   /* Plain corner label, same weight as #mapname — a ping readout is
      something you glance at, not a panel that competes for attention. */
@@ -237,13 +236,13 @@
   #endBests.new { color:var(--outcome); opacity:1; }
   #endMastery { color:#d9e3e4; }
   #endFacts { flex:0 0 auto; padding:9px 0 5px; }
-  #endOperation, #endStory { display:none; padding:4px 0;
+  #endStory { display:none; padding:4px 0;
     font-size:11px; line-height:1.35; text-transform:uppercase; }
-  #endOperation.on, #endStory.on { display:block; }
-  #endOperationLabel, #endStoryLabel {
+  #endStory.on { display:block; }
+  #endStoryLabel {
     margin-right:8px; font-size:10px; font-weight:800; color:var(--outcome); }
-  #endOperationTitle, #endStoryTitle { margin-right:7px; font-size:11px; }
-  #endOperationDetail, #endStoryDetail { font-size:11px; opacity:.75; }
+  #endStoryTitle { margin-right:7px; font-size:11px; }
+  #endStoryDetail { font-size:11px; opacity:.75; }
   #endStory { border-top:1px solid rgba(167,197,141,.55); border-bottom:1px solid rgba(167,197,141,.55); }
   #endImpactMetrics { display:grid; grid-template-columns:repeat(5,minmax(56px,1fr)); gap:8px; margin-top:7px; }
   .impactMetric { --fill:0%; border-left:3px solid var(--terrain); padding-left:7px; min-width:0; }
@@ -251,10 +250,6 @@
   .impactMetric span { display:block; margin-top:3px; font-size:10px; letter-spacing:.8px; opacity:.7; }
   .impactMetric::after { content:""; display:block; width:var(--fill); height:5px; margin-top:5px;
     background:repeating-linear-gradient(90deg,var(--terrain) 0 7px,transparent 7px 10px); }
-  #operationLeaveBtn { display:none; margin:4px 0 0; padding:5px 0; color:#fff;
-    background:transparent; border:0; border-bottom:1px solid rgba(255,255,255,.5);
-    font:700 10px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
-  #operationLeaveBtn.on { display:block; }
   #endBoardLabel { margin-top:7px; padding:7px 0 5px; font-size:11px; font-weight:800; letter-spacing:1.5px; }
   #endBoard { min-height:0; flex:0 1 auto; max-height:min(46vh,410px); overflow:auto; background:rgba(4,7,9,.52);
     border-top:1px solid rgba(232,236,242,.56); border-bottom:1px solid rgba(232,236,242,.56); }
@@ -262,7 +257,6 @@
   #endBoard table.kd .teamGroup td { padding:7px 12px 4px; text-align:left; font-size:10px; letter-spacing:2px; font-weight:800; border-top:1px solid rgba(255,255,255,.25); }
   #endBoard table.kd .teamGroup.green td { color:var(--green); }
   #endBoard table.kd .teamGroup.blue td { color:var(--blue); }
-  #endBoard table.kd .playerMarker { color:var(--outcome); font-size:9px; letter-spacing:1px; }
   #endBoard table.kd th { border-bottom:1px solid rgba(255,255,255,.24); }
   #endBoard table.kd tr.me td { background:transparent; font-weight:700; }
   #endBoard table.kd tr.me td:first-child { box-shadow:inset 4px 0 0 var(--outcome); }
@@ -285,11 +279,11 @@
   .classGun { width:72px; height:40px; color:currentColor; shape-rendering:crispEdges; }
   .classGun rect, .classGun polygon { fill:currentColor; }
   .classGun .gunDetail { opacity:.48; }
-  #rematchBtn, #squadBtn { width:100%; margin-top:12px; padding:8px 5px; color:#fff;
+  #squadBtn { width:100%; margin-top:12px; padding:8px 5px; color:#fff;
     background:rgba(4,7,9,.28); border:1px solid rgba(255,255,255,.56);
     font:700 11px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
-  #rematchBtn:hover, #squadBtn:hover { background:rgba(255,255,255,.1); }
-  #rematchBtn.voted, #rematchBtn:disabled, #squadBtn.voted, #squadBtn:disabled { opacity:.55; }
+  #squadBtn:hover { background:rgba(255,255,255,.1); }
+  #squadBtn.voted, #squadBtn:disabled { opacity:.55; }
   #squadReady { display:none; }
   #squadReady.on { display:block; }
   #squadReady small { display:block; margin-top:5px; font-size:10px; line-height:1.3; opacity:.6; }
@@ -321,7 +315,7 @@
     #endClassOpts .opt { flex:1; display:block; min-height:55px; padding:5px; text-align:center;
       border-bottom:1px solid rgba(255,255,255,.3); }
     .classGun { display:block; width:54px; height:28px; margin:auto; }
-    #rematchBtn, #squadBtn { width:auto; margin-right:6px; }
+    #squadBtn { width:auto; margin-right:6px; }
     #endNote { display:inline-block; margin-left:8px; border:0; }
     #endStats { grid-template-columns:repeat(2,1fr); row-gap:8px; }
     .reportStat:nth-child(2) { border-right:0; }
@@ -353,7 +347,7 @@
   #hud.air-visible { --chat-bottom:140px; }
   #hud.on { opacity:var(--hud-alpha); }
   #hud .panel, #hud #feed, #hud #msg, #hud #respawn, #hud #classPick,
-  #hud #chat, #hud #chatkey, #hud #airstrikeReady, #hud #overchargeActive,
+  #hud #chat, #hud #chatkey, #hud #airstrikeReady,
   #hud #minimap, #hud #teamPing, #hud #firstMinute { zoom:var(--hud-scale); }
   /* Square, not a circle — the crosshair was the last always-visible piece
      of geometry in the whole game still shaped like something that isn't a
@@ -513,15 +507,6 @@
     transform:translateX(-50%); font-size:14px; letter-spacing:2px; color:#ffd97a;
     text-transform:uppercase; }
   #airstrikeReady.building { color:#e8ecf2; opacity:.55; font-size:11px; }
-  /* Overcharge's own active-state indicator — the counterpart to
-     airstrikeHud's reticle for the OTHER ability, showing time remaining
-     so a fight can be timed against it rather than the buff just
-     silently expiring mid-engagement with no warning. Same danger red as
-     the rest of this HUD's "something risky is happening" language. */
-  #overchargeActive { display:none; position:absolute; left:50%; bottom:80px;
-    transform:translateX(-50%); font-size:14px; letter-spacing:2px; color:#e05a4e;
-    text-transform:uppercase; }
-  #overchargeActive.charging { color:#ffd97a; }
   #objective { display:none; position:absolute; left:50%; bottom:112px;
     transform:translateX(-50%); font-size:11px; letter-spacing:2px; text-transform:uppercase;
     color:#e8ecf2; align-items:center; gap:9px; }
@@ -533,11 +518,6 @@
     transform:translateX(-50%); font-size:10px; letter-spacing:1.6px; text-transform:uppercase;
     color:#ffd97a; align-items:center; gap:8px; text-shadow:0 1px 4px rgba(0,0,0,.8); }
   #teamPing .arrow { width:14px; height:21px; }
-  #fieldStation { display:none; position:absolute; left:50%; bottom:137px;
-    transform:translateX(-50%); font-size:10px; letter-spacing:1.7px;
-    text-transform:uppercase; color:#ffd97a; text-shadow:0 1px 4px rgba(0,0,0,.8); }
-  #fieldStation.contested { color:#e05a4e; }
-  #fieldStation.cooldown { color:#e8ecf2; opacity:.55; }
 
   .panel { position:absolute; padding:10px 16px; background:rgba(10,14,22,.55);
     border-radius:6px; backdrop-filter:blur(3px); }
@@ -559,7 +539,8 @@
   #toolname { font-size:15px; font-weight:700; letter-spacing:2px; }
   #ammo { font-size:26px; font-weight:800; margin-top:2px; }
   #ammo small { font-size:13px; opacity:.55; font-weight:400; }
-  #toolhint { font-size:11px; opacity:.5; margin-top:3px; }
+  #toolhint { font-size:11px; opacity:0; margin-top:3px; transition:opacity .2s; }
+  #hud.orientation #toolhint { opacity:.5; }
 
   /* Optional first-session orientation. A compact field card, never a modal:
      it does not capture input or pause the fight, and disappears after one
@@ -584,9 +565,6 @@
     color:rgba(255,255,255,.82); }
   #matchclock.urgent { color:#ffd97a; }
   #matchclock.overtime { color:#ffd97a; animation:blink 1.2s infinite; }
-  #operationHud { display:none; margin-top:4px; color:#a9c5ee; font-size:8px;
-    font-weight:700; letter-spacing:1.2px; white-space:nowrap; }
-  #operationHud.on { display:block; }
 
   #feed { right:22px; top:60px; text-align:right; font-size:13px; line-height:1.8; }
   #feed div { opacity:.9; text-shadow:0 1px 3px rgba(0,0,0,.7); }
@@ -709,7 +687,8 @@
      the chat log. When the AIR meter expands the vitals panel, both pieces
      move together instead of leaving this line inside the larger box. */
   #chatkey { position:absolute; left:22px; bottom:calc(var(--chat-bottom) - 22px); font-size:11px;
-    opacity:.45; letter-spacing:1px; }
+    opacity:0; letter-spacing:1px; transition:opacity .2s; }
+  #hud.orientation #chatkey { opacity:.45; }
   #chat.open ~ #chatkey, #chat.haslog ~ #chatkey { opacity:0; }
 </style>
 <script src="./vendor/peerjs.min.js"></script>
@@ -727,10 +706,8 @@
     <div id="killcallout"></div>
     <div id="airstrikeHud"><div class="reticle"></div><div class="label">airstrike — click to confirm</div></div>
     <div id="airstrikeReady">airstrike ready — [F]</div>
-    <div id="overchargeActive"></div>
     <div id="objective"><span class="arrow"></span><span class="label"></span></div>
     <div id="teamPing"><span class="arrow"></span><span class="label"></span></div>
-    <div id="fieldStation"></div>
     <div id="scopeOverlay">
       <div id="scopeFrame">
         <span class="corner tl"></span><span class="corner tr"></span>
@@ -742,7 +719,6 @@
       </div>
     </div>
     <div id="scopeNotches"></div>
-    <div class="panel" id="roomcode">ROOM <b>····</b></div>
     <div id="ping"></div>
     <div id="fps"></div>
     <div id="perf"></div>
@@ -763,13 +739,12 @@
     <div class="panel" id="tool">
       <div id="toolname">RIFLE</div>
       <div id="ammo">10 <small>/ 10</small></div>
-      <div id="toolhint">1–4 / Q·E weapons · CTRL crouch · R reload</div>
+      <div id="toolhint">1 gun · 2 spade · 3 blocks · 4 grenade · R reload</div>
     </div>
     <div class="panel" id="scorewrap" style="left:50%;top:16px;transform:translateX(-50%);text-align:center;">
       <div id="score"><span class="g">GREEN 0</span><span style="opacity:.4">—</span><span class="b">0 BLUE</span></div>
       <div id="flagstate">first to 3 captures</div>
       <div id="matchclock">12:00</div>
-      <div id="operationHud"></div>
     </div>
     <div id="feed"></div>
     <div id="msg"></div>
@@ -800,6 +775,7 @@
     <div class="subtitle">destructible voxel combat in your browser</div>
     <input id="nameInput" class="home-only" maxlength="12" placeholder="ENTER CALLSIGN">
     <div id="pausedTitle" class="only-paused">— PAUSED —</div>
+    <div id="roomcode">ROOM <b>····</b></div>
     <div class="play" id="playBtn">DEPLOY</div>
     <div class="play small only-paused" id="leaveBtn">MAIN MENU</div>
     <div class="only-paused" id="playerSafety">
@@ -826,13 +802,6 @@
     </div>
     <details class="drawer home-only" id="playOptions">
       <summary>loadout & host options</summary>
-    <div class="prefs home-only" id="operationPick">
-      when you host — session <select id="operationPref">
-        <option value="standard">standard rotation</option>
-        <option value="operation">three-match operation</option>
-      </select>
-      <small>KOTH → CTF → TDM</small>
-    </div>
     <div class="prefs home-only" id="standardHostPrefs">
       when you host — mode <select id="modePref">
         <option value="any">any mode</option>
@@ -950,12 +919,6 @@
             <div><span id="endBests"></span><span id="endMastery"></span></div>
           </div>
           <div id="endFacts">
-            <div id="endOperation">
-              <span id="endOperationLabel"></span>
-              <b id="endOperationTitle"></b>
-              <small id="endOperationDetail"></small>
-            </div>
-            <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
             <div id="endStory">
               <span id="endStoryLabel">TERRAIN</span>
               <b id="endStoryTitle"></b>
@@ -1009,7 +972,6 @@
               </button>
             </div>
           </div>
-          <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
           <div id="squadReady">
             <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
             <small>Your teammates already carry into the next round.</small>
@@ -1024,6 +986,6 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=31"></script>
+  <script type="module" src="./src/main.js?v=33"></script>
 </body>
 </html>

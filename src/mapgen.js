@@ -44,34 +44,18 @@ function mulberry32(a) {
 // these later is just changing a hex value here, nothing structural.
 export const MAPS = [
   { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null,
-    stations: [
-      { x: 127.5, z: 86, label: 'NORTH WALL' },
-      { x: 127.5, z: 170, label: 'SOUTH SHELF' },
-    ],
     atmosphere: { sky: ['#5eafe0', '#a6d3e2', '#e3ead5'], fog: 0xcadcc9, cloud: 0xf5f1dc, water: 0x347ba7,
       sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] },
     paletteOverrides: { grass: 0x5f9f45, dirt: 0x75563a, sand: 0xc4ad73, stone: 0x70796f, moss: 0x3d7545 } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
-    stations: [
-      { x: 127.5, z: 82, label: 'NORTH DUGOUT' },
-      { x: 127.5, z: 174, label: 'SOUTH DUGOUT' },
-    ],
     atmosphere: { sky: ['#4d9fc9', '#9bcbd8', '#e8eee4'], fog: 0xd3e3dc, cloud: 0xf8f4e8, water: 0x248fa4,
       sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] },
     paletteOverrides: { grass: 0x6f9f55, dirt: 0x89684d, sand: 0xd2b977, stone: 0x737b80, moss: 0x4d7459 } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
-    stations: [
-      { x: 127.5, z: 82, label: 'NORTH FORD' },
-      { x: 127.5, z: 174, label: 'SOUTH FORD' },
-    ],
     atmosphere: { sky: ['#aaa3d2', '#c8c0dc', '#e4ddea'], fog: 0xc9c1d6, cloud: 0xf1edf4, water: 0x3c6967,
       sun: [0.55, 1, -0.35], sunTint: [1.02, 1.00, 1.06] },
     paletteOverrides: { grass: 0x4f824c, dirt: 0x685344, sand: 0xb0a683, stone: 0x72757f, moss: 0x315d3f } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
-    stations: [
-      { x: 99, z: 127.5, label: 'WEST RUINS' },
-      { x: 156, z: 127.5, label: 'EAST RUINS' },
-    ],
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'CENTER' },
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH' },
@@ -81,10 +65,6 @@ export const MAPS = [
       sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] },
     paletteOverrides: { grass: 0x8c8b55, dirt: 0x895d49, sand: 0xcaa461, stone: 0x846f72, moss: 0x74694f } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
-    stations: [
-      { x: 127.5, z: 110, label: 'NORTH CAUSEWAY' },
-      { x: 127.5, z: 145, label: 'SOUTH CAUSEWAY' },
-    ],
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'CROWN' },
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH GATE' },
@@ -94,10 +74,6 @@ export const MAPS = [
       sun: [0.35, 1, -0.55], sunTint: [1.08, 1.04, 0.94] },
     paletteOverrides: { grass: 0x567447, dirt: 0x604636, sand: 0xb29a68, stone: 0x515d69, moss: 0x334f3c } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
-    stations: [
-      { x: 104, z: 127.5, label: 'WEST SADDLE' },
-      { x: 151, z: 127.5, label: 'EAST SADDLE' },
-    ],
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'KNOLL' },
       { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
@@ -122,43 +98,6 @@ const put = (world, x, y, z, block) => {
   world.data[(y * SZ + z) * SX + x] = block;
 };
 const terrainY = (height, x, z) => Math.floor(height[at(Math.round(x), Math.round(z))]);
-
-// Every battlefield gets two authored neutral field caches. The same chunky
-// silhouette — stone pad, pallet boxes, four bollards, signal pylons — makes
-// their function readable across themes without a texture, glowing pickup,
-// or prop mesh. They are ordinary terrain voxels, so a fight can chew the
-// shelter apart and players can rebuild cover around the still-marked site.
-function buildFieldStations(world, mapIndex) {
-  for (const station of MAPS[mapIndex % MAPS.length].stations ?? []) {
-    const cx = Math.floor(station.x), cz = Math.floor(station.z);
-    const y = world.surface(cx, cz);
-    station.y = y + 1;
-    // Level a compact pad and guarantee standing headroom. Fill only the
-    // three voxels immediately below it, enough to avoid a visibly floating
-    // slab without turning a small landmark into a buried retaining wall.
-    for (let dx = -3; dx <= 3; dx++)
-      for (let dz = -3; dz <= 3; dz++) {
-        for (let fy = Math.max(0, y - 3); fy <= y; fy++)
-          if (!world.get(cx + dx, fy, cz + dz)) put(world, cx + dx, fy, cz + dz, BLOCK.STONE);
-        put(world, cx + dx, y, cz + dz, BLOCK.STONE);
-        for (let fy = y + 1; fy <= y + 5; fy++) put(world, cx + dx, fy, cz + dz, 0);
-      }
-    // Corner bollards frame the capture footprint without walling it off.
-    for (const [dx, dz] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) {
-      put(world, cx + dx, y + 1, cz + dz, BLOCK.STONE);
-      put(world, cx + dx, y + 2, cz + dz, BLOCK.STONE);
-    }
-    // Low supply pallets: readable as crates, usable as crouch cover.
-    for (const dx of [-1, 0, 1]) put(world, cx + dx, y + 1, cz + 2, BLOCK.DIRT);
-    put(world, cx - 1, y + 2, cz + 2, BLOCK.DIRT);
-    // Three separated rising pylons read as signal-strength bars from a
-    // distance. The old single mast plus crossbar unintentionally resembled
-    // a Christian cross; this industrial silhouette is deliberately neutral.
-    for (const [dx, height] of [[-2, 2], [0, 3], [2, 4]])
-      for (let h = 1; h <= height; h++)
-        put(world, cx + dx, y + h, cz - 3, BLOCK.STONE);
-  }
-}
 
 // Deterministic, unseeded 3D noise for moss placement within the deep
 // stone layer below — same summed-low-frequency-sines style as
@@ -890,7 +829,6 @@ export function generateMap(world, seed = 1979, mapIndex = 0) {
   setVoxelLight(atmosphere.sun, atmosphere.sunTint);
   world.data.fill(0);
   MAPS[mapIndex % MAPS.length].gen(world, seed);
-  buildFieldStations(world, mapIndex);
   world.buildAll();
   return mapIndex % MAPS.length;
 }

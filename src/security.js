@@ -2,7 +2,7 @@
 // Honest jitter is corrected; only sustained impossible input disconnects.
 
 export const SECURED_ACTIONS = Object.freeze(
-  ['shoot', 'reload', 'dig', 'place', 'nade', 'strike', 'overcharge']);
+  ['shoot', 'reload', 'dig', 'place', 'nade', 'strike']);
 
 export function actionSequenceDisposition(last, sequence) {
   if (!Number.isSafeInteger(sequence) || sequence < 1)

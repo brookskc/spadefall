@@ -6,7 +6,6 @@ import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, getMouseSensitivity, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
-import { retainedMomentum } from './streaks.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -104,8 +103,6 @@ export class Player {
     this.grenades = 3;
     this.grenadeRegen = 0;
     this._streak = 0;
-    this._overchargeWindup = 0;
-    this._overchargeT = 0;
     this.cooldown = 0;
     this.reloading = 0;
     this.bob = 0;
@@ -242,8 +239,7 @@ export class Player {
       if (e.code === 'KeyG' && document.pointerLockElement === dom)
         this.game.requestTeamPing(this);
       if (e.code === 'Space') { this.slideT = 0; this.body.jump(); } // hop out of a slide
-      // F spends the strongest currently affordable contribution reward.
-      // Charging/active Overcharge blocks stacking either reward.
+      // F opens airstrike targeting once the contribution meter is full.
       if (e.code === 'KeyF') {
         if (this._piloting) {
           this._piloting = false;
@@ -251,8 +247,6 @@ export class Player {
           this._piloting = true;
           const eye = this.body.eye();
           this._pilotPos = new THREE.Vector3(eye.x, SY + 30, eye.z);
-        } else if (this.game.availableStreak(this) === 'overcharge') {
-          this.game.requestOvercharge(this);
         }
       }
     });
@@ -825,13 +819,7 @@ export class Player {
     this.swing = 0;
     this._reloadStage = 0;
     this._mkCount = 0; this._mkT = null; // dying breaks any multi-kill chain — no rampage survives a death
-    // Phase 7 keeps a modest slice of field momentum through death. The
-    // feature is host-authored in multiplayer; guests mirror it from the
-    // synchronized policy rather than trusting their own URL flags.
-    this._momentumCarry = retainedMomentum(this._streak,
-      this.game.momentumBalanceEnabled());
-    this._streak = this._momentumCarry;
-    this._overchargeWindup = 0; this._overchargeT = 0;
+    this._streak = 0;
     this._piloting = false; // die mid-airstrike-targeting and the sequence just ends — no explosion, no orphaned camera state
     this._fallingT = 0; // die mid-fall (exposed and found, exactly the intended risk) and steering control ends — the missile itself is NOT canceled, the host's own pending strike is a separate, independent timer that keeps counting down and still detonates on schedule, just frozen at wherever it was last steered to, since the dead player's client stops sending steering updates
     this._lingerT = 0; // die during the post-impact linger (caught in someone else's fight, or your own blast) and the death camera takes over immediately — no frozen overhead view fighting the ragdoll for control
@@ -849,7 +837,7 @@ export class Player {
   // The FOV-easing (and the scope notch overlay it drives) lives entirely
   // inside update(), which stops running the instant you die — nothing
   // else would ever bring it back to normal, so dying while zoomed in left
-  // the death camera (and the flycam after it) rendering through whatever
+  // the death camera rendering through whatever
   // FOV you happened to be holding at the exact instant you died. No
   // easing here on purpose: you're dead, there's no "smoothly" un-aim a
   // scope you can no longer use.
@@ -860,17 +848,13 @@ export class Player {
     this._updateScopeNotches(false); // un-hides the scope body/lens, hides the notch overlay
   }
 
-  // First-person death: crumple to the dirt with a roll, then a free-roam
-  // fly camera for the rest of the respawn wait — no killcam. That system
-  // kept failing in ways that were hard to pin down without a browser to
-  // reproduce in, and a simple flycam is something that just works: no
-  // trail data, no wire fields, no per-frame math that can throw.
+  // First-person death: crumple to the dirt, then hold at the corpse.
   deathCam(dt) {
     this.deadT = Math.min(1.6, this.deadT + dt * 2.4);
     if (this.deadT < 1.6) {
       // Crumple, then settle out of the tilt. Mouselook already updates
       // pitch/yaw with no alive-check anywhere in _bind, which is what
-      // makes both this settle AND the free-roam below actually work.
+      // makes this settle while mouselook remains available.
       const fall = Math.min(1, this.deadT);
       const k = fall * fall * (3 - 2 * fall); // 0..1 over the fall
       const settleT = Math.max(0, Math.min(1, (this.deadT - 1) / 0.6));
@@ -882,55 +866,8 @@ export class Player {
       return;
     }
 
-    // Free roam: fly through space for the rest of the wait, with real
-    // voxel collision — no clipping through the floor or a wall, though
-    // you can still slide along one, since each axis is moved and checked
-    // independently rather than freezing the whole move the instant ANY
-    // component would clip something. W/S move along the full look
-    // direction (so looking up and holding W climbs, same convention a
-    // spectator cam usually uses), A/D strafe horizontally only, same as
-    // normal movement. SPACE/CTRL add pure vertical for when you're not
-    // looking straight up or down. SHIFT doubles speed. World-bounds
-    // clamping stays on top of the voxel collision — that catches flying
-    // off the EDGE of the map into open sky, which has no terrain to
-    // collide with in the first place.
-    if (!this._flyPos) {
-      const eye = this.body.eye();
-      this._flyPos = new THREE.Vector3(eye.x, eye.y - 1.2, eye.z);
-    }
-    const dir = this.lookDir(this._moveForward);
-    const f = this._moveRight.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    const r = this._eye.set(-f.z, 0, f.x);
-    const wish = this._moveWish.set(0, 0, 0);
-    if (this.keys['KeyW']) wish.add(dir);
-    if (this.keys['KeyS']) wish.sub(dir);
-    if (this.keys['KeyD']) wish.add(r);
-    if (this.keys['KeyA']) wish.sub(r);
-    if (this.keys['Space']) wish.y += 1;
-    if (this.keys['ControlLeft'] || this.keys['ControlRight']) wish.y -= 1;
-    if (wish.lengthSq() > 0) wish.normalize();
-    const shift = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
-    const speed = 9 * (shift ? 2 : 1);
-    // A small cube (all 8 corners checked) around the point rather than a
-    // single-pixel test — cheap regardless (a handful of voxel lookups,
-    // once a frame, for one entity, not a hot path) and keeps the near
-    // clip plane from dipping into geometry at a glancing angle, without
-    // needing the full body-sized hitbox a real entity's collision uses.
-    const R = 0.4, world = this.game.world;
-    const blocked = (x, y, z) => {
-      for (const ox of [-R, R]) for (const oy of [-R, R]) for (const oz of [-R, R])
-        if (world.solid(x + ox, y + oy, z + oz)) return true;
-      return false;
-    };
-    const p = this._flyPos;
-    const dx = wish.x * speed * dt, dy = wish.y * speed * dt, dz = wish.z * speed * dt;
-    if (!blocked(p.x + dx, p.y, p.z)) p.x += dx;
-    if (!blocked(p.x, p.y + dy, p.z)) p.y += dy;
-    if (!blocked(p.x, p.y, p.z + dz)) p.z += dz;
-    p.x = Math.max(-8, Math.min(SX + 8, p.x));
-    p.y = Math.max(-8, Math.min(SY + 24, p.y));
-    p.z = Math.max(-8, Math.min(SZ + 8, p.z));
-    this.camera.position.copy(p);
+    const eye = this.body.eye();
+    this.camera.position.set(eye.x, eye.y - 1.2, eye.z);
     this.camera.rotation.set(this.pitch, this.yaw - Math.PI / 2, 0, 'YXZ');
   }
 
@@ -1031,16 +968,11 @@ export class Player {
     this.reloading = 0;
     this._reloadStage = 0;
     this.deadT = 0;
-    this._flyPos = null; // fresh flycam start point next death, not wherever it last was
     this.crouched = false;
     this.body.half.h = STAND_HEIGHT;
     resetEnvironmentalState(this);
-    // Normal redeploys consume the momentum retained by die(). rebuild()
-    // clears _momentumCarry first, so a new round still starts at zero.
     this._mkCount = 0; this._mkT = null;
-    this._streak = Math.max(0, Number(this._momentumCarry) || 0);
-    this._momentumCarry = null;
-    this._overchargeWindup = 0; this._overchargeT = 0;
+    this._streak = 0;
     this._piloting = false; this._fallingT = 0; this._lingerT = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;

@@ -254,8 +254,6 @@ export class Bot {
     }
     const ordered = this._orderGoal();
     if (ordered) return ordered;
-    const supply = g.botFieldStationGoal?.(this);
-    if (supply) return supply;                                      // one low-stock bot detours
     if (g.hill) {
       // Occupy a stable post INSIDE the hill instead of sending ten bodies to
       // the exact center coordinate. This reduces bunching and makes control
@@ -991,7 +989,6 @@ export class Bot {
     this.deadT = 0; // corpse tumble starts; the body hides itself when done
     this._mkCount = 0; this._mkT = null; // tracked for consistency even though bots don't get the callout shown
     this._streak = 0; // bots cannot spend scorestreak rewards
-    this._overchargeWindup = 0; this._overchargeT = 0; // bots never activate rewards
     this.parts.gun.visible = true; // drop the spade, back to the rifle
     this.parts.spade.visible = false;
     this.game.effects.burst(this.body.eye(), 26, teamHex(this.team), 6);

@@ -55,6 +55,7 @@ try {
         groups: [...document.querySelectorAll('#endBoard .teamGroup')]
           .map(row => row.textContent.trim()),
         player: document.querySelector('#endBoard tr.me td:first-child')?.textContent.trim(),
+        playerMarkers: document.querySelectorAll('#endBoard .playerMarker').length,
         impact: [...document.querySelectorAll('#endImpactMetrics b')]
           .map(node => Number(node.textContent)),
         pips: document.querySelectorAll('#endProgress i').length,
@@ -66,7 +67,8 @@ try {
       };
     });
     if (state.map !== 'island' || state.groups.join('|') !== 'GREEN FORCE|BLUE FORCE'
-        || state.player !== 'YOU' || state.impact.join(',') !== '0,52,18,34,1'
+        || state.player !== 'You' || state.playerMarkers !== 0
+        || state.impact.join(',') !== '0,52,18,34,1'
         || state.pips !== 14 || state.activePips < 12 || state.fieldGoalsPresent
         || state.horizontalOverflow)
       throw new Error(`${shot.name}: invalid results composition ${JSON.stringify(state)}`);

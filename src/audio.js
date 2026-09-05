@@ -278,7 +278,6 @@ export const sfx = {
     }
   },
 
-  overcharge: () => tone({ freq: 190, end: 520, dur: 0.54, type: 'triangle', gain: 0.23 }),
   pickup: () => {
     tone({ freq: 520, dur: 0.08, type: 'triangle', gain: 0.19 });
     tone({ freq: 780, dur: 0.11, type: 'triangle', gain: 0.19, delay: 0.08 });

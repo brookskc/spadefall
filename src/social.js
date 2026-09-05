@@ -4,7 +4,7 @@ export const TEAM_PING_RANGE = 80;
 export const TEAM_PING_TTL = 6;
 export const TEAM_PING_COOLDOWN = 2;
 export const TEAM_PING_LIMIT = 4;
-export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL', 'SUPPLY'];
+export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL'];
 export const VOTE_KICK_DURATION = 30;
 export const VOTE_KICK_COOLDOWN = 90;
 
@@ -13,11 +13,6 @@ export const VOTE_KICK_COOLDOWN = 90;
 export function voteKickVotesNeeded(humans) {
   const eligible = Math.max(0, Math.floor(Number(humans) || 0) - 1);
   return eligible < 2 ? 0 : Math.floor(eligible / 2) + 1;
-}
-
-export function rematchVotesNeeded(humans) {
-  const n = Math.max(1, Math.floor(Number(humans) || 0));
-  return Math.floor(n / 2) + 1;
 }
 
 const rosterRows = roster => Array.isArray(roster)

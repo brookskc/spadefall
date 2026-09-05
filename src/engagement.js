@@ -11,31 +11,23 @@ export const ENGAGEMENT_FEATURES = Object.freeze([
   'voxelStories',
   'deathRecap',
   'stayAsSquad',
-  'operations',
-  'momentumBalance',
   'teamBalance',
-  'botDirector',
   'publicChat',
 ]);
 
 // These features have completed their isolated rollout and are now part of
-// ordinary matches. Operations and the adaptive bot director remain explicit
-// playtest opt-ins because they make broader changes to match structure and
-// opponent behavior.
+// ordinary matches.
 export const DEFAULT_ENGAGEMENT_FEATURES = Object.freeze([
   'firstMinute',
   'voxelStories',
   'deathRecap',
   'stayAsSquad',
-  'momentumBalance',
   'teamBalance',
 ]);
 
 const FEATURE_BY_LOWER = new Map(ENGAGEMENT_FEATURES.map(name => [name.toLowerCase(), name]));
 
-// Experimental phases can still be exercised independently with, for example,
-// ?features=operations,botDirector. Known query flags are additive to the
-// production defaults; unknown names are ignored.
+// Known query flags are additive to production defaults; unknown names are ignored.
 export function parseEngagementFeatures(search = '') {
   const params = new URLSearchParams(String(search).replace(/^\?/, ''));
   const requested = new Set(DEFAULT_ENGAGEMENT_FEATURES);
@@ -57,15 +49,14 @@ const EVENT_FIELDS = Object.freeze({
   first_action: ['action', 'matchSecond'],
   death: ['cause'],
   kill: ['cause'],
-  rematch: ['action'],
   disconnect: ['reason'],
   match_finish: ['outcome', 'won', 'duration', 'overtime', 'scoreMargin'],
 });
 
 const ENUMS = Object.freeze({
   action: new Set(['solo', 'host', 'join', 'quick', 'browse', 'browse_join', 'deploy',
-    'shoot', 'dig', 'place', 'grenade', 'ping', 'objective', 'overcharge', 'airstrike',
-    'vote', 'other']),
+    'shoot', 'dig', 'place', 'grenade', 'ping', 'objective', 'airstrike',
+    'other']),
   mode: new Set(['ctf', 'tdm', 'koth', 'other']),
   network: new Set(['solo', 'host', 'client', 'other']),
   source: new Set(['solo', 'host', 'join', 'quick', 'browse', 'rotation', 'resume', 'qa', 'other']),

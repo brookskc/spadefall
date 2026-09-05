@@ -15,7 +15,6 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   setCrouch, setSoldierTool } from '../src/entities.js';
 import { Game, airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
-import { Avatar } from '../src/avatar.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
@@ -36,8 +35,8 @@ import { PresentationSchedule } from '../src/presentation.js';
 import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
-import { BOT_DIFFICULTY, assignBotRoles, botDifficulty, botDifficultyCode,
-  botDifficultyKey, botSeparation, botsForSquadOrder, botTargetScore,
+import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
+  botSeparation, botsForSquadOrder, botTargetScore,
   botTelemetrySummary, chooseLocalRoute, hillPost, rememberedEnemyPosition,
   scheduleBotBrains } from '../src/bot-rules.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
@@ -46,27 +45,17 @@ import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
 import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
-import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
-  OVERCHARGE_WINDUP, availableStreakAbility, balancedMomentumGain,
-  dominantStreakTeam, gainStreak, overchargeDamage, retainedMomentum,
-  spendStreak, stepOvercharge } from '../src/streaks.js';
-import { FIELD_STATION_BLOCK_CAP, FIELD_STATION_CAPTURE_TIME,
-  FIELD_STATION_COOLDOWN, applyFieldSupply, nearestFieldStation,
-  stationCanSupply, stepFieldStation } from '../src/field-stations.js';
+import { AIRSTRIKE_COST, availableStreakAbility, gainStreak,
+  spendStreak } from '../src/streaks.js';
 import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
 import { masteryProgress } from '../src/mastery.js';
-import { rematchVotesNeeded, staySquadGroups, staySquadState, voteKickVotesNeeded,
+import { staySquadGroups, staySquadState, voteKickVotesNeeded,
   validPingDirection } from '../src/social.js';
 import { callsignHasProfanity, callsignIssue, normalizeCallsign,
   sanitizeCallsign } from '../src/callsign.js';
 import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
-import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
-  operationComplete, operationFromRow, operationLeg, operationRow,
-  operationSideForColor, operationWinner, recordOperationResult,
-  validOperationRow } from '../src/operations.js';
-import { balanceHumanTeams, planBotDirector,
-  TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
+import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
 import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
@@ -134,21 +123,6 @@ function mapgenTests() {
         `surface=${surface}`);
       ok(`${name}: hill ${i + 1} has playable headroom`,
         a.get(h.x, surface + 1, h.z) === 0 && a.get(h.x, surface + 2, h.z) === 0);
-    }
-    ok(`${name}: has two named tactical field caches`,
-      MAPS[m].stations?.length === 2 && MAPS[m].stations.every(s => s.label));
-    for (const [i, s] of MAPS[m].stations.entries()) {
-      const x = Math.floor(s.x), z = Math.floor(s.z), surface = a.surface(x, z);
-      ok(`${name}: cache ${i + 1} has a dry stone pad and headroom`,
-        surface >= SEA && a.get(x, surface, z) === BLOCK.STONE
-          && a.get(x, surface + 1, z) === 0 && a.get(x, surface + 2, z) === 0,
-        `surface=${surface}`);
-      ok(`${name}: cache ${i + 1} uses separated signal pylons without a crossbar`,
-        a.get(x - 2, s.y + 1, z - 3) === BLOCK.STONE
-          && a.get(x, s.y + 2, z - 3) === BLOCK.STONE
-          && a.get(x + 2, s.y + 3, z - 3) === BLOCK.STONE
-          && a.get(x - 1, s.y + 2, z - 3) === 0
-          && a.get(x + 1, s.y + 2, z - 3) === 0);
     }
     let bad = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] >= PALETTE.length) bad++;
@@ -788,122 +762,27 @@ function kothRuleTests() {
 
 // ---------------------------------------------------------------------------
 function streakRuleTests() {
-  group('scorestreak redesign: contribution economy and Overcharge');
+  group('airstrike contribution reward');
   ok('kills, assists, and objective score share one capped streak meter',
     gainStreak(0, CONTRIBUTION.kill) === 100
-      && gainStreak(450, CONTRIBUTION.assist) === OVERCHARGE_COST
-      && gainStreak(990, 50) === AIRSTRIKE_COST);
-  ok('Overcharge unlocks before the airstrike and the stronger reward wins',
-    availableStreakAbility(OVERCHARGE_COST) === 'overcharge'
+      && gainStreak(AIRSTRIKE_COST - 10, 50) === AIRSTRIKE_COST);
+  ok('the airstrike is the only reward and unlocks at 700 points',
+    availableStreakAbility(AIRSTRIKE_COST - 1) === null
       && availableStreakAbility(AIRSTRIKE_COST) === 'airstrike');
-  ok('an active or charging Overcharge prevents reward stacking',
-    availableStreakAbility(AIRSTRIKE_COST, 0.5, 0) === null
-      && availableStreakAbility(AIRSTRIKE_COST, 0, 5) === null);
-  ok('rewards spend a fixed cost and preserve legitimate overflow',
-    spendStreak(650, OVERCHARGE_COST) === 150
+  ok('spending the reward preserves legitimate overflow and rejects short meters',
+    spendStreak(AIRSTRIKE_COST + 50, AIRSTRIKE_COST) === 50
       && spendStreak(AIRSTRIKE_COST, AIRSTRIKE_COST) === 0
-      && spendStreak(400, OVERCHARGE_COST) === null);
-
-  const charging = stepOvercharge(OVERCHARGE_WINDUP, 0, 0.5);
-  ok('Overcharge has a visible windup before damage changes',
-    charging.charging > 0 && charging.active === 0 && !charging.started);
-  const live = stepOvercharge(0.1, 0, 0.2);
-  ok('finishing the windup starts the bounded active window',
-    live.started && live.charging === 0 && live.active < OVERCHARGE_DURATION);
-  const expired = stepOvercharge(0, 0.1, 0.2);
-  ok('the active window reports its expiry', expired.ended && expired.active === 0);
-  ok('Overcharge is a readable advantage with retained incoming risk',
-    overchargeDamage(100, true, false) === 135
-      && overchargeDamage(100, false, true) === 125
-      && overchargeDamage(100, true, true) === 168.75);
+      && spendStreak(AIRSTRIKE_COST - 1, AIRSTRIKE_COST) === null);
   const snapshot = { t: 's', p: [], b: [], c: [0, 0], g: [],
-    u: [[0, 650, 12, 0], [2, 0, 0, 120]] };
-  ok('momentum and Overcharge timers pass the snapshot trust boundary',
+    u: [[0, 650], [2, 0]] };
+  ok('contribution meter rows pass the snapshot trust boundary',
     validServerMessage(snapshot)
-      && !validServerMessage({ ...snapshot, u: [[0, 1500, 0, 0]] })
-      && !validServerMessage({ ...snapshot, u: [[0, 500, 0, 999]] }));
-  ok('Overcharge phase telegraphs are bounded and attributable',
-    validServerMessage({ t: 'e', k: 'overcharge', owner: 2,
-      phase: 'windup', remaining: OVERCHARGE_WINDUP })
+      && !validServerMessage({ ...snapshot, u: [[0, 701]] })
+      && !validServerMessage({ ...snapshot, u: [[0, 500, 0, 0]] }));
+  ok('retired reward actions and events are rejected at the wire boundary',
+    !validClientMessage({ t: 'a', k: 'overcharge', n: 1 })
       && !validServerMessage({ t: 'e', k: 'overcharge', owner: 2,
-        phase: 'forever', remaining: 99 }));
-  const avatar = new Avatar(scene(), 'green', 'Tester');
-  avatar.setOvercharge(true, false);
-  ok('the voxel soldier exposes a visible windup telegraph',
-    avatar.overchargeFx.visible && avatar.overchargeFx.children.length === 8);
-  avatar.setOvercharge(false, true);
-  ok('the same warning assembly carries into the active state',
-    avatar.overchargeFx.visible && avatar._overchargePhase === 2);
-  avatar.dispose();
-
-  group('phase seven: momentum balance without runaway streaks');
-  ok('death banks thirty-five percent only when momentum balance is enabled',
-    retainedMomentum(AIRSTRIKE_COST, true) === 350
-      && retainedMomentum(500, true) === 175
-      && retainedMomentum(AIRSTRIKE_COST, false) === 0);
-  ok('objectives and assists earn a teamplay premium without inflating kill momentum',
-    balancedMomentumGain(100, { objective: 1 }, true) === 125
-      && balancedMomentumGain(100, { assists: 1 }, true) === 125
-      && balancedMomentumGain(100, {}, true) === 100
-      && balancedMomentumGain(100, { objective: 1 }, false) === 100);
-  ok('a lopsided leader is held only after using more rewards than the trailing team',
-    dominantStreakTeam('ctf', { green: 2, blue: 0 }, { green: 1, blue: 0 }) === 'green'
-      && dominantStreakTeam('tdm', { green: 8, blue: 0 }, { green: 1, blue: 0 }) === 'green'
-      && dominantStreakTeam('koth', { green: 35, blue: 0 }, { green: 1, blue: 0 }) === 'green'
-      && dominantStreakTeam('ctf', { green: 2, blue: 0 }, { green: 0, blue: 0 }) === null);
-  ok('the streak hold lifts when the score tightens or reward use equalizes',
-    dominantStreakTeam('tdm', { green: 7, blue: 0 }, { green: 2, blue: 0 }) === null
-      && dominantStreakTeam('koth', { green: 60, blue: 10 }, { green: 2, blue: 2 }) === null);
-  const balancedSnapshot = { ...snapshot, mb: [1, 2, 1] };
-  ok('the host momentum policy and team reward counts cross a bounded trust boundary',
-    validServerMessage(balancedSnapshot)
-      && !validServerMessage({ ...balancedSnapshot, mb: [2, 0, 0] })
-      && !validServerMessage({ ...balancedSnapshot, mb: [1, -1, 0] }));
-}
-
-// ---------------------------------------------------------------------------
-function fieldStationTests() {
-  group('voxel field stations: contest, resupply, and anti-farming');
-  const green = { alive: true, team: 'green', carrier: false, blocks: 4, grenades: 0 };
-  const blue = { alive: true, team: 'blue', carrier: false, blocks: 4, grenades: 0 };
-  const full = { alive: true, team: 'green', carrier: false,
-    blocks: FIELD_STATION_BLOCK_CAP, grenades: 3 };
-  ok('only a living, non-carrier soldier missing supplies can activate a cache',
-    stationCanSupply(green) && !stationCanSupply(full)
-      && !stationCanSupply({ ...green, carrier: true }));
-
-  const partial = stepFieldStation({}, [green], FIELD_STATION_CAPTURE_TIME - 0.1);
-  ok('an uncontested under-supplied team builds capture progress',
-    partial.team === 'green' && partial.progress > 0 && !partial.activated);
-  const contested = stepFieldStation(partial, [green, blue], 0.2);
-  ok('enemy presence contests and clears stockpiled capture progress',
-    contested.contested && contested.progress === 0 && contested.team === null);
-  const activated = stepFieldStation({}, [green], FIELD_STATION_CAPTURE_TIME);
-  ok('a completed hold starts one shared thirty-second cooldown',
-    activated.activated === 'green' && activated.cooldown === FIELD_STATION_COOLDOWN);
-  const cooling = stepFieldStation(activated, [blue], 1);
-  ok('the cooldown cannot be bypassed by changing teams',
-    !cooling.activated && cooling.cooldown === FIELD_STATION_COOLDOWN - 1);
-
-  const grant = applyFieldSupply(green);
-  ok('a cache grants bounded building stock and one grenade',
-    grant.blocks === 20 && grant.nades === 1 && green.blocks === 24 && green.grenades === 1);
-  const capped = { alive: true, team: 'green', blocks: 49, nades: 3 };
-  applyFieldSupply(capped);
-  ok('field supplies respect the shared player and bot caps',
-    capped.blocks === FIELD_STATION_BLOCK_CAP && capped.nades === 3);
-  const near = nearestFieldStation([{ index: 0, x: 10, z: 10 },
-    { index: 1, x: 30, z: 30 }], { x: 12, z: 11 }, 10);
-  ok('nearest-cache lookup is range-bounded and stable', near?.station.index === 0
-    && nearestFieldStation([{ x: 30, z: 30 }], { x: 0, z: 0 }, 10) === null);
-
-  const snap = { t: 's', p: [], b: [], c: [0, 0], g: [],
-    l: [[0, 300, 0, 0, 0], [1, 0, 12, 2, 1]] };
-  ok('cache state and personal supply notices pass bounded protocol validation',
-    validServerMessage(snap)
-      && validServerMessage({ t: 'e', k: 'supply', blocks: 20, nades: 1 })
-      && !validServerMessage({ ...snap, l: [[0, 9999, 0, 0, 0]] })
-      && !validServerMessage({ t: 'e', k: 'supply', blocks: 200, nades: 4 }));
+        phase: 'windup', remaining: 1 }));
 }
 
 // ---------------------------------------------------------------------------
@@ -947,11 +826,7 @@ function matchReportTests() {
 }
 
 function socialProgressionTests() {
-  group('phase ten: squad signals, rematches, and mastery ranks');
-  ok('a solo rematch needs one vote', rematchVotesNeeded(1) === 1);
-  ok('two players must both agree to a rematch', rematchVotesNeeded(2) === 2);
-  ok('larger rooms use a strict majority', rematchVotesNeeded(3) === 2
-    && rematchVotesNeeded(10) === 6);
+  group('squad signals, safety, and mastery ranks');
   ok('unit-like tactical directions pass validation', validPingDirection([1, 0, 0]));
   ok('zero and oversized tactical directions are rejected',
     !validPingDirection([0, 0, 0]) && !validPingDirection([9, 0, 0]));
@@ -963,10 +838,9 @@ function socialProgressionTests() {
       x: 20, y: 12, z: 30, kind: 'ATTACK' })
       && !validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
         x: 20, y: 12, z: 30, kind: 'ENEMY_THROUGH_WALL' }));
-  ok('rematch votes are bounded on both sides of the wire',
-    validClientMessage({ t: 'a', k: 'rematch' })
-      && validServerMessage({ t: 'e', k: 'rematch', voters: ['p0', 'p2'], needed: 2 })
-      && !validServerMessage({ t: 'e', k: 'rematch', voters: ['p0'], needed: 0 }));
+  ok('retired rematch packets are rejected on both sides of the wire',
+    !validClientMessage({ t: 'a', k: 'rematch' })
+      && !validServerMessage({ t: 'e', k: 'rematch', voters: ['p0', 'p2'], needed: 2 }));
   ok('vote-kick needs three humans and a strict eligible-voter majority',
     voteKickVotesNeeded(2) === 0 && voteKickVotesNeeded(3) === 2
       && voteKickVotesNeeded(4) === 2 && voteKickVotesNeeded(10) === 5);
@@ -1000,16 +874,23 @@ function engagementFoundationTests() {
   group('phase zero: bounded diagnostics and production feature rollout');
   const defaults = parseEngagementFeatures('');
   const selected = parseEngagementFeatures(
-    '?features=FIRSTMINUTE,deathRecap&features=operations,publicChat,notAFeature');
+    '?features=FIRSTMINUTE,deathRecap&features=publicChat,notAFeature');
   ok('completed engagement features default on while experiments remain opt-in',
     DEFAULT_ENGAGEMENT_FEATURES.every(name => defaults[name] === true)
-      && !defaults.operations && !defaults.botDirector && !defaults.publicChat
+      && !defaults.publicChat
       && !('selectedGoals' in defaults)
-      && selected.firstMinute && selected.deathRecap && selected.operations && selected.publicChat
+      && selected.firstMinute && selected.deathRecap && selected.publicChat
       && !('notAFeature' in selected));
   ok('retired field-goal events are rejected at the protocol boundary',
     !validServerMessage({ t: 'e', k: 'goal', metric: 'fieldwork', amount: 1,
       kind: 'built', voxels: 1 }));
+  const baseSnapshot = { t: 's', p: [], b: [], c: [0, 0], g: [] };
+  ok('retired feature channels cannot re-enter authoritative snapshots',
+    !validServerMessage({ ...baseSnapshot, op: null })
+      && !validServerMessage({ ...baseSnapshot, mb: [1, 0, 0] })
+      && !validServerMessage({ ...baseSnapshot, bd: [1, 1, 1] })
+      && !validServerMessage({ ...baseSnapshot, l: [] })
+      && !validServerMessage({ t: 'e', k: 'supply', blocks: 20, nades: 1 }));
 
   const clean = sanitizeEngagementEvent('match_start', {
     mode: 'ctf', map: 2, network: 'host', source: 'quick', humans: 4, bots: 6,
@@ -1294,107 +1175,6 @@ function teamBalanceTests() {
   ok('the host balance policy survives bounded snapshot synchronization',
     validServerMessage(phaseEightSnapshot)
       && !validServerMessage({ ...phaseEightSnapshot, tb: 2 }));
-}
-
-function botDirectorTests() {
-  group('phase nine: transparent between-round bot director');
-  ok('bot cognition profiles have stable bounded wire codes',
-    ['easy', 'normal', 'hard'].every(key =>
-      botDifficultyKey(botDifficultyCode(key)) === key)
-      && botDifficultyKey(-1) === 'normal'
-      && botDifficultyKey(99) === 'normal');
-
-  const stacked = planBotDirector([
-    { key: 'p0', team: 'green', rating: 1000 },
-    { key: 'p1', team: 'green', rating: 900 },
-    { key: 'p2', team: 'blue', rating: 100 },
-    { key: 'p3', team: 'blue', rating: 50 },
-  ], 5, 400);
-  ok('a clear human imbalance gives weaker cognition to the stronger side',
-    stacked.green === 'easy' && stacked.blue === 'hard'
-      && stacked.adjusted && stacked.slots.green === 3 && stacked.slots.blue === 3);
-
-  const close = planBotDirector([
-    { key: 'p0', team: 'green', rating: 500 },
-    { key: 'p1', team: 'blue', rating: 480 },
-  ], 5, 490);
-  ok('small projected differences stay on normal to prevent difficulty churn',
-    close.green === 'normal' && close.blue === 'normal' && !close.adjusted);
-
-  const full = planBotDirector([
-    { key: 'p0', team: 'green', rating: 900 },
-    { key: 'p1', team: 'green', rating: 800 },
-    { key: 'p2', team: 'blue', rating: 200 },
-    { key: 'p3', team: 'blue', rating: 100 },
-  ], 2, 400);
-  ok('full-human rooms never advertise meaningless adaptive bot profiles',
-    full.slots.green === 0 && full.slots.blue === 0
-      && full.green === 'normal' && full.blue === 'normal' && !full.adjusted);
-
-  ok('director profiles cannot alter health, damage, movement, or weapons',
-    Object.values(BOT_DIFFICULTY).every(profile =>
-      !['health', 'damage', 'speed', 'movement', 'weapon'].some(key => key in profile)));
-
-  const snapshot = { t: 's', p: [],
-    b: [[4, 0, 0, 0, 0, 100, 1, 0, 0, 2]], c: [0, 0], g: [],
-    bd: [1, 0, 2] };
-  ok('bot profiles survive bounded snapshot and migration synchronization',
-    validServerMessage(snapshot)
-      && !validServerMessage({ ...snapshot, bd: [1, 0, 3] })
-      && !validServerMessage({ ...snapshot,
-        b: [[4, 0, 0, 0, 0, 100, 1, 0, 0, 3]] }));
-  const players = new Map(), bots = new Map();
-  mergeSnapshot(players, bots, snapshot);
-  ok('snapshot reconstruction retains the active bot cognition profile',
-    bots.get(4)?.[8] === 2);
-
-  const flags = parseEngagementFeatures('?features=BOTDIRECTOR');
-  ok('the adaptive director remains an explicit opt-in feature',
-    flags.botDirector && !parseEngagementFeatures('').botDirector);
-}
-
-function operationTests() {
-  group('phase six: optional three-match operations');
-  ok('every operation is a mode-compatible KOTH → CTF → TDM arc',
-    OPERATION_PLANS.length >= 3 && OPERATION_PLANS.every(plan =>
-      plan.legs.map(leg => leg.mode).join(',') === 'koth,ctf,tdm'
-        && plan.legs.every(leg => MAPS[leg.map]?.modes.includes(leg.mode))));
-
-  let op = createOperation(0);
-  ok('a new operation starts at leg one with a clean Alpha/Bravo score',
-    operationLeg(op) === OPERATION_PLANS[0].legs[0]
-      && op.leg === 0 && op.wins.join(',') === '0,0' && op.results.length === 0
-      && operationSideForColor(op, 'green') === 'alpha');
-  op = recordOperationResult(op, 'green');
-  const settled = op;
-  ok('one authoritative result settles a leg exactly once',
-    op.wins.join(',') === '1,0' && op.results.join(',') === '0'
-      && recordOperationResult(op, 'blue') === settled);
-  op = flipOperationColors(advanceOperation(op));
-  ok('side flips preserve Alpha/Bravo identity between different map colors',
-    op.leg === 1 && op.greenSide === 1
-      && operationSideForColor(op, 'blue') === 'alpha');
-  op = recordOperationResult(op, 'blue');
-  op = flipOperationColors(advanceOperation(op));
-  op = recordOperationResult(op, 'blue');
-  ok('three legs produce a bounded final operation winner and report score',
-    operationComplete(op) && operationWinner(op) === 'alpha'
-      && op.wins.join(',') === '2,1' && op.results.join(',') === '0,0,1');
-
-  const row = operationRow(op);
-  ok('operation state round-trips through its compact migration-safe row',
-    validOperationRow(row) && JSON.stringify(operationRow(operationFromRow(row))) === JSON.stringify(row));
-  ok('malformed or internally inconsistent operation rows are rejected',
-    !validOperationRow([0, 2, 3, 0, 0, 0])
-      && !validOperationRow([99, 0, 0, 0, 0])
-      && !validOperationRow([0, 0, 0, 0, 2]));
-  ok('operation end and mode-changing restart packets pass the trust boundary',
-    validServerMessage({ t: 'e', k: 'end', winner: 'blue', op: row })
-      && validServerMessage({ t: 'e', k: 'restart', seed: 42, map: 2,
-        mode: 'ctf', op: operationRow(createOperation(0)) })
-      && !validServerMessage({ t: 'e', k: 'restart', seed: 42, map: 2,
-        op: operationRow(createOperation(0)) })
-      && !validServerMessage({ t: 'e', k: 'end', winner: 'blue', op: [0, 9, 0, 0, 0] }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2216,7 +1996,6 @@ export async function run() {
   contributionRuleTests();
   kothRuleTests();
   streakRuleTests();
-  fieldStationTests();
   matchReportTests();
   socialProgressionTests();
   engagementFoundationTests();
@@ -2225,8 +2004,6 @@ export async function run() {
   deathRecapTests();
   stayAsSquadTests();
   teamBalanceTests();
-  botDirectorTests();
-  operationTests();
   damageDirectionTests();
   airstrikeDroneTests();
   soldierModelTests();

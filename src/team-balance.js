@@ -8,8 +8,6 @@
 
 export const TEAM_REASSIGNMENT_COST = 150;
 export const TEAM_RATING_CAP = 2000;
-export const BOT_PROFILE_CHANGE_COST = 100;
-export const BOT_PROFILE_WEIGHT = Object.freeze({ easy: 0.85, normal: 1, hard: 1.15 });
 
 const other = team => team === 'green' ? 'blue' : 'green';
 const validTeam = team => team === 'green' || team === 'blue';
@@ -96,48 +94,4 @@ export function balanceHumanTeams(rawPlayers, squads = [], teamSize = 5,
   }
   return best ?? { assignments: Object.fromEntries(players.map(p => [p.key, other(p.team)])),
     moved: 0, sizeGap: players.length, ratingGap: 0, groups: 0 };
-}
-
-// Pick one stable cognition profile per team's bot contingent for the whole
-// next round. This is not live rubber-banding: the only inputs are the round
-// that just ended and the already-decided next-round human teams. Health,
-// damage, movement, and weapon stats never enter this policy.
-export function planBotDirector(rawPlayers, teamSize = 5, priorBotRating = 0) {
-  const players = normalizedPlayers(rawPlayers);
-  const cap = Math.max(1, Math.floor(Number(teamSize) || 1));
-  const byTeam = { green: [], blue: [] };
-  for (const p of players) byTeam[p.team].push(p.rating);
-  const humanAverage = players.length
-    ? players.reduce((sum, p) => sum + p.rating, 0) / players.length : 400;
-  const bot = Math.min(TEAM_RATING_CAP, Math.max(50,
-    Number(priorBotRating) > 0 ? Number(priorBotRating) : humanAverage || 400));
-  const slots = {
-    green: Math.max(0, cap - byTeam.green.length),
-    blue: Math.max(0, cap - byTeam.blue.length),
-  };
-  const humanPower = {
-    green: byTeam.green.reduce((sum, n) => sum + n, 0),
-    blue: byTeam.blue.reduce((sum, n) => sum + n, 0),
-  };
-  let best = null;
-  for (const green of Object.keys(BOT_PROFILE_WEIGHT)) {
-    for (const blue of Object.keys(BOT_PROFILE_WEIGHT)) {
-      const greenProfile = slots.green > 0 ? green : 'normal';
-      const blueProfile = slots.blue > 0 ? blue : 'normal';
-      const projected = {
-        green: humanPower.green + slots.green * bot * BOT_PROFILE_WEIGHT[greenProfile],
-        blue: humanPower.blue + slots.blue * bot * BOT_PROFILE_WEIGHT[blueProfile],
-      };
-      const gap = Math.abs(projected.green - projected.blue);
-      const changes = Number(greenProfile !== 'normal') + Number(blueProfile !== 'normal');
-      const candidate = { green: greenProfile, blue: blueProfile, gap, changes,
-        cost: gap + changes * BOT_PROFILE_CHANGE_COST,
-        projected, slots, baseline: bot };
-      if (!best || candidate.cost < best.cost
-          || (candidate.cost === best.cost && candidate.changes < best.changes)
-          || (candidate.cost === best.cost && candidate.changes === best.changes
-            && `${greenProfile},${blueProfile}` < `${best.green},${best.blue}`)) best = candidate;
-    }
-  }
-  return { ...best, adjusted: best.green !== 'normal' || best.blue !== 'normal' };
 }

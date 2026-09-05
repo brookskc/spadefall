@@ -4,7 +4,6 @@ import { Body, STAND_HEIGHT } from './entities.js';
 import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
 import { TOOLS } from './player.js';
-import { retainedMomentum } from './streaks.js';
 
 export class RemotePlayer {
   constructor(game, id, name, team) {
@@ -38,10 +37,7 @@ export class RemotePlayer {
   die(killer) {
     this.alive = false;
     this._mkCount = 0; this._mkT = null;
-    this._momentumCarry = retainedMomentum(this._streak,
-      this.game.momentumBalanceEnabled());
-    this._streak = this._momentumCarry;
-    this._overchargeWindup = 0; this._overchargeT = 0;
+    this._streak = 0;
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this._reloadUntil = 0;
@@ -75,9 +71,7 @@ export class RemotePlayer {
     this._lastAimDir = null; this._lastAimT = null;
     this._lastNadeAimDir = null; this._lastNadeAimT = null;
     this._mkCount = 0; this._mkT = null;
-    this._streak = Math.max(0, Number(this._momentumCarry) || 0);
-    this._momentumCarry = null;
-    this._overchargeWindup = 0; this._overchargeT = 0;
+    this._streak = 0;
     this._airMove = null;
     this._lastDeathRecap = null;
     this._lastPosT = null;
@@ -89,7 +83,6 @@ export class RemotePlayer {
   }
 
   resetForRound() {
-    this._momentumCarry = null;
     this.avatar.dispose();
     this.avatar = new Avatar(this.game.scene, this.team, this.name,
       this.team === this.game.player.team);

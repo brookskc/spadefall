@@ -205,6 +205,20 @@ try {
 
   assert.deepEqual(faults, [], faults.join('\n'));
   console.log('multiplayer browsers: replication, live settings, chat policy, and vote-kick passed');
+} catch (error) {
+  if (faults.length) error.message += `\n${faults.join('\n')}`;
+  try {
+    const state = await host.evaluate(() => ({
+      hasGame: !!window.__game,
+      mode: window.__game?.mode,
+      hasNet: !!window.__net,
+      peerOpen: window.__net?.peer?.open,
+      lobby: document.getElementById('lobbyStatus')?.textContent,
+      diagnostics: window.__spadefallDiagnostics?.faults,
+    }));
+    console.error('host state:', state);
+  } catch { /* page may already be unavailable */ }
+  throw error;
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

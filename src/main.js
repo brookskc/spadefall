@@ -16,7 +16,6 @@ import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
 import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
-import { OPERATION_PLANS } from './operations.js';
 import { callsignIssue, normalizeCallsign } from './callsign.js';
 
 const $ = id => document.getElementById(id);
@@ -24,8 +23,6 @@ const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
 if (engagementFeatures.publicChat)
   document.documentElement.dataset.publicChat = 'on';
-if (engagementFeatures.operations)
-  document.documentElement.dataset.operations = 'on';
 const engagement = new EngagementTracker();
 engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
@@ -49,7 +46,6 @@ window.addEventListener('unhandledrejection', e => rememberFault('rejection', e.
 const airstrikeQa = params.has('airstrikeqa');
 const soldierQa = params.has('soldierqa');
 const mapQa = params.has('mapqa');
-const stationQa = params.has('stationqa');
 const reportQa = params.has('reportqa');
 const pingQa = params.has('pingqa');
 const deathRecapQa = params.has('deathrecapqa');
@@ -96,7 +92,7 @@ if (params.has('damageqa')) document.documentElement.dataset.damageqa = 'on';
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
-if (airstrikeQa || soldierQa || mapQa || stationQa || reportQa || pingQa)
+if (airstrikeQa || soldierQa || mapQa || reportQa || pingQa)
   $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
@@ -227,11 +223,10 @@ function setPlaying(v) {
   $('menu').classList.toggle('paused', !v && (sessionLive || !!net));
   $('hud').classList.toggle('on', v);
   game.player.vmRoot.visible = v;
-  $('roomcode').style.display = v && roomCode ? 'block' : 'none';
+  $('roomcode').style.display = !v && (sessionLive || !!net) && roomCode ? 'block' : 'none';
 }
 
 $('leaveBtn').addEventListener('click', () => location.reload());
-$('operationLeaveBtn').addEventListener('click', () => location.reload());
 
 function deploy() {
   initAudio();
@@ -493,7 +488,7 @@ function adoptJoin(n, code) {
 // claim — never on migration promotion, so a replica keeps the room's
 // running map and mode. gameMode must be set BEFORE rebuild(), since flags
 // only exist in CTF. ?map=2&mode=tdm remain QA hooks for the starting map.
-const modePref = $('modePref'), operationPref = $('operationPref');
+const modePref = $('modePref');
 {
   const allowedModes = ['any', 'ctf', 'tdm', 'koth'];
   let savedMode = 'any';
@@ -503,21 +498,6 @@ const modePref = $('modePref'), operationPref = $('operationPref');
   modePref.addEventListener('change', () => {
     try { localStorage.setItem('tos.mode', modePref.value); } catch { /* best effort */ }
   });
-
-  const renderOperationPref = () => {
-    const enabled = engagementFeatures.operations && operationPref.value === 'operation';
-    $('standardHostPrefs').style.display = enabled ? 'none' : '';
-  };
-  if (engagementFeatures.operations) {
-    try { operationPref.value = localStorage.getItem('tos.operation') ?? 'standard'; }
-    catch { operationPref.value = 'standard'; }
-    if (params.has('operation')) operationPref.value = 'operation';
-    operationPref.addEventListener('change', () => {
-      try { localStorage.setItem('tos.operation', operationPref.value); } catch { /* best effort */ }
-      renderOperationPref();
-    });
-  }
-  renderOperationPref();
 }
 
 // Lifetime stats + gun color unlocks (see stats.js). Purely a home-screen
@@ -749,13 +729,6 @@ function teamPref() {
 // Returns a random compatible starting map. The room advances through that
 // mode's map rotation after every match; there is no public one-map pin.
 function applyHostPrefs() {
-  if (engagementFeatures.operations && operationPref.value === 'operation') {
-    const requested = Number.parseInt(params.get('operation'), 10);
-    const plan = Number.isInteger(requested) && OPERATION_PLANS[requested]
-      ? requested : Math.floor(Math.random() * OPERATION_PLANS.length);
-    return game.startOperation(plan).map;
-  }
-  game.clearOperation();
   const modes = ['ctf', 'tdm', 'koth'];
   const mode = modes.includes(modePref.value) ? modePref.value
     : modes[Math.floor(Math.random() * modes.length)];
@@ -1436,22 +1409,6 @@ function frame() {
     game.player.vmRoot.visible = false;
   }
   renderer.render(scene, camera);
-}
-// Browser composition hook for the real field-cache loop. Automated browsers
-// cannot reliably grant pointer lock, so place a deliberately under-supplied
-// solo player on cache one and let the ordinary Game update secure it.
-if (stationQa) {
-  const station = game.fieldStations[Math.max(0, Math.min(game.fieldStations.length - 1,
-    Number.parseInt(params.get('stationqa') || '0', 10) || 0))];
-  if (station) {
-    game.player.body.pos.set(station.x, station.y, station.z + 2);
-    game.player.body.vel.set(0, 0, 0);
-    game.player.yaw = Math.PI / 2; // face the three signal pylons on the north edge
-    game.player.blocks = 1;
-    game.player.grenades = 0;
-    game.player.protT = 999;
-    setPlaying(true);
-  }
 }
 // Tactical-ping composition hook. It uses the real host-side raycast,
 // context classification, world marker, minimap mark, HUD bearing, and TTL;

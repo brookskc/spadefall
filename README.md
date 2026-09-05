@@ -17,14 +17,12 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 | Mode | Win condition | Maps |
 | --- | --- | --- |
 | Capture the Flag | First to three captures | Greenbelt, Beachhead, Pinefall |
-| Team Deathmatch | First to 30 kills | All maps |
+| Team Deathmatch | First to 50 kills | All maps |
 | King of the Hill | Capture and occupy rotating points for 120 seconds | Dunes, Crown, Caldera |
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
-Each battlefield also has two neutral field caches built from ordinary voxels. Hold one uncontested for two seconds to replenish construction blocks and a grenade for nearby teammates. Once used, the cache takes 30 seconds to recharge.
-
-After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players can vote to skip the intermission; the room still advances through its map rotation.
+After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. The room automatically advances to the next map after the intermission; players can choose their next class and ask teammates to stay together as a squad.
 
 ## Loadouts and tools
 
@@ -38,12 +36,9 @@ Choose one gun for each life. Every class also carries a spade, 50 building bloc
 
 The ballistics model includes recoil, spread, range compensation, and bullet drop. The first-person weapon models provide working iron sights and scope alignment. Lifetime match contribution advances a mastery rank without changing weapon stats.
 
-Contribution earned during one life fills the combat-momentum meter. Kills,
-assists, flag play, hill occupation, defense, and escorts all count. Press `F`
-to spend the strongest available reward:
-
-- 500 points: Overcharge. A visible 1.25-second charge-up precedes 12 seconds of increased outgoing damage and increased incoming risk.
-- 1,000 points: Pilot an airstrike marker and choose the impact point.
+Contribution earned during one life fills the air-support meter. Kills,
+assists, flag play, hill occupation, defense, and escorts all count. At 700
+points, press `F` to pilot an airstrike marker and choose the impact point.
 
 ## Maps
 
@@ -80,7 +75,7 @@ Room-wide chat is disabled by default; `Y` opens transient team chat. Callsigns 
 | `2` | Spade |
 | `3` | Blocks |
 | `4` | Grenade |
-| `F` | Use the available streak ability |
+| `F` | Call in an airstrike when the meter is full |
 | `G` | Place a team-only tactical ping |
 | `Tab` | Scoreboard |
 | `Y` | Team chat |

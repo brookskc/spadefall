@@ -27,15 +27,9 @@ import { assistCreditors, CONTRIBUTION, contributionRow,
   rankContributionRows } from './scoring.js';
 import { HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from './koth.js';
-import { AIRSTRIKE_COST, OVERCHARGE_COST, OVERCHARGE_DURATION,
-  OVERCHARGE_WINDUP, availableStreakAbility, balancedMomentumGain,
-  dominantStreakTeam, gainStreak, overchargeDamage, retainedMomentum,
-  spendStreak, stepOvercharge } from './streaks.js';
-import { FIELD_STATION_CAPTURE_TIME, FIELD_STATION_NOTICE_RADIUS,
-  applyFieldSupply, inFieldStation, nearestFieldStation, stationCanSupply,
-  stepFieldStation } from './field-stations.js';
+import { AIRSTRIKE_COST, availableStreakAbility, gainStreak, spendStreak } from './streaks.js';
 import { buildMatchReport } from './match-report.js';
-import { rematchVotesNeeded, staySquadGroups, staySquadState,
+import { staySquadGroups, staySquadState,
   TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL,
   VOTE_KICK_COOLDOWN, VOTE_KICK_DURATION, voteKickVotesNeeded } from './social.js';
 import { sanitizeCallsign } from './callsign.js';
@@ -49,11 +43,7 @@ import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReloa
 import { FirstMinuteGuide } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
-import { OPERATION_PLANS, advanceOperation, createOperation, flipOperationColors,
-  operationComplete, operationFromRow, operationLeg, operationRow,
-  operationSideForColor, operationSideLabel, operationWinner,
-  recordOperationResult } from './operations.js';
-import { balanceHumanTeams, planBotDirector } from './team-balance.js';
+import { balanceHumanTeams } from './team-balance.js';
 import { da, dx, dy, qa, qx, qy, rowsEqual as rowsEq,
   mergeSnapshot } from './replication.js';
 import { collapseKey, unsupportedCollapseCells } from './simulation.js';
@@ -282,7 +272,7 @@ const hud = {
     else $('ammo').innerHTML = p.reloading > 0
       ? `<small>reloading…</small>`
       : `${p.ammo[p.tool]} <small>/ ${t.mag}</small>`;
-    $('toolhint').textContent = `Q·E / 1–4 weapons · G squad ping · R reload`;
+    $('toolhint').textContent = '1 gun · 2 spade · 3 blocks · 4 grenade · R reload';
   },
   health(p) {
     $('healthfill').style.width = Math.max(0, p.health) + '%';
@@ -306,46 +296,33 @@ const hud = {
   },
   // Round trip to the host, piggybacked on traffic that already exists (see
   // the 'ts' field on the client uplink and its echo in _broadcastSnapshot)
-  // — no separate ping message, no extra round trip. Solo has no network to
-  // measure; the host has no meaningful RTT to itself, so it gets a label
-  // instead of a fabricated number.
+  // — no separate ping message and no extra round trip. Only clients have a
+  // meaningful round trip to show; solo and host leave the corner clear.
   ping(g) {
     const el = $('ping');
     if (!el) return;
-    if (g.mode === 'solo') { el.textContent = ''; el.className = ''; return; }
-    if (g.mode === 'host') { el.textContent = 'HOST'; el.className = ''; return; }
+    if (g.mode !== 'client') {
+      el.textContent = ''; el.className = ''; el.style.display = 'none'; return;
+    }
+    el.style.display = '';
     const ms = g.pingMs;
     if (ms == null) { el.textContent = '‥ ms'; el.className = ''; return; }
     el.textContent = Math.round(ms) + ' ms';
     el.className = ms > 150 ? 'bad' : ms > 80 ? 'warn' : '';
   },
-  // p is always the LOCAL player — this is purely personal HUD state,
-  // never shown for anyone else's streak/piloting status.
   // p is always the LOCAL player — purely personal HUD state, never shown
-  // for anyone else's streak/ability status. Handles both abilities in
-  // one place since they share the same key and are mutually exclusive
-  // at any given streak level — one function deciding "what does F do
-  // right now" is safer than two independently-driven hints that could
-  // in principle disagree with each other.
+  // for anyone else's contribution/airstrike status.
   streakStatus(p) {
     const ready = $('airstrikeReady');
     if (ready) {
       const points = Math.floor(p._streak ?? 0);
       const ability = p.game.availableStreak(p);
-      const held = p.game.streakHeldFor(p.team);
       ready.classList.toggle('building', !ability);
-      if (p._piloting || p._fallingT > 0 || p._lingerT > 0
-          || p._overchargeWindup > 0 || p._overchargeT > 0) ready.style.display = 'none';
+      if (p._piloting || p._fallingT > 0 || p._lingerT > 0) ready.style.display = 'none';
       else if (ability === 'airstrike') {
         ready.textContent = 'airstrike ready — [F]'; ready.style.display = 'block';
-      } else if (ability === 'overcharge') {
-        ready.textContent = `overcharge ready — [F] · ${points}/${AIRSTRIKE_COST} strike`;
-        ready.style.display = 'block';
-      } else if (held && points >= OVERCHARGE_COST) {
-        ready.textContent = 'command reserve · rewards resume when the score tightens';
-        ready.style.display = 'block';
       } else if (points > 0) {
-        ready.textContent = `field momentum · combat + teamplay ${points}/${OVERCHARGE_COST}`;
+        ready.textContent = `airstrike progress · ${points}/${AIRSTRIKE_COST}`;
         ready.style.display = 'block';
       } else ready.style.display = 'none';
     }
@@ -358,21 +335,11 @@ const hud = {
       const label = overlay.querySelector('.label');
       if (label) label.textContent = p._piloting ? 'airstrike — click to confirm' : 'airstrike falling — WASD to guide';
     }
-    const active = $('overchargeActive');
-    if (active) {
-      if (p._overchargeWindup > 0) {
-        active.textContent = `overcharge charging — ${p._overchargeWindup.toFixed(1)}s`;
-        active.classList.add('charging'); active.style.display = 'block';
-      } else if (p._overchargeT > 0) {
-        active.textContent = `overcharge ${Math.ceil(p._overchargeT)}s · +35% out / +25% in`;
-        active.classList.remove('charging'); active.style.display = 'block';
-      }
-      else active.style.display = 'none';
-    }
   },
   firstMinute(view) {
     const el = $('firstMinute');
     if (!el) return;
+    $('hud')?.classList.toggle('orientation', !!view?.visible);
     const key = view?.visible
       ? [view.prompt, view.hint, view.objective,
           ...Object.values(view.progress).map(Number)].join('|') : 'off';
@@ -444,19 +411,6 @@ const hud = {
     el.querySelector('.arrow').style.transform = `rotate(${angle}rad)`;
     el.querySelector('.label').textContent = `${mark.kind} · ${mark.name} · ${Math.round(Math.hypot(dx, dz))}m`;
   },
-  rematch(g, voters = [], needed = 1) {
-    const btn = $('rematchBtn');
-    if (!btn) return;
-    const operationDone = operationComplete(g.operation);
-    btn.style.display = g.operation && !operationDone ? 'none' : '';
-    if (g.operation && !operationDone) return;
-    const mine = g._kdKey(g.player);
-    const voted = voters.includes(mine);
-    btn.disabled = voted;
-    btn.classList.toggle('voted', voted);
-    const action = operationDone ? 'NEW OPERATION' : 'REMATCH';
-    btn.textContent = `${voted ? `${action} VOTED` : `VOTE ${action}`} · ${voters.length}/${needed}`;
-  },
   staySquad(g, voters = []) {
     const wrap = $('squadReady');
     const btn = $('squadBtn');
@@ -473,65 +427,6 @@ const hud = {
       : state.voted
         ? `WAITING FOR TEAM · ${state.ready}/${state.teammates}`
         : `STAY AS SQUAD · ${state.ready}/${state.teammates}`;
-  },
-  operation(g) {
-    const el = $('operationHud');
-    if (!el) return;
-    const op = g.operation;
-    el.classList.toggle('on', !!op);
-    if (!op) return;
-    const plan = OPERATION_PLANS[op.plan];
-    const mine = operationSideForColor(op, g.player.team);
-    const text = `OPERATION ${plan.name} · LEG ${op.leg + 1}/${plan.legs.length}`
-      + ` · ALPHA ${op.wins[0]}—${op.wins[1]} BRAVO · YOU ${operationSideLabel(mine)}`;
-    if (el.textContent !== text) el.textContent = text;
-  },
-  operationReport(g) {
-    const el = $('endOperation');
-    const leave = $('operationLeaveBtn');
-    if (!el || !leave) return;
-    const op = g.operation;
-    el.classList.toggle('on', !!op);
-    leave.classList.toggle('on', !!op);
-    if (!op) return;
-    const plan = OPERATION_PLANS[op.plan];
-    const mine = operationSideForColor(op, g.player.team);
-    const mineIndex = mine === 'bravo' ? 1 : 0;
-    const myWins = op.wins[mineIndex], theirWins = op.wins[1 - mineIndex];
-    const done = operationComplete(op);
-    $('endOperationLabel').textContent = `OPERATION ${plan.name} · `
-      + (done ? 'FINAL REPORT' : `LEG ${op.leg + 1}/${plan.legs.length}`);
-    $('endOperationTitle').textContent = done
-      ? `${operationWinner(op) === mine ? 'OPERATION WON' : 'OPERATION LOST'} · ${myWins}—${theirWins}`
-      : `YOUR FORCE ${myWins}—${theirWins} OPPOSITION`;
-    const results = op.results.map((winner, i) => {
-      const leg = plan.legs[i];
-      return `${MAPS[leg.map].name} ${winner === mineIndex ? 'W' : 'L'}`;
-    });
-    const next = !done ? operationLeg(op, 1) : null;
-    $('endOperationDetail').textContent = results.join(' · ')
-      + (next ? ` · NEXT ${MAPS[next.map].name} ${next.mode.toUpperCase()}` : '');
-    leave.textContent = done ? 'RETURN TO MAIN MENU' : 'LEAVE OPERATION';
-  },
-  fieldStation(g) {
-    const el = $('fieldStation');
-    if (!el) return;
-    const p = g.player;
-    const near = p?.alive
-      ? nearestFieldStation(g.fieldStations, p.body.pos, FIELD_STATION_NOTICE_RADIUS) : null;
-    if (!near) { el.style.display = 'none'; return; }
-    const s = near.station;
-    let text;
-    if (s.cooldown > 0) text = `${s.label} CACHE · RECHARGING ${Math.ceil(s.cooldown)}s`;
-    else if (s.contested) text = `${s.label} CACHE · CONTESTED`;
-    else if (s.progress > 0)
-      text = `${s.label} CACHE · SECURING ${Math.round(s.progress / FIELD_STATION_CAPTURE_TIME * 100)}%`;
-    else if (!stationCanSupply(p)) text = `${s.label} CACHE · SUPPLIES FULL`;
-    else text = `${s.label} CACHE · HOLD POSITION TO RESUPPLY`;
-    el.textContent = text;
-    el.classList.toggle('contested', !!s.contested);
-    el.classList.toggle('cooldown', s.cooldown > 0);
-    el.style.display = 'block';
   },
   _flagState(g) {
     if (g.hill) { // king of the hill: who owns the point, who's taking it
@@ -582,10 +477,7 @@ const hud = {
       }
       const c = teamCss(r.team);
       const isMe = key === me;
-      const ownName = String(r.name ?? '').trim().toUpperCase();
-      const name = isMe && (!ownName || ownName === 'YOU')
-        ? '<span class="playerMarker">YOU</span>'
-        : `${isMe ? '<span class="playerMarker">YOU</span> ' : ''}${esc(r.name)}`;
+      const name = esc(r.name);
       html += `<tr${isMe ? ' class="me"' : ''}>`
         + `<td style="color:${c}">${name}</td>`
         + `<td>${Math.floor(r.score ?? 0)}</td><td>${r.k}</td><td>${r.d}</td>`
@@ -941,25 +833,6 @@ const hud = {
         ctx.setLineDash([]);
       }
     }
-    // Neutral field caches remain marked after their physical shelter is
-    // damaged, so the team can rebuild around the same tactical location.
-    for (const station of g.fieldStations ?? []) {
-      const cx = station.x * s, cz = station.z * s;
-      ctx.save();
-      ctx.translate(cx, cz);
-      ctx.strokeStyle = station.contested ? '#e05a4e'
-        : station.cooldown > 0 ? 'rgba(232,236,242,.35)' : '#ffd97a';
-      ctx.lineWidth = station.contested ? 1.8 : 1.2;
-      const r = station.contested ? 3.5 + Math.sin(g.time * 7) : 3.2;
-      ctx.strokeRect(-r, -r, r * 2, r * 2);
-      if (station.progress > 0) {
-        ctx.fillStyle = station.team ? teamCss(station.team) : '#ffd97a';
-        ctx.globalAlpha = 0.75;
-        ctx.fillRect(-2, 2.6, 4 * Math.min(1,
-          station.progress / FIELD_STATION_CAPTURE_TIME), 1.2);
-      }
-      ctx.restore();
-    }
     // Tactical marks are team-only and expire quickly; a pulsing diamond
     // gives them enough map presence without obscuring terrain or enemies.
     for (const mark of g.teamPings ?? []) {
@@ -1103,32 +976,22 @@ export class Game {
     this._nextTeamPingId = 1;
     this.botOrders = { green: null, blue: null };
     this.navRevision = 0;                // invalidates bot route snapshots after edits
-    this._botDirectorT = 0;
+    this._botTacticsT = 0;
     this._botBrainCursor = 0;
     this._botThinkSet = null;
     this._openingDeployment = false;      // new rounds begin at the authored bases
-    this._rematchVotes = new Set();
     this._squadVotes = new Set();
     this._voteKick = null;
     this._voteKickTimer = null;
     this._activeSquads = [];
     this._squadHostEnabled = false;
-    this.operation = null;                // optional host-authored three-match arc
     this._nextStrikeId = 1;              // host/solo identity for concurrent flyovers
     this._pendingStrikes = [];           // host/solo authoritative impact timers
     this._airstrikeDrones = new Map();   // every mode: local visual replicas by strike id
     this._lastStrikeRows = [];           // client: latest full strike state for migration
-    this._lastAbilityRows = [];          // contribution meter + Overcharge migration state
-    this._lastStationRows = [];          // field-cache cooldown/capture migration state
-    this._momentumHostEnabled = this.mode !== 'client'
-      && !!this.engagementFeatures.momentumBalance;
+    this._lastAbilityRows = [];          // contribution meter migration state
     this._teamBalanceHostEnabled = this.mode !== 'client'
       && !!this.engagementFeatures.teamBalance;
-    this._botDirectorHostEnabled = this.mode !== 'client'
-      && !!this.engagementFeatures.botDirector;
-    this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
-    this._teamStreakUses = { green: 0, blue: 0 };
-    this._lastMomentumRow = [this._momentumHostEnabled ? 1 : 0, 0, 0];
     // Lifetime kills/deaths persist across matches (see stats.js); this.kd
     // resets every rebuild(), so this tracks "what was my own row's k/d the
     // last time I checked" to diff against, not a running lifetime total.
@@ -1137,7 +1000,6 @@ export class Game {
     this.world = new VoxelWorld(scene);
     this.mapIndex = 0;                   // MAPS rotation position
     generateMap(this.world, this.seed, this.mapIndex);
-    this._initFieldStations();
     this._applyMapAtmosphere(this.mapIndex);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
@@ -1161,7 +1023,6 @@ export class Game {
     this.player.name = opts.name ?? 'You';
     this.hud = hud;
     this.chat = new Chat(this);
-    $('rematchBtn')?.addEventListener('click', () => this.requestRematch());
     $('squadBtn')?.addEventListener('click', () => this.requestStayAsSquad());
 
     if (this.mode !== 'client') this._spawnBots();
@@ -1310,7 +1171,6 @@ export class Game {
     this.voxelStory?.reset();
     hud.deathRecap(null);
     this._clearTeamPings();
-    this._rematchVotes.clear();
     this._squadVotes.clear();
     this._clearVoteKick();
     if (this.mode === 'client') this._squadHostEnabled = false;
@@ -1319,12 +1179,9 @@ export class Game {
     this._pendingStrikes = [];
     this._lastStrikeRows = [];
     this._lastAbilityRows = [];
-    this._lastStationRows = [];
-    this._teamStreakUses = { green: 0, blue: 0 };
-    this._lastMomentumRow = [this.momentumBalanceEnabled() ? 1 : 0, 0, 0];
     this.botOrders = { green: null, blue: null };
     this.navRevision = 0;
-    this._botDirectorT = 0;
+    this._botTacticsT = 0;
     this._botBrainCursor = 0;
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
@@ -1336,7 +1193,6 @@ export class Game {
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
-    this._initFieldStations();
     // Map generation owns the placed-block palette. Refresh the persistent
     // first-person model from that exact source before it is shown again.
     this.player?.syncBlockColor();
@@ -1373,7 +1229,6 @@ export class Game {
     // first so spawn scoring never treats stale old-map positions as enemies.
     for (const p of this.remote.values()) p.alive = false;
     this._openingDeployment = true;
-    this.player._momentumCarry = null;
     this.player.respawn();
     if (this.mode !== 'client') {
       for (const p of this.remote.values()) p.resetForRound();
@@ -1411,28 +1266,6 @@ export class Game {
     this._statsSeen = { k: 0, d: 0 }; // fresh baseline — see the constructor note
     this._kdSeed();
     hud.score(this);
-    hud.operation(this);
-  }
-
-  startOperation(plan = 0) {
-    this.operation = createOperation(plan);
-    this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
-    const leg = operationLeg(this.operation);
-    this.gameMode = leg.mode;
-    hud.operation(this);
-    return leg;
-  }
-
-  clearOperation() {
-    this.operation = null;
-    hud.operation(this);
-  }
-
-  _operationRow() { return operationRow(this.operation); }
-
-  _applyOperationRow(row) {
-    this.operation = row == null ? null : operationFromRow(row);
-    hud.operation(this);
   }
 
   // Scoreboard rows are keyed by roster index, not by display name: the bot
@@ -1466,56 +1299,13 @@ export class Game {
     // scoreboard. Kills still matter, but assists and playing the objective
     // now advance the meter too. Bots do not call rewards, so don't maintain
     // a meter they can never spend.
-    if (e === this.player || e.isRemote) {
-      const momentum = balancedMomentumGain(earned, { assists, objective },
-        this.momentumBalanceEnabled());
-      e._streak = gainStreak(e._streak, momentum);
-    }
+    if (e === this.player || e.isRemote) e._streak = gainStreak(e._streak, earned);
     this._scoreDirty = true;
     if (refresh) hud.statsRefresh(this);
   }
 
-  momentumBalanceEnabled() {
-    return this.mode === 'client' ? !!this._momentumHostEnabled
-      : !!(this._momentumHostEnabled || this.engagementFeatures.momentumBalance);
-  }
-
-  _momentumRow() {
-    return [this.momentumBalanceEnabled() ? 1 : 0,
-      Math.max(0, this._teamStreakUses.green | 0),
-      Math.max(0, this._teamStreakUses.blue | 0)];
-  }
-
-  _applyMomentumRow(row) {
-    if (!Array.isArray(row) || row.length !== 3) return;
-    this._momentumHostEnabled = row[0] === 1;
-    this._teamStreakUses = {
-      green: Math.max(0, row[1] | 0),
-      blue: Math.max(0, row[2] | 0),
-    };
-    this._lastMomentumRow = row.slice();
-  }
-
-  streakHeldFor(team) {
-    return this.momentumBalanceEnabled()
-      && dominantStreakTeam(this.gameMode, this.captures, this._teamStreakUses) === team;
-  }
-
   availableStreak(p) {
-    const ability = availableStreakAbility(p?._streak ?? 0,
-      p?._overchargeWindup ?? 0, p?._overchargeT ?? 0);
-    return ability && !this.streakHeldFor(p?.team) ? ability : null;
-  }
-
-  _rejectHeldStreak(p) {
-    if (!this.streakHeldFor(p?.team)) return false;
-    this.messageTo(p, 'COMMAND RESERVE — REWARD PAUSED WHILE YOUR TEAM LEADS', '#ffd97a');
-    return true;
-  }
-
-  _recordStreakUse(p) {
-    if (!this.momentumBalanceEnabled() || !p?.team) return;
-    this._teamStreakUses[p.team] = (this._teamStreakUses[p.team] | 0) + 1;
+    return availableStreakAbility(p?._streak ?? 0);
   }
   _scoreRows() {
     return [...this.kd].map(([key, r]) => [key, r.name, r.team, r.k, r.d,
@@ -1567,9 +1357,7 @@ export class Game {
   }
 
   _newBot(team, name = null, difficultyKey = null) {
-    const key = difficultyKey ?? (this.botDirectorEnabled()
-      ? this._botDifficultyPlan[team] : null);
-    return new Bot(this, team, name, key);
+    return new Bot(this, team, name, difficultyKey);
   }
 
   _humanCap() { return Math.min(MAX_HUMANS, teamSizeForMode(this.gameMode) * 2); }
@@ -1578,74 +1366,6 @@ export class Game {
 
   // this.player is undefined while its constructor asks for its first spawn.
   entities() { return [this.player, ...this.remote.values(), ...this.bots].filter(Boolean); }
-
-  _initFieldStations() {
-    this.fieldStations = (MAPS[this.mapIndex]?.stations ?? []).map((s, index) => ({
-      index, x: s.x, y: s.y ?? this.world.surface(Math.floor(s.x), Math.floor(s.z)) + 1,
-      z: s.z, label: s.label ?? `FIELD ${index + 1}`,
-      cooldown: 0, progress: 0, team: null, contested: false,
-    }));
-  }
-
-  _stationRows() {
-    const code = team => team === 'green' ? 1 : team === 'blue' ? 2 : 0;
-    return (this.fieldStations ?? []).map(s => [s.index,
-      Math.round(Math.max(0, s.cooldown) * 10),
-      Math.round(Math.max(0, s.progress) * 10), code(s.team), s.contested ? 1 : 0]);
-  }
-
-  _syncStationRows(rows) {
-    this._lastStationRows = rows.map(row => row.slice());
-    for (const row of rows) {
-      const s = this.fieldStations?.[row[0]];
-      if (!s) continue;
-      s.cooldown = row[1] / 10;
-      s.progress = row[2] / 10;
-      s.team = row[3] === 1 ? 'green' : row[3] === 2 ? 'blue' : null;
-      s.contested = !!row[4];
-    }
-  }
-
-  // Only one critically under-supplied bot per team diverts to a cache at a
-  // time. Carriers, active fighters, flag responders, and defenders keep
-  // their real job; this is a short tactical detour, not a new bot obsession.
-  botFieldStationGoal(bot) {
-    if (!bot?.alive || bot.carrier || bot.target || bot.responding
-        || bot.role === 'defend' || (this.flags?.[bot.team]?.state ?? 'home') !== 'home'
-        || !((bot.blocks ?? 0) <= 6 || (bot.nades ?? 0) === 0)) return null;
-    const ready = (this.fieldStations ?? []).filter(s => s.cooldown <= 0);
-    const near = nearestFieldStation(ready, bot.body.pos, 52);
-    if (!near) return null;
-    const contenders = this.bots.filter(b => b.alive && b.team === bot.team && !b.carrier
-      && !b.target && ((b.blocks ?? 0) <= 6 || (b.nades ?? 0) === 0));
-    contenders.sort((a, b) => Math.hypot(a.body.pos.x - near.station.x,
-      a.body.pos.z - near.station.z) - Math.hypot(b.body.pos.x - near.station.x,
-      b.body.pos.z - near.station.z) || a.id - b.id);
-    if (contenders[0] !== bot) return null;
-    return new THREE.Vector3(near.station.x, near.station.y, near.station.z);
-  }
-
-  _updateFieldStations(dt) {
-    for (const station of this.fieldStations ?? []) {
-      const occupants = this.entities().filter(e => e.alive && inFieldStation(station, e));
-      const next = stepFieldStation(station, occupants, dt);
-      Object.assign(station, next);
-      if (!next.activated) continue;
-      for (const e of occupants) {
-        if (e.team !== next.activated || !stationCanSupply(e)) continue;
-        const grant = applyFieldSupply(e);
-        if (!grant.blocks && !grant.nades) continue;
-        if ('grenadeRegen' in e) e.grenadeRegen = 0;
-        if ('nadeRegen' in e) e.nadeRegen = 0;
-        const text = `FIELD CACHE · +${grant.blocks} BLOCKS · +${grant.nades} GRENADE`;
-        if (e === this.player) {
-          sfx.pickup(); hud.message(text, '#ffd97a'); hud.refreshTool(e);
-        } else if (e.isRemote) {
-          this.net.sendTo(e.id, { t: 'e', k: 'supply', blocks: grant.blocks, nades: grant.nades });
-        }
-      }
-    }
-  }
 
   // Announcements: show locally, and relay to clients when hosting.
   feed(html) {
@@ -2091,16 +1811,6 @@ export class Game {
     if (this.mode !== 'client') return this._confirmAirstrike(p, x, z, yaw);
     this._sendAction('strike', { x, z, yaw });
   }
-  // No payload needed at all — "turn it on for me," nothing to target or
-  // aim. Same authority split as every other request* method: solo/host
-  // validates and activates directly against its own player object,
-  // a guest's own _overchargeT is never touched locally, only the host's
-  // authoritative copy (its RemotePlayer) is what damage() ever checks.
-  requestOvercharge(p) {
-    this._recordLocalAction(p, 'overcharge');
-    if (this.mode !== 'client') return this._activateOvercharge(p);
-    this._sendAction('overcharge');
-  }
   requestReload(p) {
     if (this.mode === 'client' && GUN_CLASSES.includes(p.tool))
       this._lastWeaponActionSeq = this._sendAction('reload');
@@ -2123,7 +1833,7 @@ export class Game {
     this._sendAction('nade', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
   }
 
-  // ---------------- bot team director ----------------
+  // ---------------- bot team tactics ----------------
   activeBotOrder(team) {
     const order = this.botOrders?.[team];
     if (!order || order.expires <= this.time) {
@@ -2133,10 +1843,10 @@ export class Game {
     return order;
   }
 
-  _updateBotDirector(dt) {
-    this._botDirectorT -= dt;
-    if (this._botDirectorT <= 0) {
-      this._botDirectorT = 0.5;
+  _updateBotTactics(dt) {
+    this._botTacticsT -= dt;
+    if (this._botTacticsT <= 0) {
+      this._botTacticsT = 0.5;
       for (const team of ['green', 'blue']) {
         const teamBots = this.bots.filter(b => b.team === team).map(b => ({
           id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
@@ -2203,8 +1913,6 @@ export class Game {
       if (pos.distanceToSquared(this.flags[team].home) <= 64) return 'DEFEND';
       if (pos.distanceToSquared(this.flags[this.enemyOf(team)].home) <= 64) return 'ATTACK';
     }
-    if ((this.fieldStations ?? []).some(s => (pos.x - s.x) ** 2 + (pos.z - s.z) ** 2 <= 36))
-      return 'SUPPLY';
     return 'MOVE';
   }
 
@@ -2478,12 +2186,6 @@ export class Game {
     // is protected. Self-damage remains valid.
     if (!options.environmental && !combatDamageAllowed(victim.team, attacker?.team,
         victim === attacker, this.friendlyFire)) return false;
-    // Overcharge is a visible, bounded risk/reward window. Environmental
-    // damage stays untouched; combat damage gains +35% outgoing and +25%
-    // incoming risk, with both independently applying when two charged
-    // soldiers fight each other.
-    if (!options.environmental) amount = overchargeDamage(amount,
-      attacker?._overchargeT > 0, victim._overchargeT > 0);
     if (attacker && attacker !== victim && Number.isFinite(amount) && amount > 0) {
       const ledger = victim._damageLedger ??= new Map();
       const prior = ledger.get(attacker) ?? { damage: 0, at: this.time };
@@ -2570,9 +2272,6 @@ export class Game {
       this.engagement?.combat('kill', engagementCause);
     if (victim === this.player)
       hud.deathRecap(this.engagementFeatures.deathRecap ? victim._lastDeathRecap : null);
-    if (this.momentumBalanceEnabled() && (victim === this.player || victim.isRemote)
-        && victim._momentumCarry > 0)
-      this.messageTo(victim, `FIELD MOMENTUM BANKED · ${victim._momentumCarry}`, '#ffd97a');
     // Flag drops where the carrier fell (capture-the-flag only).
     if (this.flags && victim.carrier) {
       victim.carrier = false;
@@ -2919,9 +2618,7 @@ export class Game {
   // Spends the streak HERE, not when piloting mode was entered — cancel
   // out of targeting with no shot fired and nothing was ever charged.
   _confirmAirstrike(attacker, x, z, yaw) {
-    if (this._rejectHeldStreak(attacker)) return;
-    if (availableStreakAbility(attacker._streak ?? 0,
-        attacker._overchargeWindup, attacker._overchargeT) !== 'airstrike') return;
+    if (availableStreakAbility(attacker._streak ?? 0) !== 'airstrike') return;
     x = Math.max(0, Math.min(SX, x)); z = Math.max(0, Math.min(SZ, z));
     // The action packet captures the caller's first-person yaw at commit
     // time. Normalize it once here so arbitrarily large but finite angles
@@ -2929,7 +2626,6 @@ export class Game {
     yaw = Number.isFinite(yaw) ? Math.atan2(Math.sin(yaw), Math.cos(yaw))
       : attacker === this.player ? attacker.yaw : attacker.yaw + Math.PI / 2;
     attacker._streak = spendStreak(attacker._streak, AIRSTRIKE_COST);
-    this._recordStreakUse(attacker);
     const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
     const id = this._nextStrikeId++;
     const owner = attacker === this.player ? this._hostIdx : attacker.ridx;
@@ -3064,9 +2760,7 @@ export class Game {
   }
 
   _abilityRows() {
-    const row = (p, idx) => [idx, Math.round(p._streak ?? 0),
-      Math.max(0, Math.round((p._overchargeWindup ?? 0) * 10)),
-      Math.max(0, Math.round((p._overchargeT ?? 0) * 10))];
+    const row = (p, idx) => [idx, Math.round(p._streak ?? 0)];
     return [row(this.player, this._hostIdx),
       ...[...this.remote.values()].map(p => row(p, p.ridx))];
   }
@@ -3074,69 +2768,14 @@ export class Game {
   _syncAbilityRows(rows) {
     if (!Array.isArray(rows)) return;
     this._lastAbilityRows = rows.map(row => row.slice());
-    for (const [idx, points, windup, active] of rows) {
-      const charging = Math.max(0, windup) / 10;
-      const live = Math.max(0, active) / 10;
+    for (const [idx, points] of rows) {
       if (this.mode === 'client') {
-        if (idx === this.myIdx) {
-          this.player._streak = points;
-          this.player._overchargeWindup = charging;
-          this.player._overchargeT = live;
-        } else {
-          this.avatars.get('p' + idx)?.setOvercharge(charging > 0, live > 0);
-        }
+        if (idx === this.myIdx) this.player._streak = points;
       } else {
         const p = idx === this._hostIdx ? this.player
           : [...this.remote.values()].find(remote => remote.ridx === idx);
         if (!p) continue;
         p._streak = points;
-        p._overchargeWindup = charging;
-        p._overchargeT = live;
-        p.avatar?.setOvercharge(charging > 0, live > 0);
-      }
-    }
-  }
-
-  // Host/solo authority spends a fixed contribution cost, then starts a
-  // visible windup. The damage modifiers do not begin until that telegraph
-  // finishes, giving opponents a short but real reaction window.
-  _activateOvercharge(p) {
-    if (this._rejectHeldStreak(p)) return;
-    if (availableStreakAbility(p._streak ?? 0,
-        p._overchargeWindup, p._overchargeT) !== 'overcharge') return;
-    p._streak = spendStreak(p._streak, OVERCHARGE_COST);
-    this._recordStreakUse(p);
-    p._overchargeWindup = OVERCHARGE_WINDUP;
-    p._overchargeT = 0;
-    p.avatar?.setOvercharge(true, false);
-    this._broadcastOvercharge(p, 'windup', OVERCHARGE_WINDUP);
-    this.feed(`${nameSpan(p)} is charging <b>OVERCHARGE</b>`);
-    this.messageTeam(p.team, 'ALLY OVERCHARGE CHARGING', teamCss(p.team));
-    this.messageTeam(this.enemyOf(p.team),
-      'ENEMY OVERCHARGE CHARGING — BREAK CONTACT OR FOCUS FIRE', '#e05a4e');
-  }
-
-  _broadcastOvercharge(p, phase, remaining) {
-    const owner = p === this.player ? this._hostIdx : p.ridx;
-    if (phase === 'windup') {
-      if (p === this.player) sfx.overcharge();
-      else sfx.at('overcharge', p.body.pos);
-    }
-    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'overcharge',
-      owner, phase, remaining });
-  }
-
-  _updateOvercharges(dt) {
-    for (const p of [this.player, ...this.remote.values()]) {
-      const state = stepOvercharge(p._overchargeWindup, p._overchargeT, dt);
-      p._overchargeWindup = state.charging;
-      p._overchargeT = state.active;
-      p.avatar?.setOvercharge(state.charging > 0, state.active > 0);
-      if (state.started) {
-        this._broadcastOvercharge(p, 'active', OVERCHARGE_DURATION);
-        this.feed(`${nameSpan(p)} is <b>OVERCHARGED</b>`);
-      } else if (state.ended) {
-        this._broadcastOvercharge(p, 'end', 0);
       }
     }
   }
@@ -3421,30 +3060,23 @@ export class Game {
     hud.clock(this);
   }
 
-  _end(winner, authoritativeStory = null, authoritativeOperation = undefined) {
-    if (authoritativeOperation !== undefined) this._applyOperationRow(authoritativeOperation);
+  _end(winner, authoritativeStory = null) {
     if (this.over) {
       // A snapshot can announce game-over just ahead of the reliable end
       // event. Let that later event replace the locally reconstructed story
       // with the host's complete bounded counters.
       if (this.voxelStory && authoritativeStory)
         hud.voxelStory(voxelBattleStory(authoritativeStory));
-      hud.operationReport(this);
       return;
     }
-    // Only the authority settles a leg. Clients display the bounded state
-    // carried by the end event/snapshot, avoiding divergent series scores.
-    if (this.mode !== 'client' && this.operation)
-      this.operation = recordOperationResult(this.operation, winner);
     this._broadcastScoreboard(true);
     this.over = true;
     this.winner = winner;
-    this._rematchVotes.clear();
     this._squadVotes.clear();
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     if (this.mode === 'host') {
-      const event = { t: 'e', k: 'end', winner, op: this._operationRow() };
+      const event = { t: 'e', k: 'end', winner };
       if (storyMetrics) event.story = storyMetrics;
       this.net.broadcast(event);
     }
@@ -3472,51 +3104,30 @@ export class Game {
       + ` · ${holdClock(this.matchElapsed)}`;
     hud.matchReport(this, report, recordUpdate);
     hud.voxelStory(story);
-    hud.operation(this);
-    hud.operationReport(this);
     $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
     hud.classPick(this.player._pendingClass);
-    const operationDone = operationComplete(this.operation);
-    const balanceNote = this.teamBalanceEnabled() && !this.operation
-      ? ' · teams balance between rounds' : '';
-    $('endNote').textContent = (operationDone
-      ? 'operation complete · vote for a new operation or leave'
-      : this.mode === 'client'
-        ? `next map · ${next} · waiting for host`
-        : `next map · ${next}`) + balanceNote;
-    hud.rotationProgress(operationDone || this.mode === 'client' ? 0 : POST_MATCH_TIME,
-      !operationDone && this.mode !== 'client');
+    const balanceNote = this.teamBalanceEnabled() ? ' · teams balance between rounds' : '';
+    $('endNote').textContent = (this.mode === 'client'
+      ? `next map · ${next} · waiting for host`
+      : `next map · ${next}`) + balanceNote;
+    hud.rotationProgress(this.mode === 'client' ? 0 : POST_MATCH_TIME,
+      this.mode !== 'client');
     $('end').classList.remove('hidden');
     this.player.vmRoot.visible = false;
-    // Normal intermissions retain pointer lock for a seamless automatic next
-    // round. A completed operation has no timed continuation, so release the
-    // cursor for its new-operation and leave controls.
-    if (operationDone) document.exitPointerLock();
-    this._publishRematchState();
+    // Retain pointer lock for a seamless automatic next round.
     this._publishSquadState();
     if (!won) sfx.lose();
     // The room rotates maps on its own a few seconds after the final capture.
-    if (this.mode !== 'client') this._rotateT = operationDone ? null : POST_MATCH_TIME;
+    if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
   }
 
   // Next map in the rotation for the current mode.
   _nextMap() {
-    if (this.operation) return operationLeg(this.operation,
-      operationComplete(this.operation) ? 0 : 1)?.map ?? this.mapIndex;
     const pool = mapsForMode(this.gameMode);
     return pool[(pool.indexOf(this.mapIndex) + 1) % pool.length];
   }
 
   _rotate() {
-    if (this.operation) {
-      const next = advanceOperation(this.operation);
-      if (next === this.operation) return;
-      this.operation = next;
-      const leg = operationLeg(this.operation);
-      this.gameMode = leg.mode;
-      this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
-      return;
-    }
     const map = this._nextMap();
     const seed = Math.floor(Math.random() * 1e9);
     this._restartRound(map, seed);
@@ -3527,7 +3138,7 @@ export class Game {
     // Normal rounds rotate everyone green<->blue. With Phase 8 enabled, that
     // full side flip is the preferred baseline but a sufficiently lopsided
     // prior result can recompose the human teams here; explicit squads remain
-    // atomic. Operations deliberately retain fixed forces across all legs.
+    // atomic.
     // Host/solo only — clients receive the result in the roster below.
     const balance = this._balanceNextRoundTeams();
     if (!balance.enabled) {
@@ -3535,19 +3146,14 @@ export class Game {
       this.player.team = flip(this.player.team);
       for (const p of this.remote.values()) p.team = flip(p.team);
     }
-    const botPlan = this._planNextRoundBots();
-    if (this.operation) this.operation = flipOperationColors(this.operation);
     if (this.mode === 'host')
-      this.net.broadcast({ t: 'e', k: 'restart', map, seed,
-        mode: this.gameMode, op: this._operationRow() });
+      this.net.broadcast({ t: 'e', k: 'restart', map, seed, mode: this.gameMode });
     this.rebuild(seed, map);
     // Fresh world, fresh bot ids: everyone rebuilds their replica and needs
     // the roster again (their full-state maps were cleared on rebuild).
     if (this.mode === 'host') this.net.broadcast(this._rosterMsg());
     if (balance.adjusted)
       this.message('TEAMS BALANCED FOR THE NEXT ROUND · CONFIRMED SQUADS KEPT TOGETHER', '#ffd97a');
-    if (botPlan.adjusted)
-      this.message(`BOT DIRECTOR · GREEN ${botPlan.green.toUpperCase()} · BLUE ${botPlan.blue.toUpperCase()} · COGNITION ONLY`, '#ffd97a');
     this.onRestart?.(MAPS[map].name);
   }
 
@@ -3556,49 +3162,9 @@ export class Game {
       : !!(this._teamBalanceHostEnabled || this.engagementFeatures.teamBalance);
   }
 
-  botDirectorEnabled() {
-    return this.mode === 'client' ? !!this._botDirectorHostEnabled
-      : !!(this._botDirectorHostEnabled || this.engagementFeatures.botDirector);
-  }
-
-  _botDirectorRow() {
-    return [this.botDirectorEnabled() ? 1 : 0,
-      botDifficultyCode(this._botDifficultyPlan.green),
-      botDifficultyCode(this._botDifficultyPlan.blue)];
-  }
-
-  _applyBotDirectorRow(row) {
-    if (!Array.isArray(row) || row.length !== 3) return;
-    this._botDirectorHostEnabled = row[0] === 1;
-    this._botDifficultyPlan = {
-      green: botDifficultyKey(row[1]), blue: botDifficultyKey(row[2]),
-    };
-  }
-
-  _planNextRoundBots() {
-    if (!this.botDirectorEnabled() || this.operation) {
-      if (!this.operation) this._botDifficultyPlan = { green: 'normal', blue: 'normal' };
-      return { green: this._botDifficultyPlan.green,
-        blue: this._botDifficultyPlan.blue, adjusted: false };
-    }
-    const humans = [this.player, ...this.remote.values()].map(p => ({
-      key: this._kdKey(p), team: p.team,
-      rating: this.kd.get(this._kdKey(p))?.score ?? 0,
-    }));
-    const botScores = this.bots.map(b => this.kd.get(this._kdKey(b))?.score)
-      .filter(Number.isFinite);
-    const botRating = botScores.length
-      ? botScores.reduce((sum, score) => sum + score, 0) / botScores.length : 0;
-    const result = planBotDirector(humans, teamSizeForMode(this.gameMode), botRating);
-    this._botDifficultyPlan = { green: result.green, blue: result.blue };
-    return result;
-  }
-
   _balanceNextRoundTeams() {
     const humans = [this.player, ...this.remote.values()];
-    // An Operation is one contest across three legs. Re-drafting its rosters
-    // between maps would make the Alpha/Bravo series score meaningless.
-    if (!this.teamBalanceEnabled() || this.operation || humans.length < 2)
+    if (!this.teamBalanceEnabled() || humans.length < 2)
       return { enabled: false, adjusted: false };
     const players = humans.map(p => ({
       key: this._kdKey(p),
@@ -3714,15 +3280,6 @@ export class Game {
     return this._passVoteKick();
   }
 
-  _publishRematchState() {
-    const humans = this.mode === 'client'
-      ? Math.max(1, this._rosterP?.size ?? 1) : this.remote.size + 1;
-    const voters = [...this._rematchVotes];
-    const needed = rematchVotesNeeded(humans);
-    hud.rematch(this, voters, needed);
-    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'rematch', voters, needed });
-  }
-
   _humanSquadRows() {
     if (this.mode === 'client') return [...(this._rosterP ?? new Map())]
       .map(([idx, meta]) => ['p' + idx, meta.team]);
@@ -3756,39 +3313,6 @@ export class Game {
     if (!this._humanKeys().includes(key) || this._squadVotes.has(key)) return;
     this._squadVotes.add(key);
     this._publishSquadState();
-  }
-
-  requestRematch() {
-    if (!this.over || (this.operation && !operationComplete(this.operation))) return;
-    this.engagement?.record('rematch', { action: 'vote' });
-    if (this.mode === 'client') {
-      this.net?.send({ t: 'a', k: 'rematch' });
-      return;
-    }
-    this._hostRematchVote(this.player);
-  }
-
-  _hostRematchVote(e) {
-    if (!this.over || !e || (this.operation && !operationComplete(this.operation))) return;
-    const key = this._kdKey(e);
-    if (!this._humanKeys().includes(key) || this._rematchVotes.has(key)) return;
-    this._rematchVotes.add(key);
-    this._publishRematchState();
-    this._maybeStartRematch();
-  }
-
-  _maybeStartRematch() {
-    if (!this.over || this._rematchVotes.size < rematchVotesNeeded(this.remote.size + 1)) return;
-    this._rotateT = null;
-    if (operationComplete(this.operation)) {
-      const nextPlan = (this.operation.plan + 1) % OPERATION_PLANS.length;
-      const leg = this.startOperation(nextPlan);
-      this._restartRound(leg.map, Math.floor(Math.random() * 1e9));
-      return;
-    }
-    // A successful vote skips the intermission but still advances the room's
-    // rotation. Public rooms never become one-map grind lobbies.
-    this._restartRound(this._nextMap(), Math.floor(Math.random() * 1e9));
   }
 
   // ---------------- host networking ----------------
@@ -3893,10 +3417,7 @@ export class Game {
         }
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
-          op: this._operationRow(),
-          mb: this._momentumRow(),
           tb: this.teamBalanceEnabled() ? 1 : 0,
-          bd: this._botDirectorRow(),
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
@@ -3921,10 +3442,6 @@ export class Game {
     }
     if (d.t === 'a' && d.k === 'mark') {
       this._hostPlaceTeamPing(p, d.d);
-      return;
-    }
-    if (d.t === 'a' && d.k === 'rematch') {
-      this._hostRematchVote(p);
       return;
     }
     if (d.t === 'a' && d.k === 'squad') {
@@ -4051,13 +3568,6 @@ export class Game {
       if (d.k === 'strike') {
         if ([d.x, d.z, d.yaw].every(Number.isFinite))
           this._confirmAirstrike(p, d.x, d.z, d.yaw);
-        return;
-      }
-      // Overcharge carries no payload at all — "turn it on," nothing to
-      // aim or target — so it needs the exact same early-branch treatment
-      // as strike above, for the same reason: no o/d pair to validate.
-      if (d.k === 'overcharge') {
-        this._activateOvercharge(p);
         return;
       }
       if (d.k === 'reload') { this._hostReload(p); return; }
@@ -4192,19 +3702,13 @@ export class Game {
     this._removeBot(team);
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
-      op: this._operationRow(),
-      mb: this._momentumRow(),
       tb: this.teamBalanceEnabled() ? 1 : 0,
-      bd: this._botDirectorRow(),
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
     if (this._voteKick) this.net.sendTo(id,
       { t: 'e', k: 'votekick', ...this.voteKickState() });
     if (this.over) {
-      this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner,
-        op: this._operationRow() });
-      this.net.sendTo(id, { t: 'e', k: 'rematch', voters: [...this._rematchVotes],
-        needed: rematchVotesNeeded(this.remote.size + 1) });
+      this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
       if (this.engagementFeatures.stayAsSquad)
         this.net.sendTo(id, { t: 'e', k: 'squad', voters: [...this._squadVotes] });
     }
@@ -4292,7 +3796,6 @@ export class Game {
     // _spawnBots now accounts for the visible bots restored just above.
     this._spawnBots();
     this._syncAbilityRows(this._lastAbilityRows);
-    this._syncStationRows(this._lastStationRows);
     // Airstrike rows are unconditional full state, so a strike already in
     // flight survives the baton pass too. Damage attribution is retained
     // when its caller survived; if the departed host called it, the blast
@@ -4341,7 +3844,7 @@ export class Game {
     // gets its rotation.
     if (!this.player.alive) this.respawnTimers.set(this.player,
       respawnWaveDelay(this.gameMode, this.matchElapsed));
-    if (this.over) this._rotateT = operationComplete(this.operation) ? null : 2;
+    if (this.over) this._rotateT = 2;
     // Stragglers get a minute to find the new room before their roster entry
     // lapses and any later knock is treated as a fresh join.
     setTimeout(() => {
@@ -4416,16 +3919,11 @@ export class Game {
       else if (this._voteKick.voters.size >= this._voteKick.needed) this._passVoteKick();
       else this._publishVoteKickState();
     }
-    this._rematchVotes.delete('p' + p.ridx);
     this._squadVotes.delete('p' + p.ridx);
     this.respawnTimers.delete(p);
     if (!this.over) this.bots.push(this._newBot(p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
-    if (this.over) {
-      this._publishRematchState();
-      this._publishSquadState();
-      this._maybeStartRematch();
-    }
+    if (this.over) this._publishSquadState();
     this._checkAbandoned();
   }
 
@@ -4496,13 +3994,9 @@ export class Game {
       a: this._pendingStrikes.map(s => [s.id, ...pos(s.pos), qa(s.yaw),
         Math.max(0, Math.round(s.t * 1000)), s.owner]),
       u: this._abilityRows(),
-      mb: this._momentumRow(),
       tb: this.teamBalanceEnabled() ? 1 : 0,
-      bd: this._botDirectorRow(),
-      l: this._stationRows(),
       m: [Math.max(0, Math.round(this.matchRemaining * 10)), this.overtime ? 1 : 0,
         Math.max(0, Math.round(this.matchElapsed * 10))],
-      op: this._operationRow(),
       o: this.over ? 1 : 0,
       w: this.winner,
     };
@@ -4554,9 +4048,8 @@ export class Game {
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
         f: snap.f, h: snap.h, c: snap.c, g: snap.g,
-        a: snap.a, u: snap.u, mb: snap.mb, tb: snap.tb, bd: snap.bd,
-        l: snap.l, m: snap.m,
-        op: snap.op, o: snap.o, w: snap.w };
+        a: snap.a, u: snap.u, tb: snap.tb, m: snap.m,
+        o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
       if (pingTs !== undefined) out.ts = pingTs;
       out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
@@ -4685,10 +4178,7 @@ export class Game {
       this.myId = d.id;
       this.myIdx = d.me;
       this.player.team = d.team;
-      if (d.mb !== undefined) this._applyMomentumRow(d.mb);
       if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
-      if (d.bd !== undefined) this._applyBotDirectorRow(d.bd);
-      if (d.op !== undefined) this._applyOperationRow(d.op);
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
       if (d.migrated) {
         // Baton-pass rejoin: we never left — keep position and kit; the new
@@ -4775,10 +4265,7 @@ export class Game {
     // promoteToHost rebuilds the match from exactly these.
     mergeSnapshot(this._fullP, this._fullB, d);
     this._syncAirstrikeRows(d.a ?? []);
-    if (d.mb !== undefined) this._applyMomentumRow(d.mb);
     if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
-    if (d.bd !== undefined) this._applyBotDirectorRow(d.bd);
-    if (d.op !== undefined) this._applyOperationRow(d.op);
     const want = new Set();
     for (const [idx, r] of this._fullP) {
       const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades,
@@ -4871,7 +4358,6 @@ export class Game {
       if (!want.has(key)) { av.dispose(); this.avatars.delete(key); }
     }
     this._syncAbilityRows(d.u ?? []);
-    this._syncStationRows(d.l ?? []);
     const stateName = ['home', 'carried', 'dropped'];
     if (d.f && this.flags)
       for (const team of ['green', 'blue']) {
@@ -4959,21 +4445,6 @@ export class Game {
         this._syncAirstrikeDrone(d.id, x, y, z, d.yaw, d.remaining, d.owner);
         break;
       }
-      case 'overcharge':
-      {
-        const charging = d.phase === 'windup' ? d.remaining : 0;
-        const active = d.phase === 'active' ? d.remaining : 0;
-        if (d.owner === this.myIdx) {
-          this.player._overchargeWindup = charging;
-          this.player._overchargeT = active;
-          if (d.phase === 'windup') sfx.overcharge();
-        } else {
-          const av = this.avatars.get('p' + d.owner);
-          av?.setOvercharge(charging > 0, active > 0);
-          if (d.phase === 'windup' && av) sfx.at('overcharge', av.pos);
-        }
-        break;
-      }
       case 'col': { // host collapsed a structure: replay removal + dust only
         const cells = [];
         this.world.batchEdits(() => {
@@ -5000,10 +4471,6 @@ export class Game {
       case 'msg':
         if (!d.team || d.team === this.player.team) hud.message(d.text, d.color);
         break;
-      case 'supply':
-        sfx.pickup();
-        hud.message(`FIELD CACHE · +${d.blocks} BLOCKS · +${d.nades} GRENADE`, '#ffd97a');
-        break;
       case 'hit':
         hud.hitmark(d.kill);
         if (d.tier) hud.killCallout(d.tier); // replaces the plain chime, same rule as the host-side path
@@ -5024,10 +4491,6 @@ export class Game {
         this._lastHealth = 100;
         break;
       case 'mark': this._receiveTeamPing(d); break;
-      case 'rematch':
-        this._rematchVotes = new Set(d.voters);
-        hud.rematch(this, d.voters, d.needed);
-        break;
       case 'squad':
         this._squadHostEnabled = true;
         this._squadVotes = new Set(d.voters);
@@ -5054,9 +4517,8 @@ export class Game {
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
-      case 'end': this._end(d.winner, d.story, d.op); break;
+      case 'end': this._end(d.winner, d.story); break;
       case 'restart':
-        if (d.op !== undefined) this._applyOperationRow(d.op);
         this.gameMode = d.mode;
         this.rebuild(d.seed, d.map);
         this.onRestart?.(MAPS[d.map].name);
@@ -5080,11 +4542,11 @@ export class Game {
     // This mirrors die()'s own resets directly (everything except
     // onDeath(), which is host-authoritative match-flow logic that
     // doesn't belong on this side). Discovered as a genuine, direct
-    // consequence of the same gap: this was ALREADY missing the perk-
-    // related resets (multi-kill chain, streak, Overcharge, in-progress
-    // airstrike piloting/fall) before this fix, meaning none of them
+    // consequence of the same gap: this was ALREADY missing the reward-
+    // related resets (multi-kill chain, streak, in-progress airstrike
+    // piloting/fall) before this fix, meaning none of them
     // ever cleared between a guest's lives — silently breaking the whole
-    // perk system for anyone who wasn't hosting, on top of a few other
+    // reward system for anyone who wasn't hosting, on top of a few other
     // real if smaller bugs (a visible gun model surviving death, stale
     // crouch height/hitbox carrying into the next life).
     this.player.health = 0;
@@ -5095,10 +4557,7 @@ export class Game {
     hud.air(BREATH_MAX, false);
     this.player.swing = 0;
     this.player._mkCount = 0; this.player._mkT = null;
-    this.player._momentumCarry = retainedMomentum(this.player._streak,
-      this.momentumBalanceEnabled());
-    this.player._streak = this.player._momentumCarry;
-    this.player._overchargeWindup = 0; this.player._overchargeT = 0;
+    this.player._streak = 0;
     this.player._piloting = false;
     this.player._fallingT = 0;
     this.player._lingerT = 0;
@@ -5170,10 +4629,6 @@ export class Game {
       }
     }
     if (this.player.alive) {
-      const charge = stepOvercharge(this.player._overchargeWindup,
-        this.player._overchargeT, dt);
-      this.player._overchargeWindup = charge.charging;
-      this.player._overchargeT = charge.active;
       this.player.update(dt);
       // The host alone applies damage; the client advances the same pure
       // breath state only so its HUD responds immediately to local movement.
@@ -5233,7 +4688,6 @@ export class Game {
     }
     if (presentation.slow) {
       hud.minimap(this);
-      hud.fieldStation(this);
       hud.streakStatus(this.player);
       hud.firstMinute(this.firstMinuteGuide?.update({
         matchSecond: this.matchElapsed,
@@ -5284,17 +4738,12 @@ export class Game {
         }
       }
     }
-    // One authoritative timer for every human, including remote proxies.
-    // Clients receive the same state in snapshots and only interpolate it.
-    this._updateOvercharges(dt);
-
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
-    this._updateBotDirector(dt);
+    this._updateBotTactics(dt);
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);
-    if (!this.over) this._updateFieldStations(dt);
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.

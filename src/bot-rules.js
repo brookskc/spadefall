@@ -139,7 +139,11 @@ export function assignBotRoles(mode, bots, context = {}) {
     set(nearest(context.friendlyCarrier, unassigned(used))[0], 'escort', used);
   set(nearest(context.ownStand, unassigned(used))[0], 'defend', used);
   set(nearest(context.midfield, unassigned(used))[0], 'mid', used);
-  for (const b of unassigned(used)) roles[b.id] = 'attack';
+  const attackers = unassigned(used);
+  for (let i = 0; i < attackers.length; i++) {
+    roles[attackers[i].id] = attackers.length >= 3
+      ? ['flank-left', 'attack', 'flank-right'][i] : 'attack';
+  }
   return roles;
 }
 

@@ -12,6 +12,7 @@ import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
 import { botDifficulty, botSeparation, botTargetScore, chooseLocalRoute,
   hillPost, rememberedEnemyPosition } from './bot-rules.js';
+import { clampToEnvelope, mapEnvelope } from './mapgen.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -160,7 +161,13 @@ export class Bot {
     // 9-unit radius comes into play).
     const d = Math.hypot(v.x - this.body.pos.x, v.z - this.body.pos.z);
     const taper = Math.min(1, Math.max(0, (d - 15) / 20));
-    v.z += this.lane * taper;
+    let lane = this.lane;
+    if (this.game.gameMode === 'ctf') {
+      if (this.tacticalRole === 'flank-left') lane = -44;
+      else if (this.tacticalRole === 'flank-right') lane = 44;
+      else if (this.tacticalRole === 'attack') lane = 0;
+    }
+    v.z += lane * taper;
     return v;
   }
 
@@ -194,14 +201,21 @@ export class Bot {
   // Roam the contested middle band, biased toward the enemy half — a patrol,
   // not a camp. Fresh waypoint on arrival or on a timeout.
   _patrolGoal() {
-    const b = this.body, w = this.game.world;
+    const b = this.body, w = this.game.world, envelope = mapEnvelope(this.game.mapIndex);
     const arrived = this.patrol && Math.hypot(this.patrol.x - b.pos.x, this.patrol.z - b.pos.z) < 7;
     if (!this.patrol || arrived || this.patrolT <= 0) {
       this.patrolT = 18;
       for (let tries = 0; tries < 8; tries++) {
-        const x = SX * 0.25 + Math.random() * SX * (this.heading > 0 ? 0.55 : 0.5);
-        const px = this.heading > 0 ? x : SX - x; // bias across midfield
-        const pz = SZ * 0.2 + Math.random() * SZ * 0.6;
+        const advance = 0.24 + Math.random() * 0.52;
+        const px = this.heading > 0
+          ? envelope.minX + advance * (envelope.maxX - envelope.minX)
+          : envelope.maxX - advance * (envelope.maxX - envelope.minX);
+        const flank = (Math.random() - 0.5) * (envelope.maxZ - envelope.minZ) * 0.72;
+        const taper = Math.min(1, Math.abs(px - (envelope.minX + envelope.maxX) / 2)
+          / ((envelope.maxX - envelope.minX) * 0.32));
+        const p = clampToEnvelope(envelope, px,
+          (envelope.minZ + envelope.maxZ) / 2 + flank * (1 - taper * 0.6), 5);
+        const pz = p.z;
         if (w.surface(px | 0, pz | 0) < SEA) continue; // don't patrol the sea
         this.patrol = new THREE.Vector3(px, w.surface(px | 0, pz | 0), pz);
         break;

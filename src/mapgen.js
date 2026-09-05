@@ -44,18 +44,22 @@ function mulberry32(a) {
 // these later is just changing a hex value here, nothing structural.
 export const MAPS = [
   { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null,
+    envelope: { minX: 16, maxX: 240, minZ: 48, maxZ: 208, shape: 'rect', kind: 'shore' },
     atmosphere: { sky: ['#5eafe0', '#a6d3e2', '#e3ead5'], fog: 0xcadcc9, cloud: 0xf5f1dc, water: 0x347ba7,
       sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] },
     paletteOverrides: { grass: 0x5f9f45, dirt: 0x75563a, sand: 0xc4ad73, stone: 0x70796f, moss: 0x3d7545 } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
+    envelope: { minX: 16, maxX: 240, minZ: 48, maxZ: 208, shape: 'rect', kind: 'shore' },
     atmosphere: { sky: ['#4d9fc9', '#9bcbd8', '#e8eee4'], fog: 0xd3e3dc, cloud: 0xf8f4e8, water: 0x248fa4,
       sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] },
     paletteOverrides: { grass: 0x6f9f55, dirt: 0x89684d, sand: 0xd2b977, stone: 0x737b80, moss: 0x4d7459 } },
   { key: 'forest',  name: 'PINEFALL',  modes: ['ctf', 'tdm'],        gen: null,
+    envelope: { minX: 16, maxX: 240, minZ: 48, maxZ: 208, shape: 'rect', kind: 'shore' },
     atmosphere: { sky: ['#aaa3d2', '#c8c0dc', '#e4ddea'], fog: 0xc9c1d6, cloud: 0xf1edf4, water: 0x3c6967,
       sun: [0.55, 1, -0.35], sunTint: [1.02, 1.00, 1.06] },
     paletteOverrides: { grass: 0x4f824c, dirt: 0x685344, sand: 0xb0a683, stone: 0x72757f, moss: 0x315d3f } },
   { key: 'desert',  name: 'DUNES',     modes: ['tdm', 'koth'],       gen: null,
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'escarpment' },
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'CENTER' },
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH' },
@@ -65,6 +69,7 @@ export const MAPS = [
       sun: [-0.55, 0.8, -0.25], sunTint: [1.12, 1.02, 0.82] },
     paletteOverrides: { grass: 0x8c8b55, dirt: 0x895d49, sand: 0xcaa461, stone: 0x846f72, moss: 0x74694f } },
   { key: 'crown',   name: 'CROWN',     modes: ['koth', 'tdm'],       gen: null,
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'shore' },
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'CROWN' },
       { x: SX / 2, z: SZ / 2 - 40, r: 8, label: 'NORTH GATE' },
@@ -74,6 +79,7 @@ export const MAPS = [
       sun: [0.35, 1, -0.55], sunTint: [1.08, 1.04, 0.94] },
     paletteOverrides: { grass: 0x567447, dirt: 0x604636, sand: 0xb29a68, stone: 0x515d69, moss: 0x334f3c } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [
       { x: SX / 2, z: SZ / 2, r: 8, label: 'KNOLL' },
       { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
@@ -83,6 +89,37 @@ export const MAPS = [
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
     paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
 ];
+
+// The voxel world remains 256×256; an envelope is the authored combat space
+// inside it.  It is deliberately data, rather than a collision rule: maps use
+// shorelines, escarpments, and volcanic shelves to make leaving that space a
+// bad route while game systems use it to avoid dead outer wilderness.
+export function mapEnvelope(mapIndex = 0) {
+  return MAPS[((mapIndex % MAPS.length) + MAPS.length) % MAPS.length].envelope;
+}
+export function envelopeContains(envelope, x, z, inset = 0) {
+  const minX = envelope.minX + inset, maxX = envelope.maxX - inset;
+  const minZ = envelope.minZ + inset, maxZ = envelope.maxZ - inset;
+  if (x < minX || x > maxX || z < minZ || z > maxZ) return false;
+  if (envelope.shape !== 'ellipse') return true;
+  const rx = (maxX - minX) / 2, rz = (maxZ - minZ) / 2;
+  const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+  return ((x - cx) / rx) ** 2 + ((z - cz) / rz) ** 2 <= 1;
+}
+export function clampToEnvelope(envelope, x, z, inset = 0) {
+  const minX = envelope.minX + inset, maxX = envelope.maxX - inset;
+  const minZ = envelope.minZ + inset, maxZ = envelope.maxZ - inset;
+  let px = Math.max(minX, Math.min(maxX, x));
+  let pz = Math.max(minZ, Math.min(maxZ, z));
+  if (envelope.shape === 'ellipse') {
+    const rx = (maxX - minX) / 2, rz = (maxZ - minZ) / 2;
+    const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+    const nx = (px - cx) / rx, nz = (pz - cz) / rz;
+    const d = Math.hypot(nx, nz);
+    if (d > 1) { px = cx + nx / d * rx; pz = cz + nz / d * rz; }
+  }
+  return { x: px, z: pz };
+}
 
 // Mutated by each generator; game.js reads spawn points and flag stands here.
 export const BASE = {
@@ -204,6 +241,7 @@ function genIsland(world, seed) {
     }
 
   flattenBases(height);
+  applyShoreEnvelope(height, mapEnvelope(0));
 
   // A gentle road between the bases — pulled toward its target height in both
   // directions: causeway over water, soft valley through hills, wide smooth
@@ -302,6 +340,7 @@ function genBeach(world, seed) {
     }
 
   flattenBases(height);
+  applyShoreEnvelope(height, mapEnvelope(1));
   // Broad coastal material zones replace the old hard sand/grass split.
   // The bands are deliberately low-frequency: they read as damp shoreline,
   // churned bluff earth, meadow, scrub, and exposed ridge rock—not as a
@@ -410,6 +449,59 @@ export function pinefallRavineCenter(seed, x) {
   const ford = SX / 2 + ((seed % 5) - 2) * 6;
   return SZ / 2 + 58 * Math.sin((x - ford) * 0.022);
 }
+
+const smooth01 = t => { t = Math.min(1, Math.max(0, t)); return t * t * (3 - 2 * t); };
+
+function envelopeEdgeDistance(envelope, x, z) {
+  if (envelope.shape !== 'ellipse')
+    return Math.min(x - envelope.minX, envelope.maxX - x,
+      z - envelope.minZ, envelope.maxZ - z);
+  const cx = (envelope.minX + envelope.maxX) / 2;
+  const cz = (envelope.minZ + envelope.maxZ) / 2;
+  const rx = (envelope.maxX - envelope.minX) / 2;
+  const rz = (envelope.maxZ - envelope.minZ) / 2;
+  const radial = Math.hypot((x - cx) / rx, (z - cz) / rz);
+  return (1 - radial) * Math.min(rx, rz);
+}
+
+// Pull a rectangular combat space down into water over a broad shore.  The
+// transition happens inside the declared envelope, so the edge reads as a
+// shoreline/bank and never as a hard gameplay boundary.
+function applyShoreEnvelope(height, envelope, depth = 14) {
+  for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const edge = envelopeEdgeDistance(envelope, x, z);
+    if (edge >= depth) continue;
+    const i = at(x, z);
+    if (edge <= 0) height[i] = Math.min(height[i], SEA - 3);
+    else {
+      const t = smooth01(edge / depth);
+      height[i] = (SEA - 3) * (1 - t) + height[i] * t;
+    }
+  }
+}
+
+// Arena maps retain dry natural containment. The boundary is a rounded ridge,
+// not a square stadium wall: original terrain contributes to its silhouette,
+// then the exterior falls away so climbing over it never unlocks a safe flat
+// highway around the fight. It remains ordinary destructible terrain.
+function applyArenaRim(height, envelope, floor = SEA + 8, rim = SEA + 24) {
+  for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const edge = envelopeEdgeDistance(envelope, x, z);
+    if (edge >= 18) continue;
+    const i = at(x, z), original = height[i];
+    // The exterior is a lower wasteland behind a sheer voxel escarpment.
+    // Dropping out is possible but dangerous; walking a safe perimeter and
+    // stepping back into the arena is not.
+    if (edge < 0) {
+      height[i] = Math.max(SEA + 2, original - 7);
+      continue;
+    }
+    const ridge = 1 - smooth01(edge / 18);
+    const irregularRim = rim + (original - floor) * 0.28;
+    const shaped = original * (1 - ridge) + irregularRim * ridge;
+    height[i] = Math.max(original, shaped);
+  }
+}
 export function pinefallRavineHeight(originalHeight, distance) {
   if (distance >= PINEFALL_RAVINE_HALF_WIDTH) return originalHeight;
   // Smoothly blend the original hillside into a one-block-deep creek bed.
@@ -444,6 +536,7 @@ function genForest(world, seed) {
     }
 
   flattenBases(height);
+  applyShoreEnvelope(height, mapEnvelope(2));
   fillColumns(world, height, (x, z, h) => h < SEA ? BLOCK.DIRT : BLOCK.GRASS);
 
   // Four tree silhouettes instead of one cloned trunk-plus-cube. Foliage is
@@ -497,6 +590,7 @@ function genForest(world, seed) {
 function genDesert(world, seed) {
   const noise = makeNoise(seed);
   const height = new Float32Array(SX * SZ);
+  BASE.green.x = 52; BASE.blue.x = SX - 52;
   const CX = SX / 2, CZ = SZ / 2; // the hill sits at dead center
   // Everything west of the midfield axis is mirrored east (x -> SX-1-x), so
   // both teams walk identical approaches, perches, and cover. The bases sit
@@ -548,6 +642,7 @@ function genDesert(world, seed) {
     }
 
   flattenBases(height);
+  applyArenaRim(height, mapEnvelope(3), SEA + 10, SEA + 26);
   fillColumns(world, height,
     (x, z) => {
       if (Math.hypot(x - AX, z - CZ) < 9) return BLOCK.STONE;
@@ -632,6 +727,7 @@ const ss = t => { t = clamp01(t); return t * t * (3 - 2 * t); };
 function genCrown(world, seed) {
   const noise = makeNoise(seed);
   const height = new Float32Array(SX * SZ);
+  BASE.green.x = 52; BASE.blue.x = SX - 52;
   const CX = SX / 2, CZ = SZ / 2, TOP = SEA + 20;
 
   for (let z = 0; z < SZ; z++)
@@ -660,6 +756,7 @@ function genCrown(world, seed) {
     }
 
   flattenBases(height);
+  applyShoreEnvelope(height, mapEnvelope(4), 16);
   fillColumns(world, height, (x, z, h) => h <= SEA + 1 ? BLOCK.SAND : BLOCK.GRASS);
 
   // The ring fort: a broken stone circle on the crown, gates on the four
@@ -717,6 +814,7 @@ function genCrown(world, seed) {
 function genCaldera(world, seed) {
   const noise = makeNoise(seed);
   const height = new Float32Array(SX * SZ);
+  BASE.green.x = 52; BASE.blue.x = SX - 52;
   const CX = SX / 2, CZ = SZ / 2;
 
   for (let z = 0; z < SZ; z++)
@@ -750,6 +848,7 @@ function genCaldera(world, seed) {
     }
 
   flattenBases(height);
+  applyArenaRim(height, mapEnvelope(5), SEA + 12, SEA + 28);
   // Scorched ground: stone outcrops breaking through packed ash.
   fillColumns(world, height,
     (x, z) => noise(x * 0.11 + 3, z * 0.11 + 3) > 0.62 ? BLOCK.STONE : BLOCK.DIRT);

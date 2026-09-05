@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import crypto from 'node:crypto';
 import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
+  clampToEnvelope, envelopeContains, mapEnvelope,
   PINEFALL_RAVINE_HALF_WIDTH, pinefallRavineCenter,
   pinefallRavineHeight } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
@@ -100,6 +101,45 @@ function mapgenTests() {
     ok(`${name}: a different seed gives different terrain`, dataHash(c) !== dataHash(a));
     generateMap(a, 12345, m); // restore BASE for this map before reading it
     hashes.push(dataHash(a));
+    const envelope = mapEnvelope(m);
+    const width = envelope.maxX - envelope.minX;
+    const depth = envelope.maxZ - envelope.minZ;
+    const ctfFamily = MAPS[m].modes.includes('ctf');
+    ok(`${name}: exposes a valid combat envelope`,
+      envelopeContains(envelope, SX / 2, SZ / 2)
+        && envelope.minX >= 0 && envelope.minZ >= 0
+        && envelope.maxX <= SX && envelope.maxZ <= SZ,
+      JSON.stringify(envelope));
+    ok(`${name}: has the expected authored combat dimensions`,
+      ctfFamily
+        ? width === 224 && depth === 160 && envelope.shape === 'rect'
+        : width === 192 && depth === 192 && envelope.shape === 'ellipse',
+      `${width}x${depth}`);
+    for (const team of ['green', 'blue'])
+      ok(`${name}: ${team} base stays inside its combat envelope`,
+        envelopeContains(envelope, BASE[team].x, BASE[team].z, 2));
+    if (envelope.kind === 'shore') {
+      ok(`${name}: outer band resolves to a natural water boundary`,
+        a.surface(envelope.minX - 6, SZ / 2) < SEA
+          && a.surface(SX / 2, envelope.minZ - 6) < SEA);
+    } else {
+      const westRidge = a.surface(envelope.minX + 1, SZ / 2);
+      const westOutside = a.surface(envelope.minX - 2, SZ / 2);
+      const northRidge = a.surface(SX / 2, envelope.minZ + 1);
+      const northOutside = a.surface(SX / 2, envelope.minZ - 2);
+      ok(`${name}: rounded rim rises above its exterior rather than opening a perimeter lane`,
+        westRidge >= SEA + 20 && northRidge >= SEA + 20
+          && westRidge - westOutside >= 5 && northRidge - northOutside >= 5,
+        `west=${westRidge}/${westOutside}, north=${northRidge}/${northOutside}`);
+    }
+    if (ctfFamily) {
+      const flankNorth = a.surface(SX / 2, 76);
+      const flankSouth = a.surface(SX / 2, 180);
+      const central = a.surface(SX / 2, SZ / 2);
+      ok(`${name}: center and both flank approach samples remain traversable`,
+        central >= SEA - 1 && flankNorth >= SEA && flankSouth >= SEA,
+        `center=${central}, north=${flankNorth}, south=${flankSouth}`);
+    }
     if (m === 1) {
       beachSurfaceCounts = new Map();
       for (let z = 24; z < SZ - 24; z++)
@@ -129,6 +169,13 @@ function mapgenTests() {
     ok(`${name}: every voxel indexes PALETTE`, bad === 0, `${bad} out of range`);
   }
   ok('all six maps are distinct', new Set(hashes).size === MAPS.length);
+  const bounded = clampToEnvelope(mapEnvelope(0), -50, SZ + 50, 5);
+  ok('combat-envelope clamp keeps bot/spawn samples inside the requested inset',
+    envelopeContains(mapEnvelope(0), bounded.x, bounded.z, 5), JSON.stringify(bounded));
+  const arenaBounded = clampToEnvelope(mapEnvelope(3), -50, SZ + 50, 5);
+  ok('rounded-arena clamp projects corner samples onto the playable ellipse',
+    envelopeContains(mapEnvelope(3), arenaBounded.x, arenaBounded.z, 5),
+    JSON.stringify(arenaBounded));
   ok('BEACHHEAD exposes broad sand, earth, grass, scrub, and rock surface zones',
     [BLOCK.SAND, BLOCK.DIRT, BLOCK.GRASS, BLOCK.MOSS, BLOCK.STONE]
       .every(block => (beachSurfaceCounts?.get(block) ?? 0) >= 100),
@@ -554,6 +601,13 @@ function botRuleTests() {
     Object.values(ctfRoles).filter(r => r === 'recover').length === 2
       && Object.values(ctfRoles).includes('escort')
       && Object.values(ctfRoles).includes('defend'));
+  const openCtfRoles = assignBotRoles('ctf', squad, {
+    ownStand: { x: 10, z: 128 }, midfield: { x: 128, z: 128 },
+  });
+  ok('a full CTF squad sends attackers through both authored flank lanes',
+    Object.values(openCtfRoles).includes('flank-left')
+      && Object.values(openCtfRoles).includes('flank-right')
+      && Object.values(openCtfRoles).includes('attack'));
   const kothRoles = assignBotRoles('koth', squad, { hill: { x: 60, z: 45 } });
   ok('KOTH director creates an anchor, contesters, and flanking pressure',
     Object.values(kothRoles).filter(r => r === 'anchor').length === 1

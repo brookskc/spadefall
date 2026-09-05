@@ -2,7 +2,8 @@
 // Modes: 'solo' (local only), 'host' (authoritative, broadcasts), 'client' (thin).
 import * as THREE from 'three';
 import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
-import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere } from './mapgen.js';
+import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere,
+  envelopeContains, mapEnvelope } from './mapgen.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
@@ -1425,6 +1426,7 @@ export class Game {
   _spawnSurface(x, z) {
     const fx = Math.floor(x), fz = Math.floor(z);
     if (fx < 2 || fz < 2 || fx >= SX - 2 || fz >= SZ - 2) return null;
+    if (!envelopeContains(mapEnvelope(this.mapIndex), x, z, 3)) return null;
     const h = this.world.surface(fx, fz);
     if (h < SEA) return null;
     let rim = h;

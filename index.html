@@ -237,14 +237,13 @@
   #endBests.new { color:var(--outcome); opacity:1; }
   #endMastery { color:#d9e3e4; }
   #endFacts { flex:0 0 auto; padding:9px 0 5px; }
-  #endGoal, #endFieldwork, #endOperation, #endStory { display:none; padding:4px 0;
+  #endOperation, #endStory { display:none; padding:4px 0;
     font-size:11px; line-height:1.35; text-transform:uppercase; }
-  #endGoal.on, #endFieldwork.on { display:flex; justify-content:space-between; gap:16px; }
   #endOperation.on, #endStory.on { display:block; }
-  #endGoalLabel, #endFieldworkLabel, #endOperationLabel, #endStoryLabel {
+  #endOperationLabel, #endStoryLabel {
     margin-right:8px; font-size:10px; font-weight:800; color:var(--outcome); }
-  #endGoalName, #endOperationTitle, #endStoryTitle { margin-right:7px; font-size:11px; }
-  #endGoalResult, #endFieldworkDetail, #endOperationDetail, #endStoryDetail { font-size:11px; opacity:.75; }
+  #endOperationTitle, #endStoryTitle { margin-right:7px; font-size:11px; }
+  #endOperationDetail, #endStoryDetail { font-size:11px; opacity:.75; }
   #endStory { border-top:1px solid rgba(167,197,141,.55); border-bottom:1px solid rgba(167,197,141,.55); }
   #endImpactMetrics { display:grid; grid-template-columns:repeat(5,minmax(56px,1fr)); gap:8px; margin-top:7px; }
   .impactMetric { --fill:0%; border-left:3px solid var(--terrain); padding-left:7px; min-width:0; }
@@ -355,7 +354,7 @@
   #hud.on { opacity:var(--hud-alpha); }
   #hud .panel, #hud #feed, #hud #msg, #hud #respawn, #hud #classPick,
   #hud #chat, #hud #chatkey, #hud #airstrikeReady, #hud #overchargeActive,
-  #hud #minimap, #hud #teamPing, #hud #firstMinute, #hud #selectedGoal { zoom:var(--hud-scale); }
+  #hud #minimap, #hud #teamPing, #hud #firstMinute { zoom:var(--hud-scale); }
   /* Square, not a circle — the crosshair was the last always-visible piece
      of geometry in the whole game still shaped like something that isn't a
      box (flagged, not fixed, in the last pass: it's the single most-seen
@@ -576,25 +575,6 @@
   #firstMinuteObjective { margin-top:8px; font-size:9px; letter-spacing:1.2px; opacity:.56; }
   #firstMinuteProgress { margin-top:6px; font-size:9px; letter-spacing:.8px; color:#ffd97a; }
 
-  #selectedGoal { display:none; position:absolute; left:22px; top:258px; width:192px;
-    box-sizing:border-box; padding:8px 10px; background:rgba(10,14,22,.76);
-    border-left:3px solid rgba(255,255,255,.3); text-transform:uppercase; }
-  #selectedGoal.on { display:block; }
-  #firstMinute.on + #selectedGoal.on { top:390px; }
-  #selectedGoal.complete { border-left-color:#ffd97a; }
-  #selectedGoalHead { display:flex; justify-content:space-between; gap:8px;
-    font-size:8px; letter-spacing:1.4px; }
-  #selectedGoalLabel { opacity:.46; }
-  #selectedGoalName { color:#e8ecf2; }
-  #selectedGoal.complete #selectedGoalName { color:#ffd97a; }
-  #selectedGoalProgress { margin-top:5px; text-align:right; font-size:8px;
-    letter-spacing:1px; opacity:.58; }
-  #selectedGoalBar { height:3px; margin-top:3px; background:rgba(255,255,255,.12); }
-  #selectedGoalFill { width:0; height:100%; background:#e8ecf2; transition:width .18s; }
-  #selectedGoal.complete #selectedGoalFill { background:#ffd97a; }
-  #selectedGoalDetail { min-height:10px; margin-top:5px; font-size:7px;
-    letter-spacing:.7px; line-height:1.4; opacity:.48; }
-
   #score { display:flex; justify-content:center;
     gap:14px; align-items:center; font-size:20px; font-weight:800; letter-spacing:2px; }
   #score .g { color:var(--green); } #score .b { color:var(--blue); }
@@ -651,16 +631,6 @@
   #startClassOpts { display:flex; gap:18px; justify-content:center; }
   #startClassOpts .opt { cursor:pointer; }
   #startClassOpts .opt:hover { opacity:.8; }
-  #startGoalPick { display:none; margin-top:14px; font-size:12px; letter-spacing:2px;
-    text-transform:uppercase; }
-  html[data-selected-goals="on"] #startGoalPick { display:block; }
-  #startGoalPick .lbl { opacity:.5; margin-bottom:4px; }
-  #startGoalOpts { display:flex; gap:18px; justify-content:center; }
-  #startGoalOpts .opt { opacity:.5; cursor:pointer; }
-  #startGoalOpts .opt:hover { opacity:.8; }
-  #startGoalOpts .opt.picked { opacity:1; color:#ffd97a; }
-  #startGoalOpts small { display:block; margin-top:2px; font-size:8px;
-    letter-spacing:1px; color:#e8ecf2; opacity:.62; }
   /* Team picker: same look/placement as the class picker above it, but the
      picked color is the actual team color instead of a uniform gold — the
      point here is literally "which side," so the swatch should look like
@@ -784,12 +754,6 @@
       <div id="firstMinuteObjective"></div>
       <div id="firstMinuteProgress"></div>
     </div>
-    <div id="selectedGoal">
-      <div id="selectedGoalHead"><span id="selectedGoalLabel">FIELD GOAL</span><b id="selectedGoalName"></b></div>
-      <div id="selectedGoalProgress"></div>
-      <div id="selectedGoalBar"><div id="selectedGoalFill"></div></div>
-      <div id="selectedGoalDetail"></div>
-    </div>
     <div class="panel" id="vitals">
       <div id="healthbar"><div id="healthfill"></div></div>
       <div id="healthnum">100 HP</div>
@@ -890,14 +854,6 @@
         <span class="opt" data-cls="5">SNIPER</span>
       </div>
     </div>
-    <div class="prefs home-only" id="startGoalPick">
-      <div class="lbl">field goal · no reward, just a target</div>
-      <div id="startGoalOpts">
-        <span class="opt" data-goal="vanguard">VANGUARD<small>3 KILLS</small></span>
-        <span class="opt" data-goal="sapper">SAPPER<small>24 FIELDWORK</small></span>
-        <span class="opt" data-goal="wingman">WINGMAN<small>3 TEAM PLAYS</small></span>
-      </div>
-    </div>
     <div class="prefs home-only" id="startTeamPick">
       <div class="lbl">team</div>
       <div id="startTeamOpts">
@@ -994,14 +950,6 @@
             <div><span id="endBests"></span><span id="endMastery"></span></div>
           </div>
           <div id="endFacts">
-            <div id="endGoal">
-              <span><span id="endGoalLabel">FIELD GOAL</span><b id="endGoalName"></b></span>
-              <span id="endGoalResult"></span>
-            </div>
-            <div id="endFieldwork">
-              <span id="endFieldworkLabel">FIELDWORK</span>
-              <span id="endFieldworkDetail"></span>
-            </div>
             <div id="endOperation">
               <span id="endOperationLabel"></span>
               <b id="endOperationTitle"></b>
@@ -1076,6 +1024,6 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=30"></script>
+  <script type="module" src="./src/main.js?v=31"></script>
 </body>
 </html>

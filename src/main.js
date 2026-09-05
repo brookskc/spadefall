@@ -24,8 +24,6 @@ const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
 if (engagementFeatures.publicChat)
   document.documentElement.dataset.publicChat = 'on';
-if (engagementFeatures.selectedGoals)
-  document.documentElement.dataset.selectedGoals = 'on';
 if (engagementFeatures.operations)
   document.documentElement.dataset.operations = 'on';
 const engagement = new EngagementTracker();
@@ -55,7 +53,6 @@ const stationQa = params.has('stationqa');
 const reportQa = params.has('reportqa');
 const pingQa = params.has('pingqa');
 const deathRecapQa = params.has('deathrecapqa');
-const selectedGoalQa = params.has('goalqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -99,7 +96,7 @@ if (params.has('damageqa')) document.documentElement.dataset.damageqa = 'on';
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
-if (airstrikeQa || soldierQa || mapQa || stationQa || reportQa || pingQa || selectedGoalQa)
+if (airstrikeQa || soldierQa || mapQa || stationQa || reportQa || pingQa)
   $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
@@ -214,10 +211,7 @@ function setPlaying(v) {
     // Wait for a roster identity before counting that as a playable match.
     if (game.mode !== 'client' || game.myId) {
       const started = engagement.beginMatch(game.engagementContext(engagementSource));
-      if (started) {
-        game.beginFirstMinute();
-        game.beginSelectedGoal();
-      }
+      if (started) game.beginFirstMinute();
     }
   } else if (engagement.pauseMatch('menu')) engagementSource = 'resume';
   // Dropping in with the callsign box still focused (a click on a
@@ -613,24 +607,6 @@ for (const el of document.querySelectorAll('#endClassOpts .opt')) {
   });
 }
 
-// Optional match-scoped field goal. The preference chooses what the next
-// round tracks; progress itself never persists and grants no reward.
-if (engagementFeatures.selectedGoals) {
-  const opts = document.querySelectorAll('#startGoalOpts .opt');
-  let saved = 'sapper';
-  try { saved = localStorage.getItem('tos.goal') ?? saved; } catch { /* best effort */ }
-  game.setSelectedGoal(saved);
-  function renderStartGoal() {
-    for (const el of opts)
-      el.classList.toggle('picked', el.dataset.goal === game.selectedGoal.selection);
-  }
-  for (const el of opts) el.addEventListener('click', () => {
-    if (!game.setSelectedGoal(el.dataset.goal)) return;
-    try { localStorage.setItem('tos.goal', el.dataset.goal); } catch { /* best effort */ }
-    renderStartGoal();
-  });
-  renderStartGoal();
-}
 
 // Team preference — the player's own side, chosen before deploying.
 // Host/solo: applied directly to game.player.team, a live-recoloring
@@ -1502,15 +1478,6 @@ if (deathRecapQa) {
     game.damage(game.player, 120, attacker, attacker.body.pos,
       { cause: 'rifle', headshot: true });
   }
-}
-// Selected-goal composition hook: uses the real round-start and tracker HUD
-// path, with a bounded synthetic progress amount so pointer lock is not
-// required for repeatable browser screenshots.
-if (selectedGoalQa && game.selectedGoal) {
-  game.setSelectedGoal('sapper');
-  setPlaying(true);
-  game.selectedGoal.recordFieldwork('built', params.get('goalqa') === 'complete' ? 24 : 14,
-    params.get('goalqa') === 'complete' ? 24 : 14, game.time);
 }
 // Representative post-match composition without waiting through a full
 // automated round. Uses the real scoreboard rows, report rules, persistence,

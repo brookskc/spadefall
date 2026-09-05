@@ -71,8 +71,6 @@ import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
-import { SELECTED_GOALS, SelectedGoalTracker, fieldworkCredit,
-  validSelectedGoal } from '../src/selected-goals.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -1006,8 +1004,12 @@ function engagementFoundationTests() {
   ok('completed engagement features default on while experiments remain opt-in',
     DEFAULT_ENGAGEMENT_FEATURES.every(name => defaults[name] === true)
       && !defaults.operations && !defaults.botDirector && !defaults.publicChat
+      && !('selectedGoals' in defaults)
       && selected.firstMinute && selected.deathRecap && selected.operations && selected.publicChat
       && !('notAFeature' in selected));
+  ok('retired field-goal events are rejected at the protocol boundary',
+    !validServerMessage({ t: 'e', k: 'goal', metric: 'fieldwork', amount: 1,
+      kind: 'built', voxels: 1 }));
 
   const clean = sanitizeEngagementEvent('match_start', {
     mode: 'ctf', map: 2, network: 'host', source: 'quick', humans: 4, bots: 6,
@@ -1210,66 +1212,6 @@ function deathRecapTests() {
       && clamped.distance === 256 && clamped.health === 0);
   ok('invalid objects never produce display copy',
     deathRecapCopy({ cause: 'rifle', attacker: '<b>Injected</b>' }) === null);
-}
-
-function selectedGoalTests() {
-  group('phase four: player-selected match goals without reward pressure');
-  ok('the three choices cover combat, voxel fieldwork, and team impact',
-    validSelectedGoal('vanguard') && validSelectedGoal('sapper')
-      && validSelectedGoal('wingman') && !validSelectedGoal('daily_grind')
-      && new Set(Object.values(SELECTED_GOALS).map(goal => goal.metric)).size === 3);
-  ok('goal definitions contain no reward, currency, expiry, or streak fields',
-    Object.values(SELECTED_GOALS).every(goal =>
-      !['reward', 'xp', 'currency', 'expires', 'streak'].some(key => key in goal)));
-
-  const combat = new SelectedGoalTracker('vanguard');
-  ok('a match baseline prevents prior-round contribution from counting',
-    combat.start({ kills: 8, fieldwork: 20, teamplay: 4 }, 10)
-      && !combat.observe({ kills: 10, fieldwork: 200, teamplay: 40 }, 20)
-      && combat.progress === 2);
-  ok('authoritative totals cannot roll progress backward',
-    !combat.observe({ kills: 9, fieldwork: 0, teamplay: 0 }, 21)
-      && combat.progress === 2);
-  ok('completion fires once at the exact target',
-    combat.observe({ kills: 11 }, 22) && combat.completed
-      && !combat.observe({ kills: 20 }, 23));
-  ok('a completed HUD badge clears after five seconds but the result remains',
-    combat.view(27, { alive: true })?.complete
-      && combat.view(28, { alive: true }) === null
-      && combat.result().complete && combat.result().progress === 3);
-
-  combat.reset();
-  ok('round reset keeps the chosen style but clears all progress',
-    combat.selection === 'vanguard' && !combat.active && combat.progress === 0);
-  ok('selection can change before a round but not during one',
-    combat.select('sapper') && combat.start({}, 0) && !combat.select('wingman'));
-  for (let i = 0; i < 23; i++) combat.recordFieldwork('built', 1, 1, i);
-  ok('all fieldwork types advance one clear Sapper goal with a raw breakdown',
-    combat.progress === 23 && combat.recordFieldwork('collapsed', 17, 1, 24)
-      && combat.completed && combat.result().fieldwork.built === 23
-      && combat.result().fieldwork.collapsed === 17);
-  ok('large terrain events have honest raw totals but bounded goal credit',
-    fieldworkCredit('blasted', 40) === 6
-      && fieldworkCredit('blasted', 40, { airstrike: true }) === 8
-      && fieldworkCredit('collapsed', 40) === 8
-      && fieldworkCredit('built', 40) === 1);
-
-  const wingman = new SelectedGoalTracker('wingman');
-  wingman.start({ teamplay: 6 }, 0);
-  wingman.observe({ teamplay: 8.9 }, 2);
-  ok('team progress combines bounded authoritative credit without rounding up',
-    wingman.progress === 2 && wingman.record('teamplay', 1, 3) && wingman.completed);
-  ok('death and post-match states suppress the live card without losing the result',
-    wingman.view(3, { alive: false }) === null
-      && wingman.view(3, { over: true }) === null && wingman.result().complete);
-  const fieldworkEvent = { t: 'e', k: 'goal', metric: 'fieldwork', amount: 6,
-    kind: 'blasted', voxels: 31 };
-  ok('fieldwork signals require bounded credit, raw voxels, and a known action type',
-    validServerMessage(fieldworkEvent)
-      && !validServerMessage({ ...fieldworkEvent, metric: 'kills' })
-      && !validServerMessage({ ...fieldworkEvent, kind: 'painted' })
-      && !validServerMessage({ ...fieldworkEvent, amount: 1000 })
-      && !validServerMessage({ ...fieldworkEvent, voxels: 1_000_001 }));
 }
 
 function stayAsSquadTests() {
@@ -2281,7 +2223,6 @@ export async function run() {
   firstMinuteTests();
   voxelStoryTests();
   deathRecapTests();
-  selectedGoalTests();
   stayAsSquadTests();
   teamBalanceTests();
   botDirectorTests();

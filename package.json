@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node tests/run.mjs",
     "test:multiplayer": "node tests/multiplayer.browser.mjs",
-    "test:ci": "npm test && npm run test:multiplayer"
+    "test:ci": "npm test && npm run test:multiplayer",
+    "capture:results": "node tests/capture-results.mjs"
   },
   "devDependencies": {
     "playwright": "^1.62.1"

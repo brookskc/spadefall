@@ -6,7 +6,7 @@ import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
 import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
-import { BASE_FOV, GUN_CLASSES } from './player.js';
+import { BASE_FOV } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
 import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
@@ -579,22 +579,38 @@ const modePref = $('modePref'), operationPref = $('operationPref');
 {
   const opts = document.querySelectorAll('#startClassOpts .opt');
   function renderStartClass() {
-    for (const el of opts) el.classList.toggle('picked', Number(el.dataset.cls) === game.player.gunClass);
+    for (const el of opts) el.classList.toggle('picked', Number(el.dataset.cls) === game.player._pendingClass);
   }
   for (const el of opts) {
     el.addEventListener('click', () => {
       const idx = Number(el.dataset.cls);
-      if (!GUN_CLASSES.includes(idx)) return;
-      try { localStorage.setItem('tos.class', String(idx)); } catch { /* best effort */ }
-      game.player.gunClass = idx;
-      game.player._pendingClass = idx;
-      game.player.tool = idx;
-      game.player._syncViewmodel();
-      game.hud.refreshTool(game.player);
+      if (!game.player.selectClass(idx, { applyNow: true })) return;
       renderStartClass();
+      // If automatic rotation lost pointer lock, choosing the next class is
+      // also the fresh browser gesture needed to resume. No second DEPLOY
+      // click should be required.
+      if ($('menu').classList.contains('rotating')
+          && document.pointerLockElement !== renderer.domElement) deployAuto();
     });
   }
   renderStartClass();
+}
+
+// Results class choice: the click itself is also the user gesture that can
+// re-arm pointer lock after Escape. The result screen stays up until the
+// actual rotation callback hides it.
+for (const el of document.querySelectorAll('#endClassOpts .opt')) {
+  el.addEventListener('click', () => {
+    if (!game.player.selectClass(Number(el.dataset.cls))) return;
+    if (document.pointerLockElement !== renderer.domElement) {
+      initAudio();
+      let lock;
+      try { lock = renderer.domElement.requestPointerLock(); }
+      catch { status('mouse capture was blocked — click a class to retry'); return; }
+      Promise.resolve(lock).catch(() =>
+        status('mouse capture was blocked — click a class to retry'));
+    }
+  });
 }
 
 // Optional match-scoped field goal. The preference chooses what the next
@@ -1092,6 +1108,7 @@ function startRotationCountdown() {
   stopRotationCountdown();
   let left = ROTATION_DEPLOY_SECONDS;
   $('menu').classList.add('rotating');
+  $('playOptions').open = true;
   const tick = () => {
     if (playing) return stopRotationCountdown(); // already dropped in
     if (left <= 0) {
@@ -1111,6 +1128,12 @@ game.onRestart = mapName => {
   engagementSource = 'rotation';
   $('end').classList.add('hidden');
   $('pausedTitle').textContent = '— MATCH OVER —';
+  if (document.pointerLockElement === renderer.domElement) {
+    stopRotationCountdown();
+    setPlaying(true);
+    status(`new map — <b>${mapName}</b>`);
+    return;
+  }
   if (playing) setPlaying(false);
   status(`new map — <b>${mapName}</b> · pick a class`);
   startRotationCountdown();
@@ -1195,6 +1218,10 @@ document.addEventListener('pointerlockchange', () => {
   if (locked) {
     tabRelockPending = false;
     stopRotationCountdown(); // in the match — the window has served its purpose
+    // A results-screen class click may have supplied the gesture that restored
+    // pointer lock. Keep showing the report and wait for the authoritative
+    // restart before beginning the next engagement session.
+    if (game.over) return;
     if (!(matchmaking && !net)) setPlaying(true);
     return;
   }
@@ -1420,6 +1447,18 @@ function frame() {
     if (game.flags) for (const f of ['green', 'blue']) game.flags[f].clientUpdate(game.time);
     game.effects.update(dt);
   }
+  if (game.over) {
+    // Keep the map the players just altered behind its results. A fixed high
+    // three-quarter view reads as the actual battlefield, while the overlay
+    // remains stable enough to scan and click during the short intermission.
+    const angle = 0.55 + game.mapIndex * 0.83;
+    const cx = SX / 2, cz = SZ / 2;
+    const cy = game.world.surface(Math.floor(cx), Math.floor(cz));
+    camera.position.set(cx + Math.cos(angle) * 74, Math.max(50, cy + 34),
+      cz + Math.sin(angle) * 74);
+    camera.lookAt(cx, Math.max(14, cy + 5), cz);
+    game.player.vmRoot.visible = false;
+  }
   renderer.render(scene, camera);
 }
 // Browser composition hook for the real field-cache loop. Automated browsers
@@ -1479,7 +1518,9 @@ if (selectedGoalQa && game.selectedGoal) {
 if (reportQa) {
   game.gameMode = 'ctf';
   game.player.team = 'green';
-  game.captures = { green: 3, blue: 2 };
+  const reportWinner = params.get('reportqa') === 'defeat' ? 'blue' : 'green';
+  game.captures = reportWinner === 'green'
+    ? { green: 3, blue: 2 } : { green: 2, blue: 3 };
   game.matchElapsed = 503;
   const mine = game._kdKey(game.player);
   let i = 0;
@@ -1495,6 +1536,6 @@ if (reportQa) {
     game.voxelStory.recordCollapse(34);
     game.voxelStory.recordCollapseKill();
   }
-  game._end('green');
+  game._end(reportWinner);
 }
 frame();

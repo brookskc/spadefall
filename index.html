@@ -117,6 +117,8 @@
      precisely so the player can change class before the next round drops them
      in, so it comes back for exactly as long as that countdown runs. */
   #menu.paused.rotating #startClassPick { display:block; }
+  #menu.paused.rotating #playOptions { display:block; }
+  #menu.paused.rotating #playOptions > summary { display:none; }
   #menu.searching .only-searching { display:block; }
   #menu.searching .home-only, #menu.searching #playBtn { display:none; }
   #pausedTitle { margin-top:10px; font-size:15px; letter-spacing:6px; opacity:.6; }
@@ -183,109 +185,119 @@
      centers by its own visible width, so the block sits dead-center under
      the title instead of drifting right on invisible label padding. */
   .controls b { color:#ffd97a; font-weight:600; }
-  /* Match results use one centered content block. Auto margins absorb spare
-     vertical room, but collapse to zero when the report is taller than the
-     viewport so every row remains reachable by scrolling. */
-  #end { justify-content:flex-start; overflow-y:auto; padding:20px 18px;
-    background:rgba(8,12,20,.86); --outcome:#8fd98f; }
-  #end[data-outcome="defeat"] { --outcome:#e05a4e; }
-  #endContent { width:100%; margin-block:auto; padding:8px 0; display:flex;
-    flex-direction:column; align-items:center; flex:0 0 auto; }
-  #endTitle { position:relative; padding:8px 34px 10px; color:var(--outcome);
-    font:900 52px/.9 "Arial Black","Segoe UI",sans-serif; letter-spacing:4px;
-    text-shadow:4px 4px 0 rgba(0,0,0,.58); }
-  #endTitle::before,#endTitle::after { content:""; position:absolute; top:4px;
-    width:8px; height:8px; background:var(--outcome); opacity:.78; }
-  #endTitle::before { left:4px; box-shadow:8px 0 0 var(--outcome),
-    0 8px 0 var(--outcome),0 16px 0 var(--outcome); }
-  #endTitle::after { right:4px; box-shadow:-8px 0 0 var(--outcome),
-    0 8px 0 var(--outcome),0 16px 0 var(--outcome); }
-  #endDetail { margin-top:10px; font-size:16px; opacity:.75; }
-  #endReport { width:min(760px,94vw); margin-top:18px; }
-  #endStats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
-  .reportStat { padding:10px 12px; background:rgba(14,20,31,.92);
-    border:2px solid rgba(232,236,242,.22); box-shadow:3px 3px 0 rgba(0,0,0,.48);
-    text-align:left; }
-  .reportStat span { display:block; font-size:9px; letter-spacing:2px; opacity:.5; }
-  .reportStat b { display:block; margin-top:3px; font-size:22px; letter-spacing:1px; }
-  .reportStat small { display:block; margin-top:2px; font-size:9px; opacity:.48; }
-  #endMedals { display:flex; justify-content:center; gap:8px; margin-top:10px; min-height:40px; }
-  .medal { min-width:150px; padding:7px 12px; border:2px solid rgba(255,217,122,.38);
-    border-left-width:6px; background:rgba(30,28,22,.94);
-    box-shadow:3px 3px 0 rgba(0,0,0,.48); text-align:left; }
-  .medal b { display:block; color:#ffd97a; font-size:11px; letter-spacing:1.5px; }
-  .medal span { display:block; margin-top:2px; font-size:9px; opacity:.58; }
-  .noMedals { align-self:center; font-size:10px; letter-spacing:2px; opacity:.35; }
-  #endBests { margin-top:9px; min-height:14px; font-size:10px; letter-spacing:1.3px; opacity:.55; }
-  #endBests.new { color:#ffd97a; opacity:1; }
-  #endMastery { margin-top:7px; min-height:14px; color:#ffd97a;
-    font-size:10px; letter-spacing:1.5px; }
-  #endGoal { display:none; width:min(736px,90vw); margin-top:11px; box-sizing:border-box;
-    padding:8px 13px; border:2px solid rgba(255,255,255,.22); border-left-width:6px;
-    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
-    text-align:left; text-transform:uppercase; }
-  #endGoal.on { display:flex; align-items:center; justify-content:space-between; }
-  #endGoal.complete { border-color:rgba(255,217,122,.42); border-left-color:#ffd97a; }
-  #endGoalLabel { font-size:8px; letter-spacing:2.3px; opacity:.42; }
-  #endGoalName { margin-left:8px; font-size:11px; letter-spacing:1.7px; }
-  #endGoalResult { color:#e8ecf2; font-size:10px; letter-spacing:1.5px; opacity:.65; }
-  #endGoal.complete #endGoalResult { color:#ffd97a; opacity:1; }
-  #endFieldwork { display:none; width:min(736px,90vw); margin-top:7px; box-sizing:border-box;
-    padding:7px 13px; background:rgba(14,20,31,.9);
-    border:2px solid rgba(255,255,255,.18); box-shadow:4px 4px 0 rgba(0,0,0,.42);
-    text-align:left; text-transform:uppercase; }
-  #endFieldwork.on { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  #endFieldworkLabel { font-size:8px; letter-spacing:2.3px; opacity:.42; }
-  #endFieldworkDetail { font-size:9px; letter-spacing:1.1px; opacity:.7; }
-  #endOperation { display:none; width:min(736px,90vw); margin-top:11px; box-sizing:border-box;
-    padding:10px 13px; border:2px solid rgba(143,174,224,.42); border-left:6px solid #8faee0;
-    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
-    text-align:left; text-transform:uppercase; }
-  #endOperation.on { display:block; }
-  #endOperationLabel { display:block; color:#8faee0; font-size:8px; letter-spacing:2.5px; }
-  #endOperationTitle { display:block; margin-top:4px; font-size:14px; letter-spacing:2px; }
-  #endOperationDetail { display:block; margin-top:3px; font-size:9px; letter-spacing:1.2px; opacity:.62; }
-  #operationLeaveBtn { display:none; margin-top:9px; padding:7px 14px; color:#e8ecf2;
-    background:#141b28; border:2px solid rgba(255,255,255,.28); box-shadow:3px 3px 0 #05070b;
-    font-family:inherit; font-size:10px; letter-spacing:1.5px; cursor:pointer; }
+  /* The result screen leaves the finished battlefield visible. Its few hard
+     rules resemble the scoreboard players already use during a round rather
+     than turning each fact into a decorative card. */
+  #end { justify-content:center; overflow:hidden; padding:20px 28px;
+    background:rgba(4,7,9,.58); --outcome:#9bd6ad; }
+  #end[data-outcome="defeat"] { --outcome:#ee8174; }
+  #endContent { width:min(1120px,100%); height:min(800px,calc(100vh - 40px));
+    display:grid; grid-template-rows:auto minmax(0,1fr); gap:18px; text-align:left; }
+  #endHeader { display:grid; grid-template-columns:1fr auto 1fr; align-items:end;
+    padding-bottom:13px; border-bottom:2px solid rgba(232,236,242,.72); }
+  #endTitle { color:var(--outcome); font:900 46px/.85 "Arial Black","Segoe UI",sans-serif;
+    letter-spacing:1px; text-shadow:2px 2px 0 rgba(0,0,0,.72); }
+  #endScore { display:flex; align-items:flex-end; gap:16px; font-weight:800;
+    text-shadow:1px 1px 0 #05080a; }
+  #endScore .teamScore { min-width:72px; text-align:center; }
+  #endScore .teamScore b { display:block; font:900 35px/.9 "Arial Black","Segoe UI",sans-serif; }
+  #endScore .teamScore span { display:block; margin-top:4px; font-size:10px; }
+  #endScore .green { color:var(--green); }
+  #endScore .blue { color:var(--blue); }
+  #endScore .divider { padding-bottom:13px; font-size:19px; opacity:.72; }
+  #endDetail { justify-self:end; padding-bottom:4px; font-size:13px; font-weight:600;
+    text-align:right; text-shadow:1px 1px 0 #05080a; opacity:.85; }
+  #endBody { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 248px; gap:28px; }
+  #endSummary { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  #endReport { flex:0 0 auto; border-bottom:1px solid rgba(232,236,242,.42); }
+  #endStats { display:grid; grid-template-columns:repeat(4,1fr); }
+  .reportStat { min-width:0; padding:0 15px 10px; border-right:1px solid rgba(232,236,242,.26); }
+  .reportStat:first-child { padding-left:0; }
+  .reportStat:last-child { padding-right:0; border-right:0; }
+  .reportStat span { display:block; font-size:10px; font-weight:700; opacity:.68; }
+  .reportStat b { display:block; margin-top:2px; font-size:24px; color:#fff; }
+  .reportStat small { display:block; margin-top:1px; font-size:10px; opacity:.62; }
+  #endMedals { display:flex; flex-wrap:wrap; gap:6px 18px; min-height:20px;
+    padding:9px 0 6px; }
+  .medal { display:flex; align-items:baseline; gap:6px; white-space:nowrap; }
+  .medal::before { content:""; width:7px; height:7px; flex:0 0 auto; background:var(--outcome); }
+  .medal.objective::before { background:#82bed0; }
+  .medal.kills::before { background:#df786b; }
+  .medal.assists::before { background:#86aee1; }
+  .medal b { font-size:11px; }
+  .medal span { font-size:10px; opacity:.58; }
+  .noMedals { font-size:10px; opacity:.52; }
+  #endBests, #endMastery { display:inline; font-size:10px; line-height:1.6; opacity:.7; }
+  #endBests::after { content:"  /  "; opacity:.45; }
+  #endBests.new { color:var(--outcome); opacity:1; }
+  #endMastery { color:#d9e3e4; }
+  #endFacts { flex:0 0 auto; padding:7px 0 4px; }
+  #endGoal, #endFieldwork, #endOperation, #endStory { display:none; padding:3px 0;
+    font-size:11px; line-height:1.35; text-transform:uppercase; }
+  #endGoal.on, #endFieldwork.on { display:flex; justify-content:space-between; gap:16px; }
+  #endOperation.on, #endStory.on { display:block; }
+  #endGoalLabel, #endFieldworkLabel, #endOperationLabel, #endStoryLabel {
+    margin-right:8px; font-size:10px; font-weight:800; color:var(--outcome); }
+  #endGoalName, #endOperationTitle, #endStoryTitle { margin-right:7px; font-size:11px; }
+  #endGoalResult, #endFieldworkDetail, #endOperationDetail, #endStoryDetail { font-size:10px; opacity:.7; }
+  #operationLeaveBtn { display:none; margin:4px 0 0; padding:5px 0; color:#fff;
+    background:transparent; border:0; border-bottom:1px solid rgba(255,255,255,.5);
+    font:700 10px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
   #operationLeaveBtn.on { display:block; }
-  #operationLeaveBtn:hover { background:rgba(255,255,255,.1); }
-  #endStory { display:none; width:min(736px,90vw); margin-top:13px; box-sizing:border-box;
-    padding:9px 13px; border:2px solid rgba(255,217,122,.4); border-left:6px solid #ffd97a;
-    background:rgba(30,28,22,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48);
-    text-align:left; text-transform:uppercase; }
-  #endStory.on { display:block; }
-  #endStory.collapse-kill { border-left-color:#e05a4e; }
-  #endStoryLabel { display:block; font-size:8px; letter-spacing:2.5px; opacity:.42; }
-  #endStoryTitle { display:block; margin-top:3px; color:#ffd97a;
-    font-size:13px; letter-spacing:2px; }
-  #endStory.collapse-kill #endStoryTitle { color:#e05a4e; }
-  #endStoryDetail { display:block; margin-top:2px; font-size:9px; letter-spacing:1.2px; opacity:.62; }
-  #endBoardLabel { margin-top:14px; margin-bottom:6px; font-size:9px;
-    letter-spacing:2.5px; opacity:.38; }
-  #endBoard { display:flex; justify-content:center; max-height:31vh; overflow:auto; }
-  #endBoard table.kd { border:2px solid rgba(255,255,255,.22); border-radius:0;
-    background:rgba(14,20,31,.94); box-shadow:4px 4px 0 rgba(0,0,0,.48); }
-  #endNote { margin-top:16px; font-size:12px; letter-spacing:2px; opacity:.5; }
-  #rematchBtn { margin-top:13px; padding:8px 16px; color:#ffd97a;
-    background:#1e1c16; border:2px solid rgba(255,217,122,.58); box-shadow:3px 3px 0 #05070b;
-    font-family:inherit; font-size:11px; font-weight:700; letter-spacing:1.8px; cursor:pointer; }
-  #rematchBtn:hover { background:rgba(255,217,122,.14); }
-  #rematchBtn.voted, #rematchBtn:disabled { color:#e8ecf2; opacity:.55; cursor:default; }
-  #squadReady { display:none; margin-top:9px; align-items:center; gap:10px; }
-  #squadReady.on { display:flex; }
-  #squadBtn { padding:8px 16px; color:#8fd98f; background:#142019;
-    border:2px solid rgba(143,217,143,.55); box-shadow:3px 3px 0 #05070b;
-    font-family:inherit; font-size:11px;
-    font-weight:700; letter-spacing:1.8px; cursor:pointer; }
-  #squadBtn:hover { background:rgba(143,217,143,.14); }
-  #squadBtn.voted, #squadBtn:disabled { color:#e8ecf2; opacity:.62; cursor:default; }
-  #squadReady small { max-width:310px; text-align:left; font-size:9px;
-    line-height:1.35; letter-spacing:1px; opacity:.42; }
-  @media (max-width:650px) {
-    #endStats { grid-template-columns:repeat(2,1fr); }
-    #endTitle { padding-inline:30px; font-size:40px; }
-    #endMedals { flex-wrap:wrap; }
+  #endBoardLabel { margin-top:5px; padding:7px 0 5px; font-size:11px; font-weight:800; }
+  #endBoard { min-height:0; flex:1; overflow:auto; background:rgba(4,7,9,.42);
+    border-top:1px solid rgba(232,236,242,.56); border-bottom:1px solid rgba(232,236,242,.56); }
+  #endBoard table.kd { width:100%; min-width:500px; border:0; border-radius:0; background:transparent; }
+  #endBoard table.kd th { border-bottom:1px solid rgba(255,255,255,.24); }
+  #endBoard table.kd tr.me td { background:rgba(93,184,93,.22); }
+  #endIntermission { min-width:0; padding-left:18px; border-left:2px solid rgba(232,236,242,.64); }
+  #endClassPick { text-transform:uppercase; }
+  #endClassPick .lbl { font-size:12px; font-weight:800; }
+  #endClassPick .hint { display:block; margin-top:3px; font-size:10px; opacity:.62; }
+  #endClassOpts { display:flex; flex-direction:column; margin-top:10px; }
+  #endClassOpts .opt { position:relative; display:grid; grid-template-columns:76px 1fr;
+    align-items:center; min-height:72px; padding:7px 5px; color:#e8ecf2; text-align:left;
+    background:transparent; border:0; border-top:1px solid rgba(255,255,255,.3);
+    font:700 12px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
+  #endClassOpts .opt:last-child { border-bottom:1px solid rgba(255,255,255,.3); }
+  #endClassOpts .opt:hover { background:rgba(255,255,255,.08); }
+  #endClassOpts .opt.picked { color:var(--outcome); background:rgba(93,184,93,.17); }
+  #endClassOpts .opt.picked::after { content:"SELECTED"; position:absolute; right:5px; bottom:4px;
+    font-size:8px; color:var(--outcome); }
+  .classGun { width:66px; height:38px; color:currentColor; }
+  .classGun rect { fill:currentColor; shape-rendering:crispEdges; }
+  #rematchBtn, #squadBtn { width:100%; margin-top:12px; padding:8px 5px; color:#fff;
+    background:rgba(4,7,9,.28); border:1px solid rgba(255,255,255,.56);
+    font:700 11px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
+  #rematchBtn:hover, #squadBtn:hover { background:rgba(255,255,255,.1); }
+  #rematchBtn.voted, #rematchBtn:disabled, #squadBtn.voted, #squadBtn:disabled { opacity:.55; }
+  #squadReady { display:none; }
+  #squadReady.on { display:block; }
+  #squadReady small { display:block; margin-top:5px; font-size:10px; line-height:1.3; opacity:.6; }
+  #endNote { margin-top:14px; padding-top:10px; border-top:1px solid rgba(255,255,255,.3);
+    font-size:12px; font-weight:700; line-height:1.4; }
+  @media (max-width:760px) {
+    #end { justify-content:flex-start; overflow-y:auto; padding:14px 12px; }
+    #endContent { height:auto; min-height:calc(100vh - 28px); gap:12px; }
+    #endHeader { grid-template-columns:1fr auto; }
+    #endTitle { font-size:36px; }
+    #endScore { gap:8px; }
+    #endScore .teamScore { min-width:52px; }
+    #endScore .teamScore b { font-size:27px; }
+    #endDetail { grid-column:1/-1; justify-self:start; margin-top:7px; padding:0; text-align:left; }
+    #endBody { display:flex; flex-direction:column; gap:12px; }
+    #endIntermission { order:-1; padding:0 0 10px; border:0; border-bottom:2px solid rgba(255,255,255,.55); }
+    #endClassPick .hint { display:inline; margin-left:6px; }
+    #endClassOpts { flex-direction:row; }
+    #endClassOpts .opt { flex:1; display:block; min-height:55px; padding:5px; text-align:center;
+      border-bottom:1px solid rgba(255,255,255,.3); }
+    .classGun { display:block; width:54px; height:28px; margin:auto; }
+    #rematchBtn, #squadBtn { width:auto; margin-right:6px; }
+    #endNote { display:inline-block; margin-left:8px; border:0; }
+    #endStats { grid-template-columns:repeat(2,1fr); row-gap:8px; }
+    .reportStat:nth-child(2) { border-right:0; }
+    .reportStat:nth-child(3) { padding-left:0; }
+    #endBoard { max-height:300px; }
   }
 
   /* ---------- scoreboard (TAB overlay + end-of-round summary) ---------- */
@@ -688,7 +700,10 @@
     color:#ffd97a; user-select:none; }
   #chatin { flex:1; background:transparent; border:0; outline:0; color:#fff;
     font:inherit; text-shadow:0 1px 2px rgba(0,0,0,.6); }
-  #chatkey { position:absolute; left:22px; bottom:80px; font-size:11px;
+  /* Keep the idle chat/scoreboard hint tied to the same clearance rail as
+     the chat log. When the AIR meter expands the vitals panel, both pieces
+     move together instead of leaving this line inside the larger box. */
+  #chatkey { position:absolute; left:22px; bottom:calc(var(--chat-bottom) - 22px); font-size:11px;
     opacity:.45; letter-spacing:1px; }
   #chat.open ~ #chatkey, #chat.haslog ~ #chatkey { opacity:0; }
 </style>
@@ -927,44 +942,82 @@
 
   <div class="screen hidden" id="end" data-outcome="victory">
     <div id="endContent">
-      <div id="endTitle">VICTORY</div>
-      <div id="endDetail"></div>
-      <div id="endReport">
-        <div id="endStats"></div>
-        <div id="endMedals"></div>
-        <div id="endBests"></div>
-        <div id="endMastery"></div>
+      <header id="endHeader">
+        <div id="endTitle">VICTORY</div>
+        <div id="endScore" aria-label="Final score">
+          <div class="teamScore green"><b id="endGreenScore">0</b><span>GREEN</span></div>
+          <span class="divider">—</span>
+          <div class="teamScore blue"><b id="endBlueScore">0</b><span>BLUE</span></div>
+        </div>
+        <div id="endDetail"></div>
+      </header>
+      <div id="endBody">
+        <section id="endSummary">
+          <div id="endReport">
+            <div id="endStats"></div>
+            <div id="endMedals"></div>
+            <div><span id="endBests"></span><span id="endMastery"></span></div>
+          </div>
+          <div id="endFacts">
+            <div id="endGoal">
+              <span><span id="endGoalLabel">FIELD GOAL</span><b id="endGoalName"></b></span>
+              <span id="endGoalResult"></span>
+            </div>
+            <div id="endFieldwork">
+              <span id="endFieldworkLabel">FIELDWORK</span>
+              <span id="endFieldworkDetail"></span>
+            </div>
+            <div id="endOperation">
+              <span id="endOperationLabel"></span>
+              <b id="endOperationTitle"></b>
+              <small id="endOperationDetail"></small>
+            </div>
+            <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
+            <div id="endStory">
+              <span id="endStoryLabel">TERRAIN</span>
+              <b id="endStoryTitle"></b>
+              <small id="endStoryDetail"></small>
+            </div>
+          </div>
+          <div id="endBoardLabel">SCOREBOARD</div>
+          <div id="endBoard"></div>
+        </section>
+        <aside id="endIntermission">
+          <div id="endClassPick">
+            <div class="lbl">NEXT CLASS <span class="hint">1 / 2 / 3 TO CHOOSE</span></div>
+            <div id="endClassOpts">
+              <button class="opt" type="button" data-cls="0">
+                <svg class="classGun" viewBox="0 0 66 38" aria-hidden="true">
+                  <rect x="9" y="15" width="29" height="9"/><rect x="38" y="17" width="22" height="4"/>
+                  <rect x="4" y="17" width="8" height="6"/><rect x="23" y="24" width="8" height="9"/>
+                </svg><span>1&nbsp; RIFLE</span>
+              </button>
+              <button class="opt" type="button" data-cls="1">
+                <svg class="classGun" viewBox="0 0 66 38" aria-hidden="true">
+                  <rect x="15" y="14" width="27" height="11"/><rect x="42" y="17" width="15" height="5"/>
+                  <rect x="7" y="17" width="10" height="5"/><rect x="27" y="25" width="9" height="11"/>
+                </svg><span>2&nbsp; SMG</span>
+              </button>
+              <button class="opt" type="button" data-cls="5">
+                <svg class="classGun" viewBox="0 0 66 38" aria-hidden="true">
+                  <rect x="7" y="17" width="31" height="7"/><rect x="38" y="18" width="26" height="3"/>
+                  <rect x="19" y="11" width="20" height="5"/><rect x="5" y="19" width="6" height="5"/>
+                  <rect x="27" y="24" width="7" height="8"/>
+                </svg><span>3&nbsp; SNIPER</span>
+              </button>
+            </div>
+          </div>
+          <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
+          <div id="squadReady">
+            <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
+            <small>Your teammates already carry into the next round.</small>
+          </div>
+          <div id="endNote">rotating to the next map…</div>
+        </aside>
       </div>
-      <div id="endGoal">
-        <span><span id="endGoalLabel">PERSONAL FIELD GOAL</span><b id="endGoalName"></b></span>
-        <span id="endGoalResult"></span>
-      </div>
-      <div id="endFieldwork">
-        <span id="endFieldworkLabel">YOUR FIELDWORK</span>
-        <span id="endFieldworkDetail"></span>
-      </div>
-      <div id="endOperation">
-        <span id="endOperationLabel"></span>
-        <b id="endOperationTitle"></b>
-        <small id="endOperationDetail"></small>
-      </div>
-      <button id="operationLeaveBtn" type="button">LEAVE OPERATION</button>
-      <div id="endStory">
-        <span id="endStoryLabel">BATTLEFIELD STORY</span>
-        <b id="endStoryTitle"></b>
-        <small id="endStoryDetail"></small>
-      </div>
-      <div id="endBoardLabel">MATCH SCOREBOARD</div>
-      <div id="endBoard"></div>
-      <button id="rematchBtn" type="button">VOTE REMATCH · 0/1</button>
-      <div id="squadReady">
-        <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
-        <small>Your current teammates already carry into the next round. Signal that you’re staying.</small>
-      </div>
-      <div id="endNote">rotating to the next map…</div>
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=27"></script>
+  <script type="module" src="./src/main.js?v=29"></script>
 </body>
 </html>

@@ -68,6 +68,38 @@ try {
   assert.ok(identity.id);
   assert.ok(identity.roster >= 2, 'guest received the authoritative roster');
 
+  const intermissionClass = await guest.evaluate(() => {
+    const game = window.__game;
+    const current = game.player.gunClass;
+    game.over = true;
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Digit3', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { code: 'Digit3', bubbles: true }));
+    const result = {
+      current,
+      equipped: game.player.gunClass,
+      pending: game.player._pendingClass,
+      endPicked: document.querySelector('#endClassOpts [data-cls="5"]')?.classList.contains('picked'),
+      homePicked: document.querySelector('#startClassOpts [data-cls="5"]')?.classList.contains('picked'),
+    };
+    game.over = false;
+    return result;
+  });
+  assert.equal(intermissionClass.pending, 5,
+    '1/2/3 changes the pending class during results');
+  assert.equal(intermissionClass.equipped, intermissionClass.current,
+    'a results choice does not rewrite the completed-round weapon');
+  assert.equal(intermissionClass.endPicked, true,
+    'the results class control highlights the pending class');
+  assert.equal(intermissionClass.homePicked, true,
+    'all class controls stay visually synchronized');
+  await host.waitForFunction(() => [...window.__game.remote.values()][0]?._pendingClass === 5,
+    null, { timeout: 5_000 });
+  await guest.evaluate(previous => {
+    window.__game.player.selectClass(previous);
+  }, intermissionClass.current);
+  await host.waitForFunction(previous => [...window.__game.remote.values()][0]?._pendingClass === previous,
+    intermissionClass.current, { timeout: 5_000 });
+
   const hostPosition = await host.evaluate(() => {
     const p = [...window.__game.remote.values()][0].body.pos;
     return { x: p.x, y: p.y, z: p.z };
@@ -124,14 +156,18 @@ try {
     hud.classList.add('air-visible');
     air.classList.add('on');
     const chatRect = chat.getBoundingClientRect();
+    const chatKeyRect = document.getElementById('chatkey').getBoundingClientRect();
     const vitalsRect = document.getElementById('vitals').getBoundingClientRect();
     line.remove();
     air.classList.remove('on');
     hud.classList.remove('air-visible');
-    return { chatBottom: chatRect.bottom, vitalsTop: vitalsRect.top };
+    return { chatBottom: chatRect.bottom, chatKeyBottom: chatKeyRect.bottom,
+      vitalsTop: vitalsRect.top };
   });
   assert.ok(underwaterHud.vitalsTop - underwaterHud.chatBottom >= 8,
     'the breathing meter keeps clear of chat text above it');
+  assert.ok(underwaterHud.vitalsTop - underwaterHud.chatKeyBottom >= 8,
+    'the breathing meter keeps clear of the chat and scoreboard hint');
 
   const damageArrowStyle = await host.evaluate(() => {
     const style = getComputedStyle(document.querySelector('#dmgDir .chevron'));

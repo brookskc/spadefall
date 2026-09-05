@@ -620,7 +620,15 @@ const hud = {
     if (!el) return;
     el.className = story ? `on ${story.kind}` : '';
     if (!story) return;
-    $('endStoryTitle').textContent = story.title;
+    const labels = {
+      'collapse-kill': 'COLLAPSE KILL', collapse: 'COLLAPSE', airstrike: 'AIRSTRIKE',
+      rewritten: 'BUILD + BREACH', blast: 'BLAST DAMAGE', built: 'BUILDING',
+      dug: 'DIGGING', changed: 'TERRAIN CHANGED',
+    };
+    // The result screen reports the event like a field log. The old dramatic
+    // headline repeated a generic achievement-card voice that did not belong
+    // to the rest of the game; the measured detail remains unchanged.
+    $('endStoryTitle').textContent = labels[story.kind] ?? 'TERRAIN CHANGED';
     $('endStoryDetail').textContent = story.detail;
   },
   statsShow(g) {
@@ -748,7 +756,7 @@ const hud = {
   // once on death (to show the persisted/previous choice) and again each
   // time the player changes it.
   classPick(idx) {
-    for (const el of document.querySelectorAll('#classPick .opt'))
+    for (const el of document.querySelectorAll('#classPick .opt, #endClassOpts .opt, #startClassOpts .opt'))
       el.classList.toggle('picked', Number(el.dataset.cls) === idx);
   },
   // Chat line. The text goes in as a TEXT NODE — never HTML — so a message
@@ -3496,7 +3504,6 @@ export class Game {
     const recordUpdate = stats.finishMatch(winner === this.player.team,
       this.gameMode, report.local);
     this.onStatsChanged?.();
-    document.exitPointerLock();
     hud.statsHide(); // the summary board replaces the overlay
     $('hud').classList.remove('on');
     const won = winner === this.player.team;
@@ -3508,10 +3515,11 @@ export class Game {
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
     $('end').dataset.outcome = won ? 'victory' : 'defeat';
     const next = MAPS[this._nextMap()].name;
-    const score = this.hill
-      ? `occupied the hill ${holdClock(this.captures.green)} — ${holdClock(this.captures.blue)}`
-      : `wins ${this.captures.green} — ${this.captures.blue}`;
-    $('endDetail').textContent = `${winner.toUpperCase()} ${score} · ${MAPS[this.mapIndex].name}`
+    $('endGreenScore').textContent = this.hill
+      ? holdClock(this.captures.green) : Math.floor(this.captures.green ?? 0);
+    $('endBlueScore').textContent = this.hill
+      ? holdClock(this.captures.blue) : Math.floor(this.captures.blue ?? 0);
+    $('endDetail').textContent = `${MAPS[this.mapIndex].name} · ${this.gameMode.toUpperCase()}`
       + ` · ${holdClock(this.matchElapsed)}`;
     hud.matchReport(this, report, recordUpdate);
     hud.selectedGoalResult(this.selectedGoal?.result());
@@ -3519,6 +3527,7 @@ export class Game {
     hud.operation(this);
     hud.operationReport(this);
     $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
+    hud.classPick(this.player._pendingClass);
     const operationDone = operationComplete(this.operation);
     const balanceNote = this.teamBalanceEnabled() && !this.operation
       ? ' · teams balance between rounds' : '';
@@ -3528,6 +3537,11 @@ export class Game {
         ? `next up: ${next} · waiting for host`
         : `next up: ${next} · ${POST_MATCH_TIME}s`) + balanceNote;
     $('end').classList.remove('hidden');
+    this.player.vmRoot.visible = false;
+    // Normal intermissions retain pointer lock for a seamless automatic next
+    // round. A completed operation has no timed continuation, so release the
+    // cursor for its new-operation and leave controls.
+    if (operationDone) document.exitPointerLock();
     this._publishRematchState();
     this._publishSquadState();
     if (!won) sfx.lose();
@@ -4833,7 +4847,11 @@ export class Game {
         this.player.carrier = !!carrier;
         if (GUN_CLASSES.includes(gunClass)) {
           this.player.gunClass = gunClass;
-          this.player._pendingClass = gunClass;
+          // While dead or between rounds, the local pending choice has already
+          // been sent to the host but is not represented by the current-class
+          // snapshot field until respawn. Do not erase that choice on every
+          // 15Hz state packet while waiting for the authoritative application.
+          if (this.player.alive && !this.over) this.player._pendingClass = gunClass;
         }
         const weaponAcked = !Number.isSafeInteger(d.ack)
           || d.ack >= this._lastWeaponActionSeq;

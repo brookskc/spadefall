@@ -151,6 +151,24 @@ export class Player {
   }
 
   // ---------------- input ----------------
+  // Choose the gun class for the next life/round. Keeping persistence,
+  // client signalling, and HUD highlighting here makes the lobby, death,
+  // and results pickers behave identically.
+  selectClass(idx, { applyNow = false } = {}) {
+    if (!GUN_CLASSES.includes(idx)) return false;
+    this._pendingClass = idx;
+    try { localStorage.setItem('tos.class', String(idx)); } catch { /* best effort */ }
+    if (this.game.mode === 'client') this.game.net?.send({ t: 'a', k: 'class', cls: idx });
+    if (applyNow) {
+      this.gunClass = idx;
+      this.tool = idx;
+      this._syncViewmodel();
+      this.game.hud.refreshTool(this);
+    }
+    this.game.hud.classPick(idx);
+    return true;
+  }
+
   _bind(dom) {
     addEventListener('keydown', e => {
       // Typing beats game keys — but only where typing makes sense: the
@@ -200,17 +218,14 @@ export class Player {
         this.game.hud.statsShow(this.game);
         return;
       }
-      if (!this.alive) {
+      if (this.game.over || !this.alive) {
         // Class select while waiting to respawn: 1/2/3 for rifle/smg/
         // sniper. Applied at the moment respawn() actually fires, not
         // immediately — changing your mind mid-wait just changes what
         // you're about to spawn with, not your current (dead) loadout.
         if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') {
           const idx = GUN_CLASSES[Number(e.code.slice(-1)) - 1];
-          this._pendingClass = idx;
-          try { localStorage.setItem('tos.class', String(idx)); } catch { /* best effort */ }
-          if (this.game.mode === 'client') this.game.net.send({ t: 'a', k: 'class', cls: idx });
-          this.game.hud.classPick(idx);
+          this.selectClass(idx);
         }
         return;
       }

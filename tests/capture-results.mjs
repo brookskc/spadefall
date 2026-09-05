@@ -48,6 +48,28 @@ try {
     });
     await page.waitForSelector('#end:not(.hidden)');
     await page.waitForTimeout(250);
+    const state = await page.evaluate(() => {
+      const box = id => document.querySelector(id)?.getBoundingClientRect();
+      return {
+        map: document.querySelector('#end')?.dataset.map,
+        groups: [...document.querySelectorAll('#endBoard .teamGroup')]
+          .map(row => row.textContent.trim()),
+        player: document.querySelector('#endBoard tr.me td:first-child')?.textContent.trim(),
+        impact: [...document.querySelectorAll('#endImpactMetrics b')]
+          .map(node => Number(node.textContent)),
+        pips: document.querySelectorAll('#endProgress i').length,
+        activePips: document.querySelectorAll('#endProgress i.on').length,
+        intermissionTop: box('#endIntermission')?.top,
+        boardTop: box('#endBoardLabel')?.top,
+        horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+      };
+    });
+    if (state.map !== 'island' || state.groups.join('|') !== 'GREEN FORCE|BLUE FORCE'
+        || state.player !== 'YOU' || state.impact.join(',') !== '0,52,18,34,1'
+        || state.pips !== 14 || state.activePips < 12 || state.horizontalOverflow)
+      throw new Error(`${shot.name}: invalid results composition ${JSON.stringify(state)}`);
+    if (shot.width <= 760 && !(state.intermissionTop < state.boardTop))
+      throw new Error(`${shot.name}: next deployment must precede the mobile scoreboard`);
     await page.screenshot({ path: join(output, shot.name) });
     await page.close();
   }

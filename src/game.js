@@ -567,15 +567,28 @@ const hud = {
   // Scoreboard table, sorted by total contribution. Shared by the TAB overlay and the
   // end-of-round summary. Names are composed here from map keys that were
   // cleanName'd (local) or sanitized on receipt (client), so plain text.
-  kdTable(g) {
+  kdTable(g, { groupTeams = false } = {}) {
     const rows = rankContributionRows(g.kd.entries());
     const me = g.player ? g._kdKey(g.player) : null;
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     let html = '<table class="kd"><tr><th></th><th>SCORE</th><th>K</th><th>D</th><th>A</th><th>OBJ</th></tr>';
-    for (const [key, r] of rows) {
+    const ordered = groupTeams ? ['green', 'blue'].flatMap(team => {
+      const teamRows = rows.filter(([, r]) => r.team === team);
+      return teamRows.length ? [['__group__' + team, { team, group: true }], ...teamRows] : teamRows;
+    }) : rows;
+    for (const [key, r] of ordered) {
+      if (r.group) {
+        html += `<tr class="teamGroup ${r.team}"><td colspan="6">${r.team.toUpperCase()} FORCE</td></tr>`;
+        continue;
+      }
       const c = teamCss(r.team);
-      html += `<tr${key === me ? ' class="me"' : ''}>`
-        + `<td style="color:${c}">${esc(r.name)}</td>`
+      const isMe = key === me;
+      const ownName = String(r.name ?? '').trim().toUpperCase();
+      const name = isMe && (!ownName || ownName === 'YOU')
+        ? '<span class="playerMarker">YOU</span>'
+        : `${isMe ? '<span class="playerMarker">YOU</span> ' : ''}${esc(r.name)}`;
+      html += `<tr${isMe ? ' class="me"' : ''}>`
+        + `<td style="color:${c}">${name}</td>`
         + `<td>${Math.floor(r.score ?? 0)}</td><td>${r.k}</td><td>${r.d}</td>`
         + `<td>${r.a ?? 0}</td><td>${Math.floor(r.objective ?? 0)}</td></tr>`;
     }
@@ -630,6 +643,32 @@ const hud = {
     // to the rest of the game; the measured detail remains unchanged.
     $('endStoryTitle').textContent = labels[story.kind] ?? 'TERRAIN CHANGED';
     $('endStoryDetail').textContent = story.detail;
+    const m = story.metrics ?? {};
+    const values = [['impactBuilt', m.built], ['impactRemoved', m.removed],
+      ['impactBlast', m.blastRemoved], ['impactCollapsed', m.collapsed],
+      ['impactCrush', m.collapseKills]];
+    const peak = Math.max(1, ...values.map(([, value]) => Math.floor(value ?? 0)));
+    for (const [id, value] of values) {
+      const node = $(id);
+      if (!node) continue;
+      const count = Math.floor(value ?? 0);
+      node.textContent = count;
+      node.parentElement?.style.setProperty('--fill', count
+        ? `${Math.max(8, Math.round(count / peak * 100))}%` : '0%');
+    }
+  },
+  rotationProgress(seconds, active = true) {
+    const rail = $('endProgress');
+    const label = $('endProgressLabel');
+    if (!rail || !label) return;
+    rail.style.display = active ? 'flex' : 'none';
+    label.style.display = active ? 'block' : 'none';
+    if (!active) return;
+    const remaining = Math.max(0, Math.min(POST_MATCH_TIME, Number(seconds) || 0));
+    const blocks = Math.ceil(remaining / POST_MATCH_TIME * rail.children.length);
+    for (let i = 0; i < rail.children.length; i++)
+      rail.children[i].classList.toggle('on', i < blocks);
+    label.textContent = `ROTATION IN ${Math.ceil(remaining)} SEC`;
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);
@@ -3514,6 +3553,7 @@ export class Game {
     });
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
     $('end').dataset.outcome = won ? 'victory' : 'defeat';
+    $('end').dataset.map = MAPS[this.mapIndex]?.key ?? 'island';
     const next = MAPS[this._nextMap()].name;
     $('endGreenScore').textContent = this.hill
       ? holdClock(this.captures.green) : Math.floor(this.captures.green ?? 0);
@@ -3526,7 +3566,7 @@ export class Game {
     hud.voxelStory(story);
     hud.operation(this);
     hud.operationReport(this);
-    $('endBoard').innerHTML = hud.kdTable(this); // round contribution summary
+    $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
     hud.classPick(this.player._pendingClass);
     const operationDone = operationComplete(this.operation);
     const balanceNote = this.teamBalanceEnabled() && !this.operation
@@ -3534,8 +3574,10 @@ export class Game {
     $('endNote').textContent = (operationDone
       ? 'operation complete · vote for a new operation or leave'
       : this.mode === 'client'
-        ? `next up: ${next} · waiting for host`
-        : `next up: ${next} · ${POST_MATCH_TIME}s`) + balanceNote;
+        ? `next map · ${next} · waiting for host`
+        : `next map · ${next}`) + balanceNote;
+    hud.rotationProgress(operationDone || this.mode === 'client' ? 0 : POST_MATCH_TIME,
+      !operationDone && this.mode !== 'client');
     $('end').classList.remove('hidden');
     this.player.vmRoot.visible = false;
     // Normal intermissions retain pointer lock for a seamless automatic next
@@ -5410,9 +5452,7 @@ export class Game {
       this._updateMatchClock(dt);
     } else if (this._rotateT != null) {
       this._rotateT -= dt;
-      const note = $('endNote');
-      if (note) note.textContent = `next up: ${MAPS[this._nextMap()].name} · `
-        + `${Math.max(1, Math.ceil(this._rotateT))}s`;
+      hud.rotationProgress(this._rotateT, true);
       if (this._rotateT <= 0) { this._rotateT = null; this._rotate(); }
     }
     this._scoreBroadcastT -= dt;

@@ -1,7 +1,8 @@
 // avatar.js — remote soldiers: model, nametag, snapshot interpolation.
 import * as THREE from 'three';
 import { makeSoldier, makeNametag, animateSoldier, animateDeath, resetDeath, disposeObject,
-  setCrouch, setSoldierTool, placeShadow, footDust } from './entities.js';
+  setCrouch, setSoldierTool, placeShadow, footDust,
+  triggerSoldierFire, triggerSoldierHit } from './entities.js';
 import { sfx } from './audio.js';
 import { teamHex } from './settings.js';
 
@@ -67,6 +68,13 @@ export class Avatar {
 
   setCrouch(on) { this.crouch = on; }
   setTool(tool) { setSoldierTool(this.parts, tool); }
+  setHealth(health) {
+    if (!Number.isFinite(health)) return;
+    if (this.alive && Number.isFinite(this.health) && health < this.health)
+      triggerSoldierHit(this.parts);
+    this.health = health;
+  }
+  fire() { if (this.alive) triggerSoldierFire(this.parts); }
   // Render just far enough in the past to bracket two snapshots: one
   // observed interval plus two jitter sigmas, clamped to sanity. A clean
   // 15Hz link lands near 80ms; the old fixed 130ms assumed the worst.

@@ -1010,6 +1010,7 @@ export class Bot {
   }
 
   respawn() {
+    if (Number.isInteger(this._humanLife)) this._humanLife++;
     const p = this.game.spawnPoint(this.team);
     this.body.pos.set(p.x, p.y, p.z);
     this.body.vel.set(0, 0, 0);

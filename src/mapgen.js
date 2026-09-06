@@ -126,6 +126,56 @@ export const BASE = {
   green: { x: 36,     z: SZ / 2, flag: null, plateau: 16 },
   blue:  { x: SX - 36, z: SZ / 2, flag: null, plateau: 16 },
 };
+
+// Signature mechanics are deliberately data-first: map generation and the
+// edit-protection path share the same small list of fallback/anchor cells.
+// Destructible-looking geometry is still written as ordinary palette voxels;
+// only these compact fallback foundations are protected.
+export const SIGNATURE_MECHANICS = Object.freeze({
+  greenbelt: Object.freeze({ id: 'greenbelt', mapIndex: 0,
+    fallbacks: Object.freeze(['north-flank', 'south-flank']) }),
+  pinefall: Object.freeze({ id: 'pinefall', mapIndex: 2,
+    fallbacks: Object.freeze(['ford', 'shoulder']) }),
+  crown: Object.freeze({ id: 'crown', mapIndex: 4,
+    fallbacks: Object.freeze(['east-causeway', 'west-causeway']) }),
+  caldera: Object.freeze({ id: 'caldera', mapIndex: 5,
+    fallbacks: Object.freeze(['east-saddle', 'west-saddle']) }),
+});
+
+export function signatureMechanic(mapIndex = 0) {
+  const index = ((mapIndex % MAPS.length) + MAPS.length) % MAPS.length;
+  return Object.values(SIGNATURE_MECHANICS).find(m => m.mapIndex === index) ?? null;
+}
+
+// Compact protected cylinders are consumed by Game's existing build/dig/
+// explosion guards. Pinefall's ford position follows its seeded ravine; all
+// other anchors sit on fixed symmetric map landmarks.
+export function signatureProtectedAreas(mapIndex = 0, seed = 1979) {
+  const cx = SX / 2, cz = SZ / 2;
+  if (mapIndex === 2) {
+    const fordZ = pinefallRavineCenter(seed, 128) + 8;
+    return [
+      { x: 128, y: SEA, z: fordZ, r: 5, below: 2, above: 4, kind: 'ford' },
+      { x: 121, y: SEA + 1, z: pinefallRavineCenter(seed, 128), r: 2,
+        below: 2, above: 3, kind: 'bridge-abutment' },
+      { x: 135, y: SEA + 1, z: pinefallRavineCenter(seed, 128), r: 2,
+        below: 2, above: 3, kind: 'bridge-abutment' },
+    ];
+  }
+  if (mapIndex === 4) return [
+    { x: cx - 32, y: SEA + 8, z: cz, r: 4, below: 4, above: 4, kind: 'fallback' },
+    { x: cx + 32, y: SEA + 8, z: cz, r: 4, below: 4, above: 4, kind: 'fallback' },
+    { x: cx, y: SEA + 8, z: cz - 40, r: 3, below: 3, above: 3, kind: 'abutment' },
+    { x: cx, y: SEA + 8, z: cz - 24, r: 3, below: 3, above: 3, kind: 'abutment' },
+    { x: cx, y: SEA + 8, z: cz + 24, r: 3, below: 3, above: 3, kind: 'abutment' },
+    { x: cx, y: SEA + 8, z: cz + 40, r: 3, below: 3, above: 3, kind: 'abutment' },
+  ];
+  if (mapIndex === 5) return [
+    { x: cx - 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
+    { x: cx + 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
+  ];
+  return [];
+}
 const BASE_H = SEA + 7; // plateau height above the sea
 
 const at = (x, z) => (z * SX + x);
@@ -283,6 +333,29 @@ function genIsland(world, seed) {
       put(world, x, y + 1, z, BLOCK.STONE);
       if ((x + z) % 5) put(world, x, y + 2, z, BLOCK.STONE);
     }
+
+  // Two staggered, cross-route belts make the first terrain decision legible:
+  // the long center sections stop a casual hop, while the thin cut points are
+  // quick spade/grenade breaches. The north/south gates are intentionally
+  // absent, preserving permanently open outer flanks on both sides.
+  const hedgerowBelt = (x0, thinZ) => {
+    for (let z = 72; z <= 184; z++) {
+      if (z < 88 || z > 168) continue; // open flank gates
+      const thin = Math.abs(z - thinZ) <= 5;
+      const depth = thin ? 1 : 4;
+      const wallH = thin ? 2 : 3;
+      for (let dx = 0; dx < depth; dx++) {
+        const x = x0 + dx, y = terrainY(height, x, z);
+        for (let wy = 1; wy <= wallH; wy++) {
+          const material = (dx === 0 && wy === 1 && (z + x0) % 3 === 0)
+            ? BLOCK.DIRT : BLOCK.STONE;
+          put(world, x, y + wy, z, material);
+        }
+      }
+    }
+  };
+  hedgerowBelt(103, SZ / 2 - 12);
+  hedgerowBelt(SX - 1 - 106, SZ / 2 + 12);
 
   const outcrop = (cx, cz, flip = 1) => {
     for (let dx = -5; dx <= 5; dx++)
@@ -580,6 +653,36 @@ function genForest(world, seed) {
     }
   }
 
+  // The ravine now offers three unmistakable choices. A low stone ford is
+  // permanent and protected; a higher dirt bridge has a real four-block gap
+  // between ordinary voxel abutments; a short shoulder lip is intentionally
+  // thin enough to cut with the spade. Nothing relies on falling-tree physics.
+  const bridgeZ = Math.round(pinefallRavineCenter(seed, 128));
+  const bridgeY = SEA + 1;
+  for (let x = 120; x <= 136; x++) {
+    if (x >= 126 && x <= 129) continue; // the visible 4-block breach
+    for (let dz = -2; dz <= 2; dz++) put(world, x, bridgeY, bridgeZ + dz,
+      (x + dz) % 3 ? BLOCK.DIRT : BLOCK.STONE);
+  }
+  for (const x of [121, 135]) for (let y = SEA + 1; y <= bridgeY; y++)
+    for (let dz = -1; dz <= 1; dz++) put(world, x, y, bridgeZ + dz, BLOCK.STONE);
+
+  const fordX = 128, fordZ = bridgeZ + 8;
+  // Clear the seeded canopy/shoulder from this low crossing first; otherwise
+  // a random tree can turn a water-level ford into a roofed obstacle.
+  for (let x = fordX - 6; x <= fordX + 6; x++)
+    for (let dz = -3; dz <= 3; dz++)
+      for (let y = SEA + 1; y < SY; y++) world.data[(y * SZ + fordZ + dz) * SX + x] = 0;
+  for (let x = fordX - 6; x <= fordX + 6; x++)
+    for (let dz = -3; dz <= 3; dz++) put(world, x, SEA, fordZ + dz, BLOCK.STONE);
+
+  for (let x = 136; x <= 146; x++) {
+    const bankZ = Math.round(pinefallRavineCenter(seed, x)) + PINEFALL_RAVINE_HALF_WIDTH - 2;
+    const y = terrainY(height, x, bankZ);
+    put(world, x, y + 1, bankZ, BLOCK.DIRT);
+    if (x % 3 !== 0) put(world, x, y + 2, bankZ, BLOCK.DIRT);
+  }
+
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
 }
@@ -752,12 +855,25 @@ function genCrown(world, seed) {
         const b = clamp01((3.5 - perp) / 1.5);           // 1 centerline → 0 edge
         h = h * (1 - b) + target * b;
       }
+      // North/south causeways have a short raised bridge span over the moat.
+      // Leave the span's footprint low here, then lay ordinary stone voxels
+      // after fillColumns so destroying them exposes a real, rebuildable gap.
+      const span = (Math.abs(z - (CZ - 32)) <= 4 || Math.abs(z - (CZ + 32)) <= 4)
+        && Math.abs(x - CX) <= 2;
+      if (span) h = Math.min(h, SEA - 1);
       height[at(x, z)] = Math.min(SY - 8, h);
     }
 
   flattenBases(height);
   applyShoreEnvelope(height, mapEnvelope(4), 16);
   fillColumns(world, height, (x, z, h) => h <= SEA + 1 ? BLOCK.SAND : BLOCK.GRASS);
+
+  // Two short, symmetric center spans are destructible and rebuildable;
+  // their abutments and the east/west causeway fallbacks stay permanent.
+  for (const spanZ of [CZ - 32, CZ + 32])
+    for (let z = spanZ - 4; z <= spanZ + 4; z++)
+      for (let x = CX - 2; x <= CX + 2; x++)
+        put(world, x, SEA + 8, z, BLOCK.STONE);
 
   // The ring fort: a broken stone circle on the crown, gates on the four
   // causeway mouths, stub towers on the diagonals.
@@ -841,6 +957,12 @@ function genCaldera(world, seed) {
         const b = clamp01((8 - Math.abs(z - CZ)) / 4);
         h = h * (1 - b) + Math.min(h, saddle) * b;
       }
+      // North/south fault gates are shallow cuts through the rim, not solid
+      // mountain walls. Their ordinary stone fins below are quick to breach;
+      // the east/west saddles above remain the permanent fallback routes.
+      const fault = (Math.abs(z - (CZ - 64)) <= 1 || Math.abs(z - (CZ + 64)) <= 1)
+        && Math.abs(x - CX) <= 24;
+      if (fault) h = Math.min(h, SEA + 10);
       // The knoll: a flat rocky rise at the very bottom — the hill.
       if (d < 7) h = SEA + 10;
       else if (d < 14) h = (SEA + 10) + (h - (SEA + 10)) * ss((d - 7) / 7);
@@ -852,6 +974,13 @@ function genCaldera(world, seed) {
   // Scorched ground: stone outcrops breaking through packed ash.
   fillColumns(world, height,
     (x, z) => noise(x * 0.11 + 3, z * 0.11 + 3) > 0.62 ? BLOCK.STONE : BLOCK.DIRT);
+
+  // Thin, symmetric basalt fault gates: one voxel deep across the approach,
+  // short enough for a spade/grenade opening, and outside the protected hill.
+  for (const gateZ of [CZ - 64, CZ + 64])
+    for (let x = CX - 24; x <= CX + 24; x++)
+      for (let y = SEA + 11; y <= SEA + 16; y++)
+        put(world, x, y, gateZ, BLOCK.STONE);
 
   // Basalt formations scattered across the bowl—single columns, paired
   // fins, and broken clusters rather than fourteen copies of one pillar.
@@ -916,7 +1045,7 @@ export function mapAtmosphere(mapIndex) {
   return { ...DEFAULT_ATMOSPHERE, ...a };
 }
 
-export function generateMap(world, seed = 1979, mapIndex = 0) {
+export function generateMap(world, seed = 1979, mapIndex = 0, { buildMeshes = true } = {}) {
   // Re-anchor the bases to this map's defaults before the generator runs.
   BASE.green.x = 36; BASE.green.z = SZ / 2; BASE.green.plateau = 16;
   BASE.blue.x = SX - 36; BASE.blue.z = SZ / 2; BASE.blue.plateau = 16;
@@ -928,7 +1057,7 @@ export function generateMap(world, seed = 1979, mapIndex = 0) {
   setVoxelLight(atmosphere.sun, atmosphere.sunTint);
   world.data.fill(0);
   MAPS[mapIndex % MAPS.length].gen(world, seed);
-  world.buildAll();
+  if (buildMeshes) world.buildAll();
   return mapIndex % MAPS.length;
 }
 

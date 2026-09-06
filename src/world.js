@@ -580,18 +580,21 @@ export class VoxelWorld {
   }
 
   // Remove a sphere of voxels (grenades). Returns removed positions for debris.
-  carve(cx, cy, cz, r) {
+  carve(cx, cy, cz, r, canRemove = null) {
     // Radius is wire-influenced in two places ('b' events, edit-log replay):
     // an unbounded r is a synchronous 100k-voxel stall. One clamp, here,
     // covers every caller. Nothing in the game carves deeper than ~4.
     r = Math.min(Math.max(r || 0, 0), 6);
     const removed = [];
     const R = Math.ceil(r);
-    for (let y = cy - R; y <= cy + R; y++)
-      for (let z = cz - R; z <= cz + R; z++)
-        for (let x = cx - R; x <= cx + R; x++) {
+    const x0 = Math.floor(cx) - R, x1 = Math.floor(cx) + R;
+    const y0 = Math.floor(cy) - R, y1 = Math.floor(cy) + R;
+    const z0 = Math.floor(cz) - R, z1 = Math.floor(cz) + R;
+    for (let y = y0; y <= y1; y++)
+      for (let z = z0; z <= z1; z++)
+        for (let x = x0; x <= x1; x++) {
           const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy, z + 0.5 - cz);
-          if (d > r || !this.get(x, y, z)) continue;
+          if (d > r || !this.get(x, y, z) || (canRemove && !canRemove(x, y, z))) continue;
           removed.push({ x, y, z, v: this.get(x, y, z) });
           this.data[idx(x, y, z)] = 0;
         }

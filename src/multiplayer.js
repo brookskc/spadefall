@@ -16,7 +16,10 @@ export const MOVEMENT = Object.freeze({
   horizontalSlack: 0.45,
   horizontalBurst: 1.35,
   maxRiseSpeed: 12,
-  riseBurst: 0.8,
+  // Body step-up is an instantaneous one-voxel y correction. The burst must
+  // cover that discrete move plus quantization slack; sustained climbing is
+  // still rate-limited by maxRiseSpeed and the token refill below.
+  riseBurst: 1.35,
   maxFallSpeed: 40,
   fallBurst: 2.5,
   verticalSlack: 0.35,
@@ -117,6 +120,7 @@ export function protectedBuildReason(x, y, z, areas = {}) {
   if (![x, y, z].every(Number.isFinite)) return 'invalid';
   if ((areas.flags ?? []).some(a => inCylinder(x, y, z, a))) return 'flag';
   if ((areas.spawns ?? []).some(a => inCylinder(x, y, z, a))) return 'spawn';
+  if ((areas.signature ?? []).some(a => inCylinder(x, y, z, a))) return 'signature';
   if (inCylinder(x, y, z, areas.hill)) return 'hill';
   return null;
 }

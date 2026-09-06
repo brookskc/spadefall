@@ -7,6 +7,7 @@ const GRAVITY = -30;
 export const STAND_HEIGHT = 1.75;
 export const CROUCH_HEIGHT = 1.31;
 export const EYE_INSET = 0.18;
+export const BODY_HALF_WIDTH = 0.32;
 
 // Shared by Game#_footDust (the local player and, on host/solo, every
 // bot/remote proxy via the entities() loop) and Avatar#update (a guest's
@@ -30,7 +31,7 @@ export class Body {
     this.world = world;
     this.pos = new THREE.Vector3(x, y, z); // feet center
     this.vel = new THREE.Vector3();
-    this.half = { x: 0.32, h: STAND_HEIGHT }; // half-width, full height
+    this.half = { x: BODY_HALF_WIDTH, h: STAND_HEIGHT }; // half-width, full height
     this.onGround = false;
     this.inWater = false;
     // One-frame landing event consumed by the authoritative Game. Preserve
@@ -662,7 +663,17 @@ export function setCrouch(parts, on) {
 }
 
 // Shared walk-cycle animation for player-less bodies.
-export function animateSoldier(parts, speed, t) {
+export function triggerSoldierHit(parts, side = 1, now = performance.now() / 1000) {
+  if (!parts) return;
+  parts.hitUntil = now + 0.16;
+  parts.hitSide = side < 0 ? -1 : 1;
+}
+
+export function triggerSoldierFire(parts, now = performance.now() / 1000) {
+  if (parts) parts.fireUntil = now + 0.09;
+}
+
+export function animateSoldier(parts, speed, t, visualNow = performance.now() / 1000) {
   const swing = Math.min(1, speed / 4) * 0.7;
   const s = Math.sin(t * 9) * swing;
   parts.legL.rotation.x = s;
@@ -676,6 +687,18 @@ export function animateSoldier(parts, speed, t) {
     parts.armL.rotation.x = -s * 0.8;
     parts.armR.rotation.x = s * 0.8;
   }
+  // Two very short pose changes do more readability work than another flash:
+  // the torso recoils away from a hit and the weapon/shoulders kick on fire.
+  // They animate existing groups, so soldier draw-call counts do not change.
+  const hit = Math.max(0, Math.min(1, ((parts.hitUntil ?? 0) - visualNow) / 0.16));
+  const fire = Math.max(0, Math.min(1, ((parts.fireUntil ?? 0) - visualNow) / 0.09));
+  parts.torso.rotation.z = (parts.hitSide ?? 1) * hit * 0.1;
+  parts.head.rotation.z = -(parts.hitSide ?? 1) * hit * 0.055;
+  parts.gun.rotation.x = -fire * 0.12;
+  if (parts.gun.visible) {
+    parts.armL.rotation.x -= fire * 0.1;
+    parts.armR.rotation.x -= fire * 0.16;
+  }
 }
 
 // Death tumble, t seconds since the killing blow: keel over backward around
@@ -683,6 +706,9 @@ export function animateSoldier(parts, speed, t) {
 export function animateDeath(parts, t) {
   if (parts.blob) parts.blob.visible = false; // shadows don't tumble
   const g = parts.group;
+  parts.torso.rotation.z = 0;
+  parts.head.rotation.z = 0;
+  parts.gun.rotation.x = 0;
   const fall = Math.min(1, t / 0.3);
   g.rotation.x = -Math.PI / 2 * fall * (2 - fall); // ease-out tip-over
   if (g.userData.deathY === undefined) g.userData.deathY = g.position.y;
@@ -694,6 +720,11 @@ export function animateDeath(parts, t) {
 export function resetDeath(parts) {
   parts.group.rotation.x = 0;
   parts.group.userData.deathY = undefined;
+  parts.hitUntil = 0;
+  parts.fireUntil = 0;
+  parts.torso.rotation.z = 0;
+  parts.head.rotation.z = 0;
+  parts.gun.rotation.x = 0;
   if (parts.blob) parts.blob.visible = true;
 }
 

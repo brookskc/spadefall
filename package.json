@@ -4,8 +4,11 @@
   "type": "module",
   "scripts": {
     "test": "node tests/run.mjs",
+    "test:fuzz": "node tests/map-fuzz.mjs",
+    "test:fuzz:soak": "node tests/map-fuzz.mjs --seeds=200",
     "test:multiplayer": "node tests/multiplayer.browser.mjs",
-    "test:ci": "npm test && npm run test:multiplayer",
+    "test:stress": "node tests/full-room.browser.mjs",
+    "test:ci": "npm test && npm run test:multiplayer && npm run test:stress",
     "capture:results": "node tests/capture-results.mjs"
   },
   "devDependencies": {

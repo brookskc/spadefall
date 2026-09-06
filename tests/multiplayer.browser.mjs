@@ -124,16 +124,19 @@ try {
   await host.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
   await guest.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
 
+  await guest.evaluate(() => { window.__game._sendT = 999; });
   const hostPosition = await host.evaluate(() => {
-    const p = [...window.__game.remote.values()][0].body.pos;
-    return { x: p.x, y: p.y, z: p.z };
+    const game = window.__game, p = [...game.remote.values()][0];
+    p._movementBudget = null;
+    p._lastPosT = game.time - 0.1;
+    const pos = p.body.pos;
+    return { x: pos.x, y: pos.y, z: pos.z };
   });
   const targetX = await guest.evaluate(position => {
     const game = window.__game, player = game.player;
-    game._sendT = 999;
     game.net.send({ t: 's', x: position.x + 0.1, y: position.y,
       z: position.z, yaw: player.yaw, tool: player.tool,
-      c: player.crouched ? 1 : 0, ts: performance.now() });
+      c: player.crouched ? 1 : 0, life: game._serverLife, ts: performance.now() });
     return position.x + 0.1;
   }, hostPosition);
   await host.waitForFunction(x => {
@@ -227,8 +230,50 @@ try {
   await host.waitForFunction(() => window.__game?.remote?.size === 1,
     null, { timeout: 8_000 });
 
+  const currentClass = await host.evaluate(() => {
+    const game = window.__game;
+    game._roundEndReleasedMouse = false;
+    const release = game.onRoundEnd;
+    game.onRoundEnd = () => { game._roundEndReleasedMouse = true; release?.(); };
+    game._end(game.player.team);
+    return game.player._pendingClass;
+  });
+  const nextClass = currentClass === 5 ? 0 : 5;
+  await host.locator(`#endClassOpts [data-cls="${nextClass}"]`).click();
+  const resultsMouse = await host.evaluate(expected => ({
+    released: window.__game._roundEndReleasedMouse,
+    visible: !document.getElementById('end').classList.contains('hidden'),
+    pending: window.__game.player._pendingClass,
+  }), nextClass);
+  assert.deepEqual(resultsMouse, { released: true, visible: true, pending: nextClass },
+    'round end releases capture and its class buttons accept mouse input');
+
+  const voxelRoute = await host.evaluate(() => {
+    const game = window.__game;
+    game.gameMode = 'koth';
+    game.rebuild(12345, 4);
+    const protectedBefore = game.world.get(96, 28, 128);
+    const protectedEdit = game.applyEdit(96, 28, 128, 0);
+    const spanBefore = game.world.get(128, 28, 96);
+    const revision = game.navRevision;
+    const cut = game.applyEdit(128, 28, 96, 0);
+    const opened = game.world.get(128, 28, 96) === 0;
+    const rebuilt = game.applyEdit(128, 28, 96, 4)
+      && game.world.get(128, 28, 96) === 4;
+    return { protectedBefore, protectedEdit,
+      protectedAfter: game.world.get(96, 28, 128),
+      spanBefore, cut, opened, rebuilt, routeInvalidated: game.navRevision > revision };
+  });
+  assert.equal(voxelRoute.protectedEdit, false,
+    'Crown fallback foundations reject destructive edits');
+  assert.equal(voxelRoute.protectedAfter, voxelRoute.protectedBefore,
+    'Crown fallback survives the attempted edit');
+  assert.ok(voxelRoute.spanBefore && voxelRoute.cut && voxelRoute.opened
+    && voxelRoute.rebuilt && voxelRoute.routeInvalidated,
+  'Crown span can be cut and rebuilt while invalidating bot route caches');
+
   assert.deepEqual(faults, [], faults.join('\n'));
-  console.log('multiplayer browsers: replication, live settings, chat policy, and vote-kick passed');
+  console.log('multiplayer browsers: replication, live settings, results input, chat policy, vote-kick, and voxel-route edits passed');
 } catch (error) {
   if (faults.length) error.message += `\n${faults.join('\n')}`;
   try {

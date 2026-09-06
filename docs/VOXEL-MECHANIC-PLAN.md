@@ -1,6 +1,7 @@
 # Signature voxel mechanics plan
 
-Status: design only. None of the map mechanics below are implemented by this document.
+Status: GREENBELT, PINEFALL, CROWN, and CALDERA are implemented and active by
+default. BEACHHEAD and DUNES remain planned follow-up mechanics.
 
 ## Goal
 
@@ -14,10 +15,10 @@ Every first match should make one fact unavoidable: terrain is a weapon. Each ma
 - Mark opportunities with silhouette and construction: cracked profiles, missing blocks, thin walls, exposed supports, rubble, and team pings. Do not add textures, glowing outlines, or a new interaction key.
 - Let ordinary spade, gunfire, grenades, airstrikes, and placed blocks do the work. A map-specific mechanic should be a consequence of the shared simulation, not a scripted button.
 - Give bots authored alternate route nodes plus invalidation when terrain changes. Bots should use a player-made opening within five seconds and stop routing into a destroyed crossing.
-- Credit the existing fieldwork system with plain-language verbs: `BREACH`, `BRIDGE`, `FORTIFY`, and `COLLAPSE`. The first-minute card should point at the opportunity once, then get out of the way.
+- Credit the existing fieldwork system with plain-language verbs: `DIG`, `BRIDGE`, `FORTIFY`, and `COLLAPSE`. The first-minute card should point at the opportunity once, then get out of the way.
 - Add deterministic generation tests, protected-route tests, bot-route tests, and a destruction/rebuild browser test before shipping any map.
 
-## GREENBELT — breach the belt
+## GREENBELT — breach the belt (implemented)
 
 Build two broad, staggered hedgerow-and-stone belts across the center approaches. Each belt has a visible thin section facing the normal route, a longer open gate on the flank, and enough height to stop a casual hop or clean shot.
 
@@ -25,7 +26,7 @@ The obvious play is to cut a doorway with the spade or grenade, then reuse the r
 
 Guardrails: never span the entire map edge to edge, keep both outer flanks open, keep belt fragments outside protected base zones, and limit vertical thickness so tunneling is useful without becoming a long mining chore.
 
-## BEACHHEAD — crack the fortified line
+## BEACHHEAD — crack the fortified line (planned)
 
 Turn the existing bluff pillboxes into one readable defensive line with three strongpoints and two thin connecting seawall sections. The beach team can take the exposed trench route, attack a pillbox door, or blast a short breach through a visibly damaged wall section. Defenders can spend blocks to close a hole, but cannot restore protected foundation blocks.
 
@@ -33,7 +34,7 @@ The signature moment is a grenade opening a team-sized route through the bluff w
 
 Guardrails: keep the covered trench permanently passable, protect one ramp on each north/south flank, prevent a single explosion from exposing either spawn directly, and ensure the defensive line is useful but not a blue-team shooting gallery.
 
-## PINEFALL — cross the ravine your way
+## PINEFALL — cross the ravine your way (implemented)
 
 Make the widened shallow ravine the central routing decision. Author one intact stone ford, one broken log crossing with a two-to-four-block gap, and one steep earth shoulder thin enough to tunnel through. The fastest crossing requires players to finish the broken bridge with placed blocks; the quiet route is a dug bank cut; the safe default is the longer ford.
 
@@ -41,7 +42,7 @@ Dense tree clusters should frame these crossings. Cutting trunks opens sightline
 
 Guardrails: the ford is protected and always walkable, water exits remain mantle-safe for humans and bots, bridge anchors are protected while the span is editable, and canopy collapse cannot bury a spawn or the ford.
 
-## DUNES — bring down the ruins
+## DUNES — bring down the ruins (planned)
 
 Expand the paired midfield ruins into two tall, skeletal arch courts beside the rotating hill approaches. Their exposed support columns are ordinary stone. Removing a support triggers the existing structural-collapse system, dropping a whole firing perch and opening a direct ground lane.
 
@@ -49,7 +50,7 @@ The before/after silhouette should be dramatic from across the map: a vertical r
 
 Guardrails: hill pads and dry washes remain permanent paths, collapse cells are capped and batched, no arch can fall into a spawn, and paired ruins stay mirrored for competitive fairness.
 
-## CROWN — cut and rebuild the causeways
+## CROWN — cut and rebuild the causeways (implemented)
 
 Make the four causeways the map’s signature. Two diagonal causeways remain permanent fallback routes. The north/south pair get short, destructible center spans with protected abutments. Attackers can cut a pursued route into the moat; either team can rebuild a narrow bridge with normal blocks.
 
@@ -57,7 +58,7 @@ The crown becomes a visible record of the match: intact bridges, blown gaps, eme
 
 Guardrails: at least two crossings always survive, water-to-block mantling is tested at every abutment, placed blocks cannot seal the objective core, bots re-evaluate crossings immediately, and airstrikes cannot remove protected bridge anchors.
 
-## CALDERA — breach the rim
+## CALDERA — breach the rim (implemented)
 
 Give the north and south rim sectors two thin basalt fault gates. The ordinary saddle routes remain open east and west, but blasting or digging through a fault creates a much faster entrance into the bowl. Basalt fins inside the bowl provide destructible cover and readable material continuity from rim to center.
 
@@ -67,12 +68,9 @@ Guardrails: saddles remain protected fallback routes, fault depth is short enoug
 
 ## Recommended build order
 
-1. Prototype GREENBELT’s belt and CROWN’s bridge span behind a `signatureVoxels` feature flag. Together they test both removal and construction.
-2. Add shared opportunity metadata, fixed HUD copy, fieldwork verbs, bot route invalidation, and local diagnostics.
-3. Validate first-use timing, route choice, remesh spikes, and whether teams can create a stalemate.
-4. Ship PINEFALL and BEACHHEAD after water exits, bridge anchors, and fortified-line balance pass two-browser playtests.
-5. Ship DUNES after worst-case collapse profiling.
-6. Ship CALDERA last; its vertical routes and sniper sightlines make it the highest balance risk.
+1. Validate first-use timing, route choice, remesh spikes, and whether teams can create a stalemate in GREENBELT, PINEFALL, CROWN, and CALDERA.
+2. Ship BEACHHEAD after the water exits, pillbox breaches, and fortified-line balance pass two-browser playtests.
+3. Ship DUNES after worst-case collapse profiling.
 
 ## Ship gates
 

@@ -31,6 +31,7 @@ export class RemotePlayer {
     this.ammo = TOOLS.map(t => t.mag ?? 0);
     this._reloadUntil = 0;
     this._lastActionSeq = 0;
+    this._life = 1;
     this.avatar = new Avatar(game.scene, team, name, team === game.player.team);
     this.avatar.push(p.x, p.y, p.z, this.yaw);
   }
@@ -49,6 +50,7 @@ export class RemotePlayer {
   }
 
   respawn(at = null, notify = true) {
+    this._life++;
     const p = at ?? this.game.spawnPoint(this.team, this._spawnPreference);
     this._spawnPreference = 'front';
     this.body.pos.set(p.x, p.y, p.z);
@@ -75,13 +77,15 @@ export class RemotePlayer {
     this._mkCount = 0; this._mkT = null;
     this._streak = 0;
     this._airMove = null;
+    this._movementBudget = null;
     this._lastDeathRecap = null;
     this._lastPosT = null;
     this.yaw = this.team === 'green' ? -Math.PI / 2 : Math.PI / 2;
     this.avatar.setAlive(true);
     this.avatar.push(p.x, p.y, p.z, this.yaw);
     if (notify) this.game.net.sendTo(this.id, { t: 'e', k: 'spawn',
-      x: p.x, y: p.y, z: p.z, yaw: this.team === 'green' ? 0 : Math.PI });
+      x: p.x, y: p.y, z: p.z, yaw: this.team === 'green' ? 0 : Math.PI,
+      life: this._life });
   }
 
   resetForRound() {

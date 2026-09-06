@@ -10,10 +10,11 @@ import { VoxelWorld, SX, SY, SZ, SEA, PALETTE, BLOCK } from '../src/world.js';
 import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
   clampToEnvelope, envelopeContains, mapEnvelope,
   PINEFALL_RAVINE_HALF_WIDTH, pinefallRavineCenter,
-  pinefallRavineHeight } from '../src/mapgen.js';
+  pinefallRavineHeight, signatureMechanic, signatureProtectedAreas } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, applySoldierGraphics, disposeObject, makeMq9Drone, makeSoldier,
-  setCrouch, setSoldierTool } from '../src/entities.js';
+  setCrouch, setSoldierTool, triggerSoldierFire,
+  triggerSoldierHit } from '../src/entities.js';
 import { Game, airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
@@ -33,16 +34,21 @@ import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
 import { modeScoreLimit } from '../src/match-modes.js';
 import { PresentationSchedule } from '../src/presentation.js';
-import { reloadPitch, sfx, spatialVerticality, voxelSurface } from '../src/audio.js';
+import { reloadPitch, sfx, spatialAudioMix, spatialVerticality,
+  voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   botSeparation, botsForSquadOrder, botTargetScore,
   botTelemetrySummary, chooseLocalRoute, hillPost, rememberedEnemyPosition,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
-  modeMatchSeconds, regulationDecision, respawnWaveDelay,
-  tacticalSpawnScore } from '../src/pacing.js';
+import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
+  ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
+  kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
+  kothMedianApproachDepth, kothWaveApproachDepth, modeMatchSeconds,
+  regulationDecision, respawnWaveDelay, tacticalSpawnScore, tdmAnchorAllowed,
+  tdmForwardProgress, tdmMedianForwardProgress, tdmTerritoryAllowed,
+  tdmWaveProgress } from '../src/pacing.js';
 import { assistCreditors, CONTRIBUTION, contributionRow, rankContributionRows } from '../src/scoring.js';
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
@@ -57,12 +63,16 @@ import { callsignHasProfanity, callsignIssue, normalizeCallsign,
 import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
 import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
-import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
+import { FirstMinuteGuide, firstMinuteObjective,
+  firstMinuteTerrainCue } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
 import { autoSprint, contactCue, ctfEscalation, intensityCue, nextBotDifficulty,
   normalizeSpecialties, topSpecialty, usefulVoxelAction } from '../src/combat-flow.js';
+import { MAX_REWIND_SECONDS, observeSnapshotRtt, recordPose,
+  rewindSecondsForRtt, samplePose } from '../src/lag-compensation.js';
+import { createResumeToken, reservationMatches, validResumeToken } from '../src/reconnect.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -92,7 +102,7 @@ function combatFlowTests() {
       && !ctfEscalation({ active: true, progressAt: 0 }, 90, true).active
       && ctfEscalation({}, 0).returnTime === 15);
   ok('voxel recognition rejects meaningless edits and classifies only useful work',
-    usefulVoxelAction({ type: 'dig', changedPassability: true }) === 'BREACH OPENED'
+    usefulVoxelAction({ type: 'dig', changedPassability: true }) === 'PATH CLEARED'
       && usefulVoxelAction({ type: 'build', bridgedGap: true }) === 'ROUTE BUILT'
       && usefulVoxelAction({ type: 'build' }) === null);
   const specialties = normalizeSpecialties({ smg: 12, terrain: -9, objective: 4e9 });
@@ -252,6 +262,67 @@ function mapgenTests() {
   ok('PINEFALL ravine still crosses midfield at its seeded ford',
     pinefallRavineCenter(4242, seededFord) === SZ / 2);
 
+  ok('signature metadata ships four active mechanics and two fallbacks each',
+    ['greenbelt', 'pinefall', 'crown', 'caldera'].every((key, i) => {
+      const mechanic = signatureMechanic([0, 2, 4, 5][i]);
+      return mechanic?.id === key && mechanic.fallbacks.length >= 2;
+    }) && signatureMechanic(1) === null);
+
+  const greenSignature = new VoxelWorld(scene());
+  generateMap(greenSignature, 12345, 0);
+  ok('GREENBELT has staggered thick belts, thin cut points, and open flanks',
+    greenSignature.get(103, 31, 128) === BLOCK.STONE
+      && greenSignature.get(103, 26, 116) === BLOCK.STONE
+      && greenSignature.get(103, 27, 116) === 0
+      && greenSignature.get(103, 32, 80) === 0);
+
+  const pineSignature = new VoxelWorld(scene());
+  generateMap(pineSignature, 12345, 2);
+  const pineBridgeZ = Math.round(pinefallRavineCenter(12345, 128));
+  ok('PINEFALL has a real bridge gap, protected ford, and clear headroom',
+    pineSignature.get(120, SEA + 1, pineBridgeZ) !== 0
+      && [126, 127, 128, 129].every(x => pineSignature.get(x, SEA + 1, pineBridgeZ) === 0)
+      && pineSignature.get(128, SEA, pineBridgeZ + 8) === BLOCK.STONE
+      && pineSignature.get(128, SEA + 1, pineBridgeZ + 8) === 0);
+
+  const crownSignature = new VoxelWorld(scene());
+  generateMap(crownSignature, 12345, 4);
+  ok('CROWN keeps east/west fallbacks and symmetric editable north/south spans',
+    crownSignature.get(128, SEA + 8, 96) === BLOCK.STONE
+      && crownSignature.get(128, SEA + 8, 160) === BLOCK.STONE
+      && crownSignature.surface(96, 128) >= SEA
+      && crownSignature.surface(160, 128) >= SEA);
+  const crownSpanX = 128, crownSpanZ = 96, crownSpanY = SEA + 8;
+  const spanBefore = crownSignature.get(crownSpanX, crownSpanY, crownSpanZ);
+  crownSignature.set(crownSpanX, crownSpanY, crownSpanZ, 0);
+  const spanBreached = crownSignature.get(crownSpanX, crownSpanY, crownSpanZ) === 0;
+  crownSignature.set(crownSpanX, crownSpanY, crownSpanZ, BLOCK.STONE);
+  ok('CROWN center span changes route occupancy and can be rebuilt',
+    spanBefore === BLOCK.STONE && spanBreached
+      && crownSignature.get(crownSpanX, crownSpanY, crownSpanZ) === BLOCK.STONE);
+
+  const calderaSignature = new VoxelWorld(scene());
+  generateMap(calderaSignature, 12345, 5);
+  ok('CALDERA has thin north/south gates and open east/west saddles',
+    calderaSignature.get(128, SEA + 16, 64) === BLOCK.STONE
+      && calderaSignature.get(128, SEA + 16, 63) === 0
+      && calderaSignature.get(128, SEA + 16, 192) === BLOCK.STONE
+      && calderaSignature.get(128, SEA + 16, 191) === 0
+      && calderaSignature.surface(64, 128) >= SEA
+      && calderaSignature.surface(192, 128) >= SEA);
+
+  const crownProtected = signatureProtectedAreas(4, 12345);
+  ok('signature fallback foundations are protected while spans remain editable',
+    protectedBuildReason(96, SEA + 8, 128, { signature: crownProtected }) === 'signature'
+      && protectedBuildReason(128, SEA + 8, 96, { signature: crownProtected }) === null);
+  const navProbe = {
+    navRevision: 0, blockHits: new Map(), mode: 'solo', voxelStory: null,
+    _protectedVoxelReason: () => null, _collapseFrom: () => {},
+    world: { get: () => BLOCK.STONE, set: () => true },
+  };
+  Game.prototype.applyEdit.call(navProbe, 128, SEA + 8, 96, 0);
+  ok('representative signature edits invalidate bot route caches', navProbe.navRevision === 1);
+
   const greenPlaced = PALETTE[BLOCK.GREEN].color, bluePlaced = PALETTE[BLOCK.BLUE].color;
   PALETTE[BLOCK.GREEN].color = 0x123456;
   PALETTE[BLOCK.BLUE].color = 0xabcdef;
@@ -407,6 +478,15 @@ function hostileInputTests() {
   const ms = Date.now() - t0;
   ok('carve() clamps an oversized radius', big.length < 5000, `${big.length} voxels`);
   note(`carve(r=40) was clamped and removed ${big.length} voxels in ${ms}ms`);
+
+  const guarded = new VoxelWorld(scene());
+  for (let x = 8; x <= 12; x++) guarded.data[(10 * SZ + 10) * SX + x] = BLOCK.STONE;
+  const guardedRemoved = guarded.carve(10.5, 10.5, 10.5, 3,
+    x => x !== 10);
+  ok('carve() preserves protected route foundations while removing neighboring voxels',
+    guarded.get(10, 10, 10) === BLOCK.STONE
+      && guardedRemoved.length > 0
+      && guardedRemoved.every(cell => cell.x !== 10));
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +506,17 @@ function audioPaletteTests() {
     Math.max(...['rifle', 'smg', 'sniper'].map(reloadPitch)) <= 330);
   ok('reload weight remains class-specific after the lower retune',
     reloadPitch('sniper') < reloadPitch('rifle') && reloadPitch('rifle') < reloadPitch('smg'));
+  const ear = { x: 0, y: 2, z: 0, rx: 1, rz: 0 };
+  const clearShot = spatialAudioMix('rifle', { x: 12, y: 2, z: 0 }, ear);
+  const blockedShot = spatialAudioMix('rifle', { x: 12, y: 2, z: 0 }, ear, true);
+  const blockedBlast = spatialAudioMix('explosion', { x: 12, y: 2, z: 0 }, ear, true);
+  ok('terrain occlusion softens positional sound without erasing combat information',
+    clearShot.pan > 0.8 && blockedShot.scale < clearShot.scale
+      && blockedShot.occlusionHz > 0 && blockedBlast.scale > blockedShot.scale);
+  ok('quiet movement cues have a deliberately shorter readable range',
+    spatialAudioMix('step', { x: 23, y: 2, z: 0 }, ear) !== null
+      && spatialAudioMix('step', { x: 25, y: 2, z: 0 }, ear) === null
+      && spatialAudioMix('rifle', { x: 25, y: 2, z: 0 }, ear) !== null);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +621,12 @@ function multiplayerRuleTests() {
   ok('movement credit refills from real elapsed time',
     validateMovementReport(budgetPos,
       { x: budgetPos.x + 0.9, y: 20, z: 10, yaw: 0 }, 0.1, undefined, moveBudget).ok);
+  const stepBudget = createMovementBudget();
+  ok('one voxel step-up fits the burst while a multi-block rise does not',
+    validateMovementReport(prev, { x: 10, y: 21, z: 10, yaw: 0 }, 0,
+      undefined, stepBudget).ok
+      && validateMovementReport({ x: 10, y: 21, z: 10 },
+        { x: 10, y: 23, z: 10, yaw: 0 }, 0, undefined, stepBudget).reason === 'vertical-rise');
   ok('zero-length action direction is rejected', normalizeDirection([0, 0, 0]) === null);
   const dir = normalizeDirection([3, 0, 4]);
   ok('action direction is normalized at the trust boundary',
@@ -576,7 +673,7 @@ function multiplayerRuleTests() {
       && validServerMessage({ t: 'e', k: 'hit', kill: true, head: 1 })
       && !validServerMessage({ t: 'e', k: 'hit', kill: true, head: 2 }));
   const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0, mode: 'ctf',
-    me: 2, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
+    me: 2, life: 1, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
     r: { p: [], b: [] } };
   ok('migration reset welcomes require a valid authoritative spawn',
     validServerMessage(migratedWelcome)
@@ -737,6 +834,64 @@ function pacingRuleTests() {
         enemies: [{ x: 96 + CTF_SPAWN.enemyClearance - 0.1, z: 128 }] })
       && !ctfFrontlineAllowed(ctfCandidate, { ownX: 36, enemyX: 220,
         activeFlags: [{ x: 96, z: 128 + CTF_SPAWN.activeFlagClearance - 0.1 }] }));
+  const ctfField = { ownX: 0, enemyX: 200 };
+  const ctfQuiet = { alive: true, carrier: false, _spawnedAt: 0, _combatAt: 0,
+    body: { pos: { x: 70, z: 0 } } };
+  const ctfSupport = { alive: true, _spawnedAt: 0, _combatAt: 0,
+    body: { pos: { x: 82, z: 3 } } };
+  ok('CTF anchors are symmetric, quiet, unseen, enemy-clear, and supported',
+    ctfAnchorAllowed(ctfQuiet, { ...ctfField, now: 10,
+      nearbyAllies: [ctfQuiet, ctfSupport] })
+      && ctfAnchorAllowed({ ...ctfQuiet,
+        body: { pos: { x: 130, z: 0 } } },
+        { ownX: 200, enemyX: 0, now: 10,
+          nearbyAllies: [{ ...ctfQuiet, body: { pos: { x: 130, z: 0 } } },
+            { ...ctfSupport, body: { pos: { x: 118, z: 3 } } }] })
+      && !ctfAnchorAllowed(ctfQuiet, { ...ctfField, now: 10 })
+      && !ctfAnchorAllowed({ ...ctfQuiet, _combatAt: 8 }, { ...ctfField, now: 10,
+        nearbyAllies: [ctfQuiet, ctfSupport] })
+      && !ctfAnchorAllowed(ctfQuiet, { ...ctfField, now: 10,
+        nearbyAllies: [ctfQuiet, ctfSupport], visibleEnemies: 1 })
+      && !ctfAnchorAllowed(ctfQuiet, { ...ctfField, now: 10,
+        nearbyAllies: [ctfQuiet, ctfSupport], enemies: [{ x: 82, z: 0 }] }));
+  ok('CTF waves use a median front and materially pull home for flag defense',
+    Math.abs(ctfMedianForwardProgress([{ x: 40, z: 0 }, { x: 60, z: 0 },
+      { x: 80, z: 0 }, { x: 190, z: 0 }], ctfField) - 0.3) < 1e-9
+      && ctfWaveProgress(0.3, { ...ctfField, behind: 12 })
+        - ctfWaveProgress(0.3, { ...ctfField, behind: 12, defending: true })
+        >= 20
+      && ctfWaveProgress(0.3, { ...ctfField, behind: 12 }) <= 90);
+  ok('TDM territorial constants and rules remain unchanged',
+    TDM_SPAWN.minProgress === 0.25 && TDM_SPAWN.maxProgress === 0.49
+      && TDM_SPAWN.midfieldBuffer === 4 && TDM_SPAWN.behindFrontMin === 10
+      && TDM_SPAWN.behindFrontMax === 20 && TDM_SPAWN.anchorGrace === 5
+      && TDM_SPAWN.anchorSupportRadius === 22 && TDM_SPAWN.anchorEnemyClearance === 20);
+  const kothHill = { x: 128, z: 128, r: 8 };
+  const greenHome = { x: 36, z: 128 }, blueHome = { x: 220, z: 128 };
+  ok('KOTH directional candidates stay home-side and clear of the active point',
+    kothCandidateDirectionalAllowed({ x: 100, z: 128 }, { home: greenHome, hill: kothHill })
+      && kothCandidateDirectionalAllowed({ x: 156, z: 128 }, { home: blueHome, hill: kothHill })
+      && !kothCandidateDirectionalAllowed({ x: 156, z: 128 }, { home: greenHome, hill: kothHill })
+      && !kothCandidateDirectionalAllowed({ x: 120, z: 128 }, { home: greenHome, hill: kothHill })
+      && !kothCandidateDirectionalAllowed({ x: 111, z: 128 }, {
+        home: greenHome, hill: { pos: kothHill, r: kothHill.r },
+      }));
+  const kothQuiet = { alive: true, _spawnedAt: 0, _combatAt: 0,
+    body: { pos: { x: 92, z: 128 } } };
+  const kothSupport = { alive: true, _spawnedAt: 0, _combatAt: 0,
+    body: { pos: { x: 104, z: 130 } } };
+  ok('KOTH anchors and approach depth reject far-side or unsupported bodies',
+    kothAnchorAllowed(kothQuiet, { home: greenHome, hill: kothHill, now: 10,
+      nearbyAllies: [kothQuiet, kothSupport] })
+      && !kothAnchorAllowed(kothQuiet, { home: greenHome, hill: kothHill, now: 10 })
+      && !kothAnchorAllowed({ ...kothQuiet, body: { pos: { x: 164, z: 128 } } },
+        { home: greenHome, hill: kothHill, now: 10,
+          nearbyAllies: [kothQuiet, kothSupport] })
+      && Math.abs(kothApproachDepth({ x: 92, z: 128 },
+        { home: greenHome, hill: kothHill }) - 36) < 1e-9
+      && kothMedianApproachDepth([kothQuiet, kothSupport],
+        { home: greenHome, hill: kothHill }) === 30
+      && kothWaveApproachDepth(30, { behind: 12 }) === 42);
   ok('CTF objective guidance prioritizes return, recovery, escort, and re-grab',
     ctfObjectiveKind({ carrier: true, ownState: 'carried' }) === 'return'
       && ctfObjectiveKind({ ownState: 'carried', enemyState: 'home' }) === 'recover'
@@ -749,6 +904,9 @@ function pacingRuleTests() {
   const anchor = { team: 'green', alive: true, carrier: false,
     _spawnedAt: 0, _combatAt: 0,
     body: { pos: new THREE.Vector3(90, 20, 128) } };
+  const anchorSupport = { team: 'green', alive: true, carrier: false,
+    _spawnedAt: 0, _combatAt: 0,
+    body: { pos: new THREE.Vector3(102, 20, 128) } };
   const fakeCtf = {
     _openingDeployment: false, time: 10,
     flags: {
@@ -757,7 +915,7 @@ function pacingRuleTests() {
       blue: { state: 'home', pos: new THREE.Vector3(220, 20, 128),
         home: new THREE.Vector3(220, 20, 128) },
     },
-    entities: () => [anchor],
+    entities: () => [anchor, anchorSupport],
     enemyOf: Game.prototype.enemyOf,
     _spawnSurface: (x, z) => ({ x, y: 20, z }),
     losClear: () => true,
@@ -772,7 +930,7 @@ function pacingRuleTests() {
   fakeCtf.entities = () => [];
   ok('a full CTF team wipe falls back to authored base deployment',
     Game.prototype._ctfSpawnPoint.call(fakeCtf, 'green') === null);
-  fakeCtf.entities = () => [anchor];
+  fakeCtf.entities = () => [anchor, anchorSupport];
   fakeCtf._openingDeployment = true;
   ok('opening CTF deployments remain at the authored team bases',
     Game.prototype._ctfSpawnPoint.call(fakeCtf, 'green') === null);
@@ -791,6 +949,39 @@ function pacingRuleTests() {
 
   ok('a regulation CTF lead waits for a live flag play to resolve',
     regulationDecision('ctf', { green: 2, blue: 1 }, { flagsLive: true }).overtime);
+
+  const tdmField = { ownX: 0, enemyX: 200 };
+  ok('TDM territorial rules keep waves in the 25%-49% own-side band',
+    tdmTerritoryAllowed({ x: 50, z: 0 }, tdmField)
+      && tdmTerritoryAllowed({ x: 96, z: 0 }, tdmField)
+      && !tdmTerritoryAllowed({ x: 49, z: 0 }, tdmField)
+      && !tdmTerritoryAllowed({ x: 97, z: 0 }, tdmField)
+      && !tdmTerritoryAllowed({ x: 110, z: 0 }, tdmField)
+      && tdmForwardProgress({ x: 50, z: 0 }, tdmField) === 0.25);
+  ok('TDM wave projection uses a median front and clamps behind it',
+    Math.abs(tdmMedianForwardProgress([{ x: 40, z: 0 }, { x: 120, z: 0 },
+      { x: 190, z: 0 }], tdmField) - 0.6) < 1e-9
+      && tdmWaveProgress(0.6, { ...tdmField, behind: 12 }) === 96
+      && tdmWaveProgress(0.95, { ...tdmField, behind: 10 }) === 96
+      && tdmWaveProgress(0.05, { ...tdmField, behind: 10 }) === 50);
+  const ownSideFront = tdmMedianForwardProgress(
+    [{ x: 60, z: 0 }, { x: 70, z: 0 }, { x: 180, z: 0 }]
+      .filter(point => tdmForwardProgress(point, tdmField) < 0.5), tdmField);
+  ok('TDM median front can exclude an enemy-half flanker',
+    Math.abs(ownSideFront - 0.325) < 1e-9);
+  const quietAnchor = { x: 80, z: 0, _combatAt: 0 };
+  ok('TDM anchors require own-side safety, combat grace, and squad support',
+    tdmAnchorAllowed(quietAnchor, { ...tdmField, now: 10,
+      nearbyAllies: [{ x: 92, z: 4 }] })
+      && !tdmAnchorAllowed(quietAnchor, { ...tdmField, now: 10 })
+      && !tdmAnchorAllowed({ ...quietAnchor, _combatAt: 8 }, { ...tdmField,
+        now: 10, nearbyAllies: [{ x: 92, z: 4 }] })
+      && !tdmAnchorAllowed(quietAnchor, { ...tdmField, now: 10,
+        nearbyAllies: [{ x: 92, z: 4 }], visibleEnemies: 1 })
+      && !tdmAnchorAllowed(quietAnchor, { ...tdmField, now: 10,
+        nearbyAllies: [{ x: 92, z: 4 }], enemies: [{ x: 85, z: 0 }] })
+      && !tdmAnchorAllowed({ ...quietAnchor, x: 180 }, { ...tdmField,
+        now: 10, nearbyAllies: [{ x: 192, z: 4 }] }));
   ok('a settled CTF lead ends at regulation',
     regulationDecision('ctf', { green: 2, blue: 1 }).winner === 'green');
   ok('tied TDM enters sudden-death overtime',
@@ -945,6 +1136,8 @@ function socialProgressionTests() {
   ok('team marks pass the server trust boundary with bounded kinds',
     validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
       x: 20, y: 12, z: 30, kind: 'ATTACK' })
+      && !validServerMessage({ t: 'e', k: 'mark', id: 8, name: 'SQUAD', team: 'green',
+        x: 20, y: 12, z: 30, kind: 'BREACH' })
       && !validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
         x: 20, y: 12, z: 30, kind: 'ENEMY_THROUGH_WALL' }));
   ok('retired rematch packets are rejected on both sides of the wire',
@@ -1073,6 +1266,11 @@ function firstMinuteTests() {
     firstMinuteObjective('ctf').includes('FLAG')
       && firstMinuteObjective('tdm').includes('OUTSCORE')
       && firstMinuteObjective('koth').includes('HILL'));
+  ok('signature maps teach their authored voxel decision in one line',
+    firstMinuteTerrainCue(0).includes('MIDFIELD BELT')
+      && firstMinuteTerrainCue(2).includes('BROKEN BRIDGE')
+      && firstMinuteTerrainCue(4).includes('NORTH/SOUTH SPANS')
+      && firstMinuteTerrainCue(5).includes('BASALT GATE'));
 
   const guide = new FirstMinuteGuide();
   ok('orientation starts once per page and never restarts on another round',
@@ -1328,8 +1526,8 @@ function airstrikeDroneTests() {
   disposeObject(mq9.group);
 
   ok('strike requests require a finite captured yaw',
-    validClientMessage({ t: 'a', k: 'strike', n: 1, x: 100, z: 120, yaw: 0 })
-      && !validClientMessage({ t: 'a', k: 'strike', n: 2, x: 100, z: 120 }));
+    validClientMessage({ t: 'a', k: 'strike', n: 1, life: 1, x: 100, z: 120, yaw: 0 })
+      && !validClientMessage({ t: 'a', k: 'strike', n: 2, life: 1, x: 100, z: 120 }));
   ok('airstrike telegraph metadata passes the server trust boundary', validServerMessage({
     t: 'e', k: 'telegraph', id: 7, x: 100, y: 20, z: 120,
     yaw: 0, remaining: 3, owner: 2,
@@ -1396,6 +1594,15 @@ function soldierModelTests() {
   animateSoldier(p, 5, 0.7);
   ok('armed gait keeps both arms pitched toward the weapon',
     p.armL.rotation.x > 0.3 && p.armR.rotation.x > 0.3);
+  triggerSoldierHit(p, -1, 10);
+  triggerSoldierFire(p, 10);
+  animateSoldier(p, 0, 0, 10.05);
+  const reacting = p.torso.rotation.z < 0 && p.head.rotation.z > 0
+    && p.gun.rotation.x < 0;
+  animateSoldier(p, 0, 0, 10.3);
+  ok('hit and firing reactions are readable, brief, and reuse existing groups',
+    reacting && p.torso.rotation.z === 0 && p.head.rotation.z === 0
+      && p.gun.rotation.x === 0);
   setCrouch(p, true);
   ok('crouch aligns the head assembly with the gameplay eye height',
     p.head.position.y === CROUCH_HEIGHT - EYE_INSET);
@@ -1851,9 +2058,9 @@ function securityPhaseTests() {
     actionSequenceDisposition(5, 8).accept
       && actionSequenceDisposition(5, 8).reason === 'gap');
   ok('secured actions require a bounded sequence number at the protocol edge',
-    validClientMessage({ t: 'a', k: 'reload', n: 1 })
+    validClientMessage({ t: 'a', k: 'reload', n: 1, life: 1 })
       && !validClientMessage({ t: 'a', k: 'reload' })
-      && !validClientMessage({ t: 'a', k: 'shoot', n: 0, d: [1, 0, 0] }));
+      && !validClientMessage({ t: 'a', k: 'shoot', n: 0, life: 1, d: [1, 0, 0] }));
   ok('room handshakes require the current protocol generation',
     validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada' })
       && !validClientMessage({ t: 'hi', v: PROTOCOL_VERSION - 1, name: 'Ada' })
@@ -2038,6 +2245,38 @@ async function iceConfigTests() {
       .every(t => claimErrorKind(t) === 'down'));
 }
 
+function combatNetworkContinuityTests() {
+  group('latency compensation and reconnect continuity');
+  ok('rewind includes interpolation delay and remains hard-capped',
+    Math.abs(rewindSecondsForRtt(0.12) - 0.21) < 1e-9
+      && rewindSecondsForRtt(9) === MAX_REWIND_SECONDS);
+  const history = [];
+  recordPose(history, 1, { pos: { x: 0, y: 3, z: 4 }, half: { h: 1.7 } });
+  recordPose(history, 1.1, { pos: { x: 10, y: 5, z: 8 }, half: { h: 1.1 } });
+  const middle = samplePose(history, 1.05);
+  ok('historical hitboxes interpolate position and crouch height',
+    Math.abs(middle.x - 5) < 1e-9 && Math.abs(middle.y - 4) < 1e-9
+      && Math.abs(middle.h - 1.4) < 1e-9);
+  const sent = new Map([[7, 2], [8, 2.1]]);
+  const measured = observeSnapshotRtt(sent, 8, 2.22);
+  ok('RTT comes only from a sequence the host actually sent',
+    Math.abs(measured - 0.12) < 1e-9 && sent.size === 0
+      && observeSnapshotRtt(new Map([[9, 2]]), 99, 2.2, measured) === measured);
+  ok('state echoes are strict bounded protocol fields',
+    validClientMessage({ t: 's', x: 1, y: 2, z: 3, yaw: 0, tool: 0, c: 0, life: 1, echo: 3 })
+      && !validClientMessage({ t: 's', x: 1, y: 2, z: 3, yaw: 0, tool: 0, c: 0, life: 1, echo: 0 }));
+
+  const token = createResumeToken(crypto.webcrypto);
+  const reservation = { token, expiresAt: 1200 };
+  ok('reload tokens are unguessable-shaped and accepted only during their grace window',
+    validResumeToken(token) && reservationMatches(reservation, token, 1199)
+      && !reservationMatches(reservation, token, 1201)
+      && !reservationMatches(reservation, token + 'x', 1199));
+  ok('handshakes accept a valid resume token and reject loose shapes',
+    validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada', resume: token })
+      && !validClientMessage({ t: 'hi', v: PROTOCOL_VERSION, name: 'Ada', resume: 'short' }));
+}
+
 async function turnWorkerTests() {
   group('turn credential worker');
   ok('production, Pages previews, and local development origins are recognized',
@@ -2096,6 +2335,7 @@ export async function run() {
   collapseTests();
   wireTests();
   networkSyncTests();
+  combatNetworkContinuityTests();
   securityPhaseTests();
   releasePhaseTests();
   audioPaletteTests();

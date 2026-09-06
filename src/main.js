@@ -4,7 +4,7 @@ import { Game } from './game.js';
 import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume } from './audio.js';
 import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
-import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, slotCode } from './net.js';
+import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, resumeToken, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { BASE_FOV } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
@@ -67,6 +67,9 @@ scene.add(camera); // so the viewmodel renders
 const game = new Game(scene, camera, renderer.domElement, { engagement, engagementFeatures });
 window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
+game.onRoundEnd = () => {
+  if (document.pointerLockElement === renderer.domElement) document.exitPointerLock?.();
+};
 game.player.vmRoot.visible = false; // hidden until first deploy
 applyMasterVolume(getMasterVolume());
 setAudioMuted(getMuted());
@@ -807,7 +810,7 @@ $('joinBtn').addEventListener('click', async () => {
   status('connecting…');
   adoptJoin(n, code);
   n.handlers.onOpen = () => n.send({ t: 'hi', v: PROTOCOL_VERSION,
-    name: game.player.name, team: teamPref() });
+    name: game.player.name, team: teamPref(), resume: resumeToken() });
   if (document.pointerLockElement === renderer.domElement) setPlaying(true);
 });
 

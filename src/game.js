@@ -3,13 +3,14 @@
 import * as THREE from 'three';
 import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
 import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere,
-  envelopeContains, mapEnvelope } from './mapgen.js';
+  clampToEnvelope, envelopeContains, mapEnvelope, signatureProtectedAreas } from './mapgen.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { CROUCH_HEIGHT, STAND_HEIGHT, disposeObject, footDust,
-  applySoldierGraphics, makeMq9Drone, retintVoxelBoxes } from './entities.js';
+import { BODY_HALF_WIDTH, CROUCH_HEIGHT, STAND_HEIGHT, disposeObject, footDust,
+  applySoldierGraphics, makeMq9Drone, retintVoxelBoxes, setSoldierTool,
+  triggerSoldierFire, triggerSoldierHit } from './entities.js';
 import { Avatar } from './avatar.js';
 import { RemotePlayer } from './remote-player.js';
 import { stats } from './stats.js';
@@ -21,9 +22,13 @@ import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './prot
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
   resetEnvironmentalState, stepBreath } from './environment.js';
-import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
+import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
+  ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
+  kothAnchorAllowed, kothCandidateDirectionalAllowed, kothMedianApproachDepth,
+  kothWaveApproachDepth,
   modeMatchSeconds, regulationDecision, respawnWaveDelay, scoreLeader,
-  tacticalSpawnScore } from './pacing.js';
+  tacticalSpawnScore, tdmAnchorAllowed, tdmMedianForwardProgress,
+  tdmForwardProgress, tdmTerritoryAllowed, tdmWaveProgress } from './pacing.js';
 import { assistCreditors, CONTRIBUTION, contributionRow,
   rankContributionRows } from './scoring.js';
 import { HILL_MOVE_WARNING, nextHillIndex,
@@ -53,6 +58,9 @@ import { CAP_TIME, HILL_CYCLE, HOLD_LIMIT, KILL_LIMIT, MATCH_TIME_OVERRIDE,
 import { PresentationSchedule } from './presentation.js';
 import { contactCue, ctfEscalation, intensityCue,
   nextBotDifficulty, usefulVoxelAction } from './combat-flow.js';
+import { observeSnapshotRtt, recordPose, rewindSecondsForRtt,
+  samplePose } from './lag-compensation.js';
+import { RECONNECT_GRACE_MS, reservationMatches, validResumeToken } from './reconnect.js';
 
 export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
 
@@ -546,7 +554,7 @@ const hud = {
     if (!story) return;
     const labels = {
       'collapse-kill': 'COLLAPSE KILL', collapse: 'COLLAPSE', airstrike: 'AIRSTRIKE',
-      rewritten: 'BUILD + BREACH', blast: 'BLAST DAMAGE', built: 'BUILDING',
+      rewritten: 'BUILD + DIG', blast: 'BLAST DAMAGE', built: 'BUILDING',
       dug: 'DIGGING', changed: 'TERRAIN CHANGED',
     };
     // The result screen reports the event like a field log. The old dramatic
@@ -992,9 +1000,13 @@ export class Game {
     this._fullB = new Map(); // client: idx -> decoded bot row
     this._snapT = 0;
     this._lastSnapshotSeq = null;
+    this._snapshotEcho = null;
+    this._combatHistory = new Map();
+    this._reconnectReservations = new Map();
     this._resyncAt = { state: 0, world: 0 };
     this._sendT = 0;
     this._actionSeq = 0;                  // client combat replay protection
+    this._serverLife = 1;                 // rejects stale pre-respawn uplinks/actions
     this._lastWeaponActionSeq = 0;
     this._lastHealth = 100;
     this._respawnT = 0;                  // client: cosmetic redeploy countdown
@@ -1003,6 +1015,9 @@ export class Game {
     this._nextTeamPingId = 1;
     this.botOrders = { green: null, blue: null };
     this.navRevision = 0;                // invalidates bot route snapshots after edits
+    this._audioTarget = new THREE.Vector3();
+    this._audioDirection = new THREE.Vector3();
+    this._audioOccluded = pos => this._isSoundOccluded(pos);
     this._botTacticsT = 0;
     this._botBrainCursor = 0;
     this._botThinkSet = null;
@@ -1294,6 +1309,8 @@ export class Game {
     // marked as sent (host side — the next tick goes out full).
     this._fullP.clear();
     this._fullB.clear();
+    this._combatHistory.clear();
+    this._reconnectReservations.clear();
     // Rebuilt world, rebuilt cast: bot indices change, so the old roster is
     // stale. Rows whose metadata hasn't re-landed are skipped until it does.
     this._rosterP = null;
@@ -1316,6 +1333,7 @@ export class Game {
   _kdKey(e) {
     if (e === this.player) return 'p' + (this.mode === 'client' ? (this.myIdx ?? 0) : this._hostIdx);
     if (e.isRemote) return 'p' + e.ridx;
+    if (Number.isInteger(e._humanRidx)) return 'p' + e._humanRidx;
     return 'b' + e.id;
   }
   _kdRow(e) {
@@ -1405,6 +1423,18 @@ export class Game {
 
   _newBot(team, name = null, difficultyKey = null) {
     return new Bot(this, team, name, difficultyKey ?? this._botDifficultyKey);
+  }
+
+  _recordCombatPose(entity) {
+    if (!entity?.body) return;
+    const history = this._combatHistory.get(entity) ?? [];
+    recordPose(history, this.time, entity.body);
+    this._combatHistory.set(entity, history);
+  }
+
+  _historicalBody(entity, at) {
+    const pose = samplePose(this._combatHistory.get(entity), at);
+    return pose ? { pos: pose, half: { h: pose.h } } : entity.body;
   }
 
   _humanCap() { return Math.min(MAX_HUMANS, teamSizeForMode(this.gameMode) * 2); }
@@ -1521,15 +1551,6 @@ export class Game {
     }
   }
 
-  _hostPlaceSystemPing(team, x, z, kind = 'MOVE') {
-    if (this.mode === 'client' || !Number.isFinite(x) || !Number.isFinite(z)) return;
-    const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
-    const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: 'SQUAD', team,
-      x: Math.max(0, Math.min(SX, x)), y, z: Math.max(0, Math.min(SZ, z)), kind };
-    if (this.player.team === team) this._receiveTeamPing(msg);
-    if (this.mode === 'host') for (const p of this.remote.values())
-      if (p.team === team) this.net.sendTo(p.id, msg);
-  }
   // Freshest fair enemy sign. Sightings are shared over the squad radio;
   // ordinary weapon/explosion sounds must be within the listener's hearing
   // range. Older sound reports grow less precise instead of revealing an
@@ -1560,13 +1581,28 @@ export class Game {
     const fx = Math.floor(x), fz = Math.floor(z);
     if (fx < 2 || fz < 2 || fx >= SX - 2 || fz >= SZ - 2) return null;
     if (!envelopeContains(mapEnvelope(this.mapIndex), x, z, 3)) return null;
-    const h = this.world.surface(fx, fz);
-    if (h < SEA) return null;
-    let rim = h;
+    const center = this.world.surface(fx, fz);
+    if (center < SEA) return null;
+    let rim = center;
     for (const [dx, dz] of [[3, 0], [-3, 0], [0, 3], [0, -3]])
       rim = Math.max(rim, this.world.surface(fx + dx, fz + dz));
-    if (rim - h > 3) return null; // crater floor — use the rim instead
-    return { x, y: h + 1.02, z };
+    if (rim - center > 3) return null; // crater floor — use the rim instead
+
+    // A center-column surface is insufficient near a voxel boundary: one
+    // shoulder can overlap a taller adjacent column and leave both peers
+    // correcting the player back into the same bad spawn. Stand on the
+    // highest column touched by the real body footprint, then verify the
+    // complete standing AABB before advertising this point to a client.
+    let support = center;
+    const x0 = Math.floor(x - BODY_HALF_WIDTH), x1 = Math.floor(x + BODY_HALF_WIDTH);
+    const z0 = Math.floor(z - BODY_HALF_WIDTH), z1 = Math.floor(z + BODY_HALF_WIDTH);
+    for (let xx = x0; xx <= x1; xx++) for (let zz = z0; zz <= z1; zz++)
+      support = Math.max(support, this.world.surface(xx, zz));
+    const y = support + 1.02;
+    for (let yy = Math.floor(y); yy <= Math.floor(y + STAND_HEIGHT); yy++)
+      for (let xx = x0; xx <= x1; xx++) for (let zz = z0; zz <= z1; zz++)
+        if (this.world.solid(xx, yy, zz)) return null;
+    return { x, y, z };
   }
 
   // Authored base deployment remains the opening, full-team-wipe, and unsafe
@@ -1601,54 +1637,64 @@ export class Game {
     const living = this.entities().filter(e => e?.alive && e.body);
     const foes = living.filter(e => e.team !== team);
     const allies = living.filter(e => e.team === team);
-    const anchors = allies.filter(e => !e.carrier
-      && this.time - (e._spawnedAt ?? -Infinity) >= CTF_SPAWN.anchorGrace
-      && this.time - (e._combatAt ?? -Infinity) >= CTF_SPAWN.anchorGrace);
+    const own = BASE[team], enemy = BASE[this.enemyOf(team)];
+    const enemyRows = foes.map(e => e.body.pos);
+    const visibleAt = ally => {
+      const eye = ally.body.eye ? ally.body.eye()
+        : new THREE.Vector3(ally.body.pos.x, ally.body.pos.y + 1.4, ally.body.pos.z);
+      return foes.some(foe => {
+        const foeEye = foe.body.eye ? foe.body.eye()
+          : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
+        return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+      }) ? 1 : 0;
+    };
+    // Carriers are never anchors: redeploying beside one makes the flag
+    // carrier's route too easy to collapse and ignores the defensive cue.
+    const anchors = allies.filter(e => ctfAnchorAllowed(e, {
+      ownX: own.x, enemyX: enemy.x, now: this.time, enemies: enemyRows,
+      nearbyAllies: allies, visibleEnemies: visibleAt(e),
+    }));
     if (!anchors.length) return null;
 
-    const own = BASE[team], enemy = BASE[this.enemyOf(team)];
     const dir = Math.sign(enemy.x - own.x);
-    const halfField = Math.abs(enemy.x - own.x) / 2;
-    const maxAdvance = halfField - CTF_SPAWN.midfieldBuffer
-      + Math.max(0, Math.min(8, this._ctfEscalation?.frontlineBonus || 0));
-    const progress = e => (e.body.pos.x - own.x) * dir;
-    const ownSideAnchors = anchors.filter(e => progress(e) >= 0
-      && progress(e) <= maxAdvance);
-    const leading = Math.max(0, ...anchors.map(progress));
-    const frontline = Math.min(maxAdvance, Math.max(28, leading));
+    const frontProgress = ctfMedianForwardProgress(anchors, {
+      ownX: own.x, enemyX: enemy.x,
+    });
     const raw = [];
-
-    // Prefer real squad positions when they are still on our side, with
-    // enough radial spread that one wave cannot arrive in a grenade knot.
-    for (const ally of ownSideAnchors) for (let i = 0; i < 3; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const radius = 8 + Math.random() * 10;
-      raw.push([ally.body.pos.x + Math.cos(angle) * radius,
-        ally.body.pos.z + Math.sin(angle) * radius]);
-    }
-    // If the surviving squad has crossed midfield, project its lane back to
-    // our frontline rather than spawning the wave beside it in enemy land.
-    for (let i = 0; i < 28; i++) {
-      const lane = anchors[i % anchors.length].body.pos;
-      raw.push([own.x + dir * (frontline + (Math.random() - 0.5) * 24),
-        lane.z + (Math.random() - 0.5) * 70]);
-    }
+    const envelope = mapEnvelope(this.mapIndex);
+    const lanes = [0.22, 0.5, 0.78].map(fraction =>
+      envelope.minZ + (envelope.maxZ - envelope.minZ) * fraction);
+    // Fixed friendly-side lanes remain available even when the squad is
+    // concentrated in one channel; qualified anchors add their own lanes.
+    const laneZ = [...lanes, ...anchors.map(e => e.body.pos.z)];
 
     const ownFlag = this.flags[team], enemyFlag = this.flags[this.enemyOf(team)];
     const objective = ownFlag.state !== 'home' ? ownFlag.pos
       : enemyFlag.state !== 'home' ? enemyFlag.pos : enemyFlag.home;
     const activeFlags = Object.values(this.flags)
       .filter(flag => flag.state !== 'home').map(flag => flag.pos);
-    const enemyRows = foes.map(e => e.body.pos);
     const allyRows = anchors.map(e => e.body.pos);
     let best = null, bestScore = -Infinity;
+    for (let i = 0; i < 48; i++) {
+      const advance = ctfWaveProgress(frontProgress ?? 0, {
+        ownX: own.x, enemyX: enemy.x,
+        behind: CTF_SPAWN.behindFrontMin
+          + Math.random() * (CTF_SPAWN.behindFrontMax - CTF_SPAWN.behindFrontMin),
+        defending: ownFlag.state !== 'home',
+        frontlineBonus: this._ctfEscalation?.frontlineBonus,
+      });
+      if (!Number.isFinite(advance)) continue;
+      const z = laneZ[i % laneZ.length] + (Math.random() - 0.5) * 28;
+      raw.push([own.x + dir * advance, z]);
+    }
     for (const [x, z] of raw) {
       const candidate = this._spawnSurface(x, z);
       if (!candidate) continue;
       const eye = new THREE.Vector3(candidate.x, candidate.y + 1.4, candidate.z);
       let visibleEnemies = 0;
       for (const foe of foes) {
-        const foeEye = foe.body.eye();
+        const foeEye = foe.body.eye ? foe.body.eye()
+          : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
         if (eye.distanceToSquared(foeEye) <= 65 * 65 && this.losClear(eye, foeEye)) {
           visibleEnemies = 1;
           break;
@@ -1660,6 +1706,7 @@ export class Game {
       const advance = (candidate.x - own.x) * dir;
       const score = tacticalSpawnScore(candidate, {
         enemies: enemyRows, allies: allyRows, objective, visibleEnemies,
+        recentDeaths: (this._recentDeaths ?? []).filter(d => d.team === team), mode: 'ctf',
       }) + advance * 0.65;
       if (score > bestScore) { bestScore = score; best = candidate; }
     }
@@ -1677,42 +1724,134 @@ export class Game {
     } : { x: SX / 2, z: SZ / 2 });
     const raw = [];
 
-    // Reinforce living squadmates without spawning on their shoulders.
-    for (const ally of allies) for (let i = 0; i < 3; i++) {
-      const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 12;
-      raw.push([ally.body.pos.x + Math.cos(a) * r, ally.body.pos.z + Math.sin(a) * r]);
+    if (this.gameMode === 'tdm') {
+      // TDM's battlefield wave follows the robust median allied front. A
+      // surviving teammate contributes a lane only when they are a quiet,
+      // covered, supported anchor; a lone flanker can never move the wave.
+      if (!allies.length) return null;
+      const own = BASE[team], enemy = BASE[this.enemyOf(team)];
+      const enemyRows = foes.map(e => e.body.pos);
+      const allyRows = allies.map(e => e.body.pos);
+      // The front is the median of soldiers still on their own side. One
+      // infiltrator beyond midfield must not drag the whole respawn wave up
+      // behind them; a wiped/fully advanced formation falls back rearward.
+      const frontRows = allyRows.filter(point => {
+        const progress = tdmForwardProgress(point, { ownX: own.x, enemyX: enemy.x });
+        return progress !== null && progress >= 0 && progress < 0.5;
+      });
+      const frontProgress = tdmMedianForwardProgress(frontRows, {
+        ownX: own.x, enemyX: enemy.x,
+      });
+      const visibleAt = ally => {
+        const eye = ally.body.eye ? ally.body.eye()
+          : new THREE.Vector3(ally.body.pos.x, ally.body.pos.y + 1.4, ally.body.pos.z);
+        return foes.some(foe => {
+          const foeEye = foe.body.eye ? foe.body.eye()
+            : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
+          return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+        }) ? 1 : 0;
+      };
+      const anchors = allies.filter(ally => tdmAnchorAllowed(ally, {
+        ownX: own.x, enemyX: enemy.x, now: this.time,
+        enemies: enemyRows, nearbyAllies: allies,
+        visibleEnemies: visibleAt(ally),
+      }));
+      const envelope = mapEnvelope(this.mapIndex);
+      const queue = (x, z) => {
+        // Rectangular maps retain broad north/center/south variation; on
+        // ellipse maps this keeps those same samples inside the authored rim.
+        const point = clampToEnvelope(envelope, x, z, 4);
+        if (tdmTerritoryAllowed(point, { ownX: own.x, enemyX: enemy.x }))
+          raw.push([point.x, point.z]);
+      };
+      const fallbackLanes = [0.22, 0.5, 0.78].map(fraction => ({ body: { pos: {
+        z: envelope.minZ + (envelope.maxZ - envelope.minZ) * fraction,
+      } } }));
+      // Keep authored north/center/south approaches in every search, then add
+      // qualified squad lanes. A team concentrated in one lane may still
+      // reinforce there, but it never erases the map's lateral alternatives.
+      const lanes = anchors.length ? [...fallbackLanes, ...anchors] : fallbackLanes;
+      for (let i = 0; i < 36; i++) {
+        const behind = TDM_SPAWN.behindFrontMin
+          + Math.random() * (TDM_SPAWN.behindFrontMax - TDM_SPAWN.behindFrontMin);
+        // There is always an allied row here, so the median is finite; keep a
+        // defensive lower-band fallback for malformed/reconnecting bodies.
+        const advance = tdmWaveProgress(frontProgress ?? TDM_SPAWN.minProgress,
+          { ownX: own.x, enemyX: enemy.x, behind });
+        if (advance === null) continue;
+        const lane = lanes[i % lanes.length]?.body?.pos ?? b;
+        const z = lane.z + (Math.random() - 0.5) * (anchors.length ? 30 : 20);
+        queue(own.x + dir * advance, z);
+      }
     }
     if (this.gameMode === 'koth' && this.hill) {
-      // Approach the hill from the team's side, but vary range and bearing so
-      // a wave does not materialize in one grenade-sized knot.
-      const homeAngle = Math.atan2(b.z - this.hill.pos.z, b.x - this.hill.pos.x);
-      for (let i = 0; i < 24; i++) {
-        const a = homeAngle + (Math.random() - 0.5) * 2.5;
-        const r = this.hill.r + 18 + Math.random() * 18;
-        raw.push([this.hill.pos.x + Math.cos(a) * r,
-          this.hill.pos.z + Math.sin(a) * r]);
-      }
-    } else {
-      // TDM lives in the battlefield rather than at either flag stand. Seed
-      // broad team-side lanes, then let safety/exposure scoring choose among
-      // them based on where the live fight actually is.
-      for (let i = 0; i < 24; i++) {
-        const advance = 44 + Math.random() * 48;
-        raw.push([b.x + dir * advance + (Math.random() - 0.5) * 16,
-          b.z + (Math.random() - 0.5) * 110]);
+      // KOTH follows the same anchor discipline as CTF: no carrier shortcut,
+      // no recently fighting/exposed/unsupported body, and no anchor on the
+      // objective itself. This also gives a full-team wipe the protected-base
+      // fallback through spawnPoint().
+      const enemyRows = foes.map(e => e.body.pos);
+      const visibleAt = ally => {
+        const eye = ally.body.eye ? ally.body.eye()
+          : new THREE.Vector3(ally.body.pos.x, ally.body.pos.y + 1.4, ally.body.pos.z);
+        return foes.some(foe => {
+          const foeEye = foe.body.eye ? foe.body.eye()
+            : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
+          return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+        }) ? 1 : 0;
+      };
+      const anchors = allies.filter(ally => kothAnchorAllowed(ally, {
+        home: b, hill: this.hill, team, now: this.time,
+        enemies: enemyRows, nearbyAllies: allies, visibleEnemies: visibleAt(ally),
+      }));
+      const medianDepth = kothMedianApproachDepth(anchors, {
+        home: b, hill: this.hill, team,
+      });
+      if (medianDepth !== null) {
+        const hill = this.hill.pos;
+        const homeAngle = Math.atan2(b.z - hill.z, b.x - hill.x);
+        // Cycle direct and lateral approaches. Lateral choices stay in the
+        // home cone, so a pressured direct lane does not force a base spawn.
+        const offsets = [-0.65, -0.35, 0, 0.35, 0.65];
+        const maxDepth = Math.max(medianDepth + KOTH_SPAWN.behindFrontMax,
+          Math.min(96, Math.max(34, medianDepth + 30)));
+        for (let i = 0; i < 48; i++) {
+          const depth = kothWaveApproachDepth(medianDepth, {
+            behind: KOTH_SPAWN.behindFrontMin
+              + Math.random() * (KOTH_SPAWN.behindFrontMax - KOTH_SPAWN.behindFrontMin),
+            minDepth: this.hill.r + KOTH_SPAWN.pointClearance,
+            maxDepth,
+          });
+          const offset = offsets[i % offsets.length] + (Math.random() - 0.5) * 0.12;
+          const angle = homeAngle + offset;
+          // `depth` is measured along the home vector. Compensate the radial
+          // range for lateral bearing so every alternative remains behind the
+          // median approach, rather than cutting diagonally toward the point.
+          const radius = depth / Math.max(0.5, Math.cos(offset));
+          raw.push([hill.x + Math.cos(angle) * radius,
+            hill.z + Math.sin(angle) * radius]);
+        }
       }
     }
 
-    const enemyRows = foes.map(e => e.body.pos);
     const allyRows = allies.map(e => e.body.pos);
+    const enemyRows = foes.map(e => e.body.pos);
     let best = null, bestScore = -Infinity;
     for (const [x, z] of raw) {
       const candidate = this._spawnSurface(x, z);
       if (!candidate) continue;
+      if (this.gameMode === 'tdm'
+          && !tdmTerritoryAllowed(candidate, { ownX: b.x,
+            enemyX: BASE[this.enemyOf(team)].x })) continue;
+      if (this.gameMode === 'koth' && this.hill
+          && !kothCandidateDirectionalAllowed(candidate, {
+            home: b, hill: this.hill, team,
+          })) continue;
       const eye = new THREE.Vector3(candidate.x, candidate.y + 1.4, candidate.z);
       let visibleEnemies = 0;
       for (const foe of foes) {
-        if (eye.distanceTo(foe.body.eye()) <= 65 && this.losClear(eye, foe.body.eye()))
+        const foeEye = foe.body.eye ? foe.body.eye()
+          : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
+        if (eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye))
           visibleEnemies++;
       }
       const score = tacticalSpawnScore(candidate, {
@@ -1726,8 +1865,8 @@ export class Game {
   }
 
   // Opening CTF deployments and failed safety searches use the base. Later
-  // CTF waves may reinforce their own frontline; TDM/KOTH continue to use
-  // their less territory-constrained dynamic battlefield spawns.
+  // CTF waves reinforce their own frontline; TDM waves track a protected
+  // territorial band while KOTH retains its objective approach behavior.
   spawnPoint(team, preference = 'front') {
     if (preference === 'base') return this._baseSpawnPoint(team);
     if (this.gameMode === 'ctf') {
@@ -1761,6 +1900,20 @@ export class Game {
     const target = body.pos.clone().add(new THREE.Vector3(0, 0.9, 0));
     if (eye.distanceTo(target) <= INTEREST_CLOSE_R) return true;
     return this.losClear(eye, target);
+  }
+
+  _isSoundOccluded(pos) {
+    const ear = this._listenerEye;
+    if (!ear || !pos || !this.world) return false;
+    const target = this._audioTarget.set(pos.x,
+      (Number.isFinite(pos.y) ? pos.y : ear.y) + 0.7, pos.z);
+    const direction = this._audioDirection.subVectors(target, ear);
+    const distance = direction.length();
+    if (!Number.isFinite(distance) || distance <= 4) return false;
+    // Stop before the source itself: footsteps, digging, and impacts are
+    // commonly emitted on a solid boundary and must not occlude themselves.
+    return !!this.world.raycast(ear, direction.multiplyScalar(1 / distance),
+      Math.max(0, distance - 1.25));
   }
 
   // Range the first visible surface or enemy under a shot ray. The sniper
@@ -1804,9 +1957,10 @@ export class Game {
   }
 
   // ---------------- combat ----------------
-  fireHitscan(shooter, from, dir, spec) {
+  fireHitscan(shooter, from, dir, spec, rewindAt = null) {
     this._noteAction(shooter);
     shooter._combatAt = this.time;
+    triggerSoldierFire(shooter.parts ?? shooter.avatar?.parts);
     shooter.protT = 0; // firing drops spawn protection
     dir = this._dropCompensate(from, dir, spec, shooter);
     // Crouch steadies aim; iron sights steady it more (rifle ×0.5, SMG ×0.7 —
@@ -1827,7 +1981,8 @@ export class Game {
     let hit = null, hitT = maxT, head = false;
     for (const e of this.foesOf(shooter.team)) {
       if (!e.alive) continue;
-      const r = rayVsSoldier(from, d, e.body);
+      const body = rewindAt == null ? e.body : this._historicalBody(e, rewindAt);
+      const r = rayVsSoldier(from, d, body);
       if (r !== null && r.t < hitT) { hit = e; hitT = r.t; head = r.head; }
     }
 
@@ -1877,6 +2032,7 @@ export class Game {
   }
 
   hitBlock(x, y, z, dmg, who = null) {
+    if (this._protectedVoxelReason(x, y, z)) return;
     const key = x + ',' + y + ',' + z;
     const hp = (this.blockHits.get(key) ?? BLOCK_HP) - dmg;
     if (hp > 0) { this.blockHits.set(key, hp); return; }
@@ -1915,7 +2071,7 @@ export class Game {
   // Player tool entry points — route locally (solo/host) or to the host (client).
   _sendAction(k, payload = {}) {
     const n = ++this._actionSeq;
-    this.net?.send({ t: 'a', k, n, ...payload });
+    this.net?.send({ t: 'a', k, n, life: this._serverLife, ...payload });
     return n;
   }
 
@@ -2096,7 +2252,7 @@ export class Game {
       id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
       carrier: b.carrier, role: b.tacticalRole,
     }));
-    const limit = ['ATTACK', 'HILL', 'ENEMY', 'BREACH'].includes(msg.kind) ? 3 : 2;
+    const limit = ['ATTACK', 'HILL', 'ENEMY'].includes(msg.kind) ? 3 : 2;
     this.botOrders[e.team] = { ...msg, expires: this.time + TEAM_PING_TTL,
       responders: botsForSquadOrder(candidates, msg, limit) };
     if (this.player.team === e.team) this._receiveTeamPing(msg);
@@ -2232,7 +2388,8 @@ export class Game {
     const p = this.player?.body?.pos;
     if (!p) return false;
     return this.firstMinuteGuide?.start({
-      mode: this.gameMode, matchSecond: this.matchElapsed, x: p.x, z: p.z,
+      mode: this.gameMode, mapIndex: this.mapIndex,
+      matchSecond: this.matchElapsed, x: p.x, z: p.z,
     }) ?? false;
   }
 
@@ -2356,6 +2513,14 @@ export class Game {
     victim.health -= amount;
     victim.alert?.(attacker); // bots whirl toward whoever shot them
     const src = sourcePos ?? attacker?.body?.pos;
+    if (victim !== this.player) {
+      const facing = victim.parts?.group?.rotation?.y
+        ?? victim.avatar?.group?.rotation?.y ?? victim.yaw ?? 0;
+      const side = src && victim.body?.pos
+        ? Math.sign((src.x - victim.body.pos.x) * Math.cos(facing)
+          - (src.z - victim.body.pos.z) * Math.sin(facing)) || 1 : 1;
+      triggerSoldierHit(victim.parts ?? victim.avatar?.parts, side);
+    }
     if (victim === this.player) {
       hud.damage(); sfx.hurt(); hud.health(this.player);
       if (src) hud.damageDir(this._bearingTo(src));
@@ -2524,6 +2689,7 @@ export class Game {
   }
 
   applyEdit(x, y, z, v, who = null) {
+    if (!v && this._protectedVoxelReason(x, y, z)) return false;
     this.blockHits.delete(x + ',' + y + ',' + z);  // fresh block / cleared cell: full HP
     const before = this.world.get(x, y, z);
     this.world.set(x, y, z, v);
@@ -2535,6 +2701,7 @@ export class Game {
       this.net.broadcast(this._worldStamp({ t: 'e', k: 'edit', x, y, z, v }));
     }
     if (!v) this._collapseFrom([{ x, y, z }], who); // cut the legs out? it falls
+    return true;
   }
 
   // Structural support: whatever isn't connected to bedrock comes down.
@@ -2557,6 +2724,10 @@ export class Game {
     // stand" direction. Reaching an already-resolved cell means same clump,
     // same answer: inherit it and stop.
     const doomed = unsupportedCollapseCells((x, y, z) => this.world.get(x, y, z), holes);
+    for (const key of doomed) {
+      const [x, y, z] = key.split(',').map(Number);
+      if (this._protectedVoxelReason(x, y, z)) doomed.delete(key);
+    }
     if (!doomed.size) return;
     // Down it comes: remove the clump, dust it, and hurt anyone standing in
     // it or directly under it — a falling tower should kill.
@@ -2608,6 +2779,7 @@ export class Game {
   digVoxel(who, x, y, z) {
     const v = this.world.get(x, y, z);
     if (!v) return;
+    if (this._protectedVoxelReason(x, y, z)) return;
     this.applyEdit(x, y, z, 0, who);
     this.effects.blockBurst([{ x, y, z, v }]);
     if (who === this.player) {
@@ -2627,7 +2799,7 @@ export class Game {
     const tactical = this.time - (who?._combatAt ?? -Infinity) < 10
       || v === BLOCK.BLUE || v === BLOCK.GREEN;
     this._recognizeVoxel(who, usefulVoxelAction({ type: 'dig',
-      changedPassability: changedPassability && tactical }), x, z);
+      changedPassability: changedPassability && tactical }));
   }
 
   playerDig(p, origin = null, dir = null) {
@@ -2675,6 +2847,7 @@ export class Game {
         p._buildDenyT = this.time;
         const label = protectedReason === 'flag' ? 'FLAG STAND MUST STAY CLEAR'
           : protectedReason === 'hill' ? 'HILL CENTER MUST STAY CLEAR'
+          : protectedReason === 'signature' ? 'ROUTE FOUNDATION MUST STAY CLEAR'
           : 'SPAWN PAD MUST STAY CLEAR';
         this.messageTo(p, label, '#ffd97a');
       }
@@ -2698,16 +2871,15 @@ export class Game {
     p.blocks--;
     this._recognizeVoxel(p, usefulVoxelAction({ type: 'build',
       bridgedGap, tactical: recentCombat,
-      blockedThreat: clearThreats.some(e => !this.losClear(e.body.eye(), pCenter)) }), x, z);
+      blockedThreat: clearThreats.some(e => !this.losClear(e.body.eye(), pCenter)) }));
     return true;
   }
 
-  _recognizeVoxel(p, label, x, z) {
+  _recognizeVoxel(p, label) {
     if (!label || !p || this.time - (p._voxelRecognitionAt ?? -Infinity) < 12) return;
     p._voxelRecognitionAt = this.time;
     this._award(p, 20, { specialty: 'terrain', specialtyPoints: 1 });
     this.messageTo(p, label, '#ffd97a');
-    if (label === 'BREACH OPENED') this._hostPlaceSystemPing(p.team, x + 0.5, z + 0.5, 'BREACH');
   }
 
   _protectedBuildReason(x, y, z) {
@@ -2726,7 +2898,12 @@ export class Game {
     });
     const hill = this.hill && { x: this.hill.pos.x, y: this.hill.pos.y,
       z: this.hill.pos.z, r: 2.5, below: 2, above: 4 };
-    return protectedBuildReason(x, y, z, { flags, spawns, hill });
+    return protectedBuildReason(x, y, z, { flags, spawns, hill,
+      signature: signatureProtectedAreas(this.mapIndex, this.seed) });
+  }
+
+  _protectedVoxelReason(x, y, z) {
+    return this._protectedBuildReason(x, y, z);
   }
 
   // ---------------- grenades ----------------
@@ -3029,7 +3206,9 @@ export class Game {
     const pos = new THREE.Vector3(x, y, z);
     this.effects.explode(pos);
     sfx.at(sound, pos);
-    const removed = this.world.carve(Math.floor(x), Math.floor(y), Math.floor(z), r);
+    const removed = this.world.carve(Math.floor(x), Math.floor(y), Math.floor(z), r,
+      (vx, vy, vz) => !this._protectedVoxelReason(vx, vy, vz));
+    if (removed.length) this.navRevision++;
     this.voxelStory?.recordBlast(removed.length, { airstrike: sound === 'airstrikeImpact' });
     this.effects.blockBurst(removed);
     this.effects.addShake(Math.max(0, 0.5 - pos.distanceTo(this.player.body.pos) * 0.012));
@@ -3347,7 +3526,9 @@ export class Game {
       this.mode !== 'client');
     $('end').classList.remove('hidden');
     this.player.vmRoot.visible = false;
-    // Retain pointer lock for a seamless automatic next round.
+    // Results contain real choices. Release captured mouse input before the
+    // overlay appears so class, ready, squad, and share controls are usable.
+    this.onRoundEnd?.();
     this._publishSquadState();
     this._publishReadyState();
     if (!won) sfx.lose();
@@ -3471,6 +3652,8 @@ export class Game {
   _passVoteKick() {
     const kicked = this._voteKick;
     if (!kicked) return false;
+    const target = this.remote.get(kicked.id);
+    if (target) target._noReconnect = true;
     this.feed(`<b>${kicked.name}</b> WAS REMOVED BY PLAYER VOTE`);
     this.net.sendTo(kicked.id, { t: 'e', k: 'kick', reason: 'vote' });
     this._clearVoteKick(true);
@@ -3611,6 +3794,7 @@ export class Game {
     if (correct || p._integrity.action === 'correct') this._correctRemotePosition(p);
     if (p._integrity.action !== 'disconnect' || p._disconnecting) return;
     p._disconnecting = true;
+    p._noReconnect = true;
     this.net.sendTo(p.id, { t: 'e', k: 'kick', reason: 'integrity' });
     const conn = this.net.conns.get(p.id);
     setTimeout(() => conn?.close(), 250);
@@ -3651,13 +3835,16 @@ export class Game {
     if (d.t === 'ping') {
       // Room-browser probe: everything the list row wants to show.
       const humanCap = this._humanCap();
-      this.net.sendTo(id, { t: 'pong', humans: this.remote.size + 1, max: humanCap,
+      this.net.sendTo(id, { t: 'pong', humans: this.remote.size + this._reconnectReservations.size + 1, max: humanCap,
         map: this.mapIndex, mode: this.gameMode,
         g: this.captures.green, b: this.captures.blue,
         names: [this.player.name, ...[...this.remote.values()].map(p => p.name)].slice(0, humanCap) });
       return;
     }
     if (d.t === 'hi') {
+      const reservation = this._reconnectReservations.get(d.resume);
+      if (reservationMatches(reservation, d.resume))
+        return this._reclaimPlayer(id, reservation);
       const mig = this._migRoster?.get(id);
       if (mig) {
         // A survivor finding the new room. Their proxy was already restored
@@ -3674,6 +3861,7 @@ export class Game {
         }
         this.net.sendTo(id, { t: 'w', id, team: p.team, migrated: 1, mode: this.gameMode,
           seed: this.seed, map: this.mapIndex, log: this.editLog, me: p.ridx,
+          life: p._life,
           tb: this.teamBalanceEnabled() ? 1 : 0,
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
@@ -3682,10 +3870,16 @@ export class Game {
         return;
       }
       if (this.remote.has(id)) return; // duplicate hello (channel re-announce)
-      return this._hostAddPlayer(id, d.name, d.team);
+      return this._hostAddPlayer(id, d.name, d.team, d.resume);
     }
     const p = this.remote.get(id);
     if (!p) return;
+    // A reliable channel preserves order in one direction, not across the
+    // host->client respawn and client->host uplink directions. Late packets
+    // from the corpse's life are normal under load; ignore them rather than
+    // treating the spawn-sized jump as cheating or firing it from a new body.
+    if (d.t === 's' && d.life !== p._life) return;
+    if (d.t === 'a' && SECURED_ACTIONS.includes(d.k) && d.life !== p._life) return;
     if (d.t === 'a' && SECURED_ACTIONS.includes(d.k)) {
       const order = actionSequenceDisposition(p._lastActionSeq, d.n);
       if (!order.accept) { this._securityViolation(p, 'action-' + order.reason, 2); return; }
@@ -3729,9 +3923,15 @@ export class Game {
       const nx = Math.min(Math.max(d.x, 0), SX), ny = Math.min(Math.max(d.y, -8), SY + 8),
         nz = Math.min(Math.max(d.z, 0), SZ);
       const elapsed = this.time - (p._lastPosT ?? this.time);
+      // Spend movement credit only after every authority check accepts the
+      // candidate. Collision rejection followed by a correction is normal
+      // under packet jitter; charging the rejected move drained the budget
+      // and turned one harmless disagreement into a disconnect cascade.
+      const budget = p._movementBudget ??= createMovementBudget();
+      const candidateBudget = { ...budget };
       const movement = validateMovementReport(p.body.pos,
         { x: nx, y: ny, z: nz, yaw: d.yaw }, elapsed, undefined,
-        p._movementBudget ??= createMovementBudget());
+        candidateBudget);
       if (!movement.ok) {
         this._securityViolation(p, 'move-' + movement.reason, 1, true); return;
       }
@@ -3779,6 +3979,7 @@ export class Game {
       }
       p._remoteSupported = supported;
 
+      Object.assign(budget, candidateBudget);
       p.body.pos.set(nx, ny, nz);
       p.body.inWater = ny < SEA + 0.4;
       p._lastPosT = this.time;
@@ -3796,6 +3997,12 @@ export class Game {
       // _broadcastSnapshot) so the client can read its own round trip —
       // no extra message, just one more number on traffic already flowing.
       if (Number.isFinite(d.ts)) p._pingTs = d.ts;
+      if (Number.isSafeInteger(d.echo)) {
+        const conn = this.net.conns.get(id);
+        p._rttSeconds = observeSnapshotRtt(conn?._snapshotSentAt, d.echo,
+          this.time, p._rttSeconds);
+      }
+      this._recordCombatPose(p);
       // Airstrike steering: piggybacked on this same uplink rather than a
       // separate message. Untrusted like everything else here — bounds-
       // clamp, and rate-limit the IMPLIED steering speed the same way
@@ -3890,7 +4097,8 @@ export class Game {
         }
         p._lastAimDir = dir.clone();
         p._lastAimT = now;
-        this.fireHitscan(p, o, dir, spec);
+        const rewindAt = this.time - rewindSecondsForRtt(p._rttSeconds);
+        this.fireHitscan(p, o, dir, spec, rewindAt);
       }
       else if (d.k === 'dig') {
         if (p.tool !== 2) { this._securityViolation(p, 'dig-tool', 0.5); return; }
@@ -3946,8 +4154,8 @@ export class Game {
     return { t: 'r', p, b: this.bots.map(b => [b.id, b.name, b.team]) };
   }
 
-  _hostAddPlayer(id, rawName, teamPref) {
-    if (this.remote.size + 1 >= this._humanCap()) { // room full — turn them away politely
+  _hostAddPlayer(id, rawName, teamPref, resume = null) {
+    if (this.remote.size + this._reconnectReservations.size + 1 >= this._humanCap()) { // room full — turn them away politely
       this.net.sendTo(id, { t: 'full' });
       setTimeout(() => this.net.conns.get(id)?.close(), 400); // let the packet land
       return;
@@ -3956,7 +4164,9 @@ export class Game {
     // Preferences are best-effort: never exceed this mode's team size.
     // When the requested side is full, fall back to the side with a seat;
     // AUTO still chooses the less-populated human team.
-    const team = chooseTeam(teamPref, teamCounts(this.player.team, this.remote.values()),
+    const occupied = [...this.remote.values(),
+      ...[...this._reconnectReservations.values()].map(r => r.player)];
+    const team = chooseTeam(teamPref, teamCounts(this.player.team, occupied),
       teamSizeForMode(this.gameMode), this.teamBalanceEnabled());
     if (!team) {
       this.net.sendTo(id, { t: 'full' });
@@ -3964,12 +4174,14 @@ export class Game {
       return;
     }
     const proxy = new RemotePlayer(this, id, name, team);
+    if (validResumeToken(resume)) proxy._resumeToken = resume;
     proxy.ridx = this._nextPIdx++;
     this.remote.set(id, proxy);
     this._kdRow(proxy); // scoreboard seat from the moment they join
     this._removeBot(team);
     this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
       log: this.editLog, mode: this.gameMode, me: proxy.ridx,
+      life: proxy._life,
       tb: this.teamBalanceEnabled() ? 1 : 0,
       wr: this.editLog.length, wh: this._worldHash >>> 0,
       spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
@@ -3984,6 +4196,109 @@ export class Game {
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
     this._broadcastScoreboard(true);
     this.feed(`${nameSpan(proxy)} joined ${team.toUpperCase()}`);
+  }
+
+  _reserveDisconnectedPlayer(player, respawnLeft) {
+    const bot = this._newBot(player.team, player.name);
+    bot._humanRidx = player.ridx;
+    bot._humanLife = player._life;
+    bot.body.pos.copy(player.body.pos);
+    bot.body.vel.copy(player.body.vel);
+    bot.body.half.h = player.body.half.h;
+    bot.body.onGround = player.body.onGround;
+    bot.body.inWater = player.body.inWater;
+    bot.health = player.health;
+    bot.alive = player.alive;
+    bot.carrier = false; // flags drop on disconnect; never hide one in a reservation
+    bot.gunClass = player.gunClass;
+    bot.ammo = player.ammo[player.gunClass];
+    bot.blocks = player.blocks;
+    bot.nades = player.nades;
+    bot.crouched = !!player.crouched;
+    bot.protT = player.protT;
+    bot._spawnedAt = player._spawnedAt;
+    bot._breath = player._breath;
+    bot._drownClock = player._drownClock;
+    bot._damageLedger = player._damageLedger;
+    setSoldierTool(bot.parts, bot.gunClass);
+    bot.parts.group.position.copy(bot.body.pos);
+    bot.parts.group.rotation.y = player.yaw;
+    bot.parts.group.visible = bot.alive;
+    this.bots.push(bot);
+    if (!bot.alive && Number.isFinite(respawnLeft)) this.respawnTimers.set(bot, respawnLeft);
+    const reservation = { token: player._resumeToken, player, bot,
+      expiresAt: performance.now() + RECONNECT_GRACE_MS };
+    this._reconnectReservations.set(reservation.token, reservation);
+  }
+
+  _reclaimPlayer(id, reservation) {
+    this._reconnectReservations.delete(reservation.token);
+    const bot = reservation.bot;
+    const i = this.bots.indexOf(bot);
+    if (i >= 0) this.bots.splice(i, 1);
+    const respawnLeft = this.respawnTimers.get(bot);
+    this.respawnTimers.delete(bot);
+    this._combatHistory.delete(bot);
+
+    const p = new RemotePlayer(this, id, reservation.player.name, reservation.player.team);
+    p.ridx = reservation.player.ridx;
+    p._life = bot._humanLife;
+    p._resumeToken = reservation.token;
+    p.body.pos.copy(bot.body.pos);
+    p.body.vel.copy(bot.body.vel);
+    p.body.half.h = bot.body.half.h;
+    p.body.onGround = bot.body.onGround;
+    p.body.inWater = bot.body.inWater;
+    p.health = bot.health;
+    p.alive = bot.alive;
+    p.carrier = false;
+    p.gunClass = bot.gunClass;
+    p._pendingClass = reservation.player._pendingClass;
+    p.tool = bot.gunClass;
+    p.ammo[p.gunClass] = bot.ammo;
+    p.blocks = bot.blocks;
+    p.nades = bot.nades;
+    p.crouched = bot.crouched;
+    p.yaw = bot.parts.group.rotation.y;
+    p._streak = reservation.player._streak;
+    p.protT = bot.protT;
+    p._spawnedAt = bot._spawnedAt;
+    p._breath = bot._breath;
+    p._drownClock = bot._drownClock;
+    p._damageLedger = bot._damageLedger;
+    p.avatar.setAlive(p.alive);
+    p.avatar.setTool(p.tool);
+    p.avatar.push(p.body.pos.x, p.body.pos.y, p.body.pos.z, p.yaw);
+    disposeObject(bot.parts.group);
+    this.remote.set(id, p);
+    if (!p.alive && Number.isFinite(respawnLeft)) this.respawnTimers.set(p, respawnLeft);
+    this._recordCombatPose(p);
+
+    this.net.sendTo(id, { t: 'w', id, team: p.team, seed: this.seed, map: this.mapIndex,
+      log: this.editLog, mode: this.gameMode, me: p.ridx,
+      life: p._life,
+      tb: this.teamBalanceEnabled() ? 1 : 0,
+      wr: this.editLog.length, wh: this._worldHash >>> 0,
+      spawn: spawnRow(p.body, p.yaw + Math.PI / 2), r: this._rosterMsg() });
+    this.net.broadcast(this._rosterMsg());
+    this._broadcastScoreboard(true);
+    this.feed(`${nameSpan(p)} reclaimed their soldier`);
+  }
+
+  _expireReconnectReservations() {
+    const now = performance.now();
+    let changed = false;
+    for (const [token, reservation] of this._reconnectReservations) {
+      if (now <= reservation.expiresAt) continue;
+      this._reconnectReservations.delete(token);
+      delete reservation.bot._humanRidx;
+      this._kdRow(reservation.bot);
+      changed = true;
+    }
+    if (changed) {
+      this.net?.broadcast(this._rosterMsg());
+      this._broadcastScoreboard(true);
+    }
   }
 
   // Where a team's home stand is — the flag stand in CTF, the base plateau
@@ -4177,9 +4492,11 @@ export class Game {
       p.carrier = false;
       this.flags[this.enemyOf(p.team)].drop(p.body.pos.clone());
     }
-    this.feed(`${nameSpan(p)} left the battle`);
+    const canRecover = validResumeToken(p._resumeToken) && !p._noReconnect && !this.over;
+    this.feed(`${nameSpan(p)} ${canRecover ? 'lost connection — bot covering' : 'left the battle'}`);
     p.avatar.dispose();
     this.remote.delete(id);
+    this._combatHistory.delete(p);
     if (this._voteKick?.id === id) this._clearVoteKick(true);
     else if (this._voteKick) {
       this._voteKick.voters.delete('p' + p.ridx);
@@ -4189,8 +4506,10 @@ export class Game {
       else this._publishVoteKickState();
     }
     this._squadVotes.delete('p' + p.ridx);
+    const respawnLeft = this.respawnTimers.get(p);
     this.respawnTimers.delete(p);
-    if (!this.over) this.bots.push(this._newBot(p.team));
+    if (canRecover) this._reserveDisconnectedPlayer(p, respawnLeft);
+    else if (!this.over) this.bots.push(this._newBot(p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
     if (this.over) this._publishSquadState();
     this._checkAbandoned();
@@ -4206,14 +4525,15 @@ export class Game {
     if (this.mode !== 'host') return;
     const now = performance.now();
     this._leaveTimes = [...(this._leaveTimes ?? []), now].filter(t => now - t < 3000);
-    if (this._leaveTimes.length >= 2 && this.remote.size === 0) {
+    if (this._leaveTimes.length >= 2 && this.remote.size === 0
+        && this._reconnectReservations.size === 0) {
       this._leaveTimes = [];
       this.onAbandoned?.();
     }
   }
 
   _removeBot(team) {
-    const i = this.bots.findIndex(b => b.team === team);
+    const i = this.bots.findIndex(b => b.team === team && !Number.isInteger(b._humanRidx));
     if (i < 0) return;
     const [b] = this.bots.splice(i, 1);
     disposeObject(b.parts.group);
@@ -4353,6 +4673,9 @@ export class Game {
       }
       if (this.net.sendTo(id, out)) {
         conn._snapshotSeq = out.q;
+        const sentAt = conn._snapshotSentAt ??= new Map();
+        sentAt.set(out.q, this.time);
+        while (sentAt.size > 16) sentAt.delete(sentAt.keys().next().value);
         if (full) {
           conn._forceFullSnapshot = false;
           conn._nextFullSnapshotAt = this.time + 2;
@@ -4385,7 +4708,8 @@ export class Game {
   _applyWorldEntry(e) {
     if (e[0] === 'b') {
       const removed = this.world.carve(Math.floor(e[1]), Math.floor(e[2]), Math.floor(e[3]),
-        Math.min(Math.max(e[4] ?? 0, 0), 6));
+        Math.min(Math.max(e[4] ?? 0, 0), 6),
+        (x, y, z) => !this._protectedVoxelReason(x, y, z));
       this.voxelStory?.recordBlast(removed.length);
     } else {
       const before = this.world.get(e[0], e[1], e[2]);
@@ -4450,6 +4774,7 @@ export class Game {
     if (d.t === 'w') {
       this.myId = d.id;
       this.myIdx = d.me;
+      this._serverLife = d.life;
       this.player.team = d.team;
       if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
       if (d.mode) this.gameMode = d.mode; // rebuild below needs it (flagless TDM)
@@ -4514,6 +4839,7 @@ export class Game {
         }
         if (d.full) { this._fullP.clear(); this._fullB.clear(); }
         this._lastSnapshotSeq = d.q;
+        this._snapshotEcho = d.q;
       }
       if (Number.isSafeInteger(d.wr)) {
         if (d.wr > this.editLog.length
@@ -4606,12 +4932,13 @@ export class Game {
         this.avatars.set(key, av);
       }
       av.setAlive(!!alive);
+      av.setHealth(health);
       av.setCrouch(!!crouch);
       av.setTool(tool);
       av.push(x, y, z, ry);
     }
     for (const [idx, r] of this._fullB) {
-      const [x, y, z, ry, , alive, , crouch] = r;
+      const [x, y, z, ry, health, alive, , crouch] = r;
       const meta = this._rosterB?.get(idx);
       if (!meta) continue;
       const key = 'b' + idx;
@@ -4622,6 +4949,7 @@ export class Game {
         this.avatars.set(key, av);
       }
       av.setAlive(!!alive);
+      av.setHealth(health);
       av.setCrouch(!!crouch); // host shrinks ducking bots; draw them that way
       av.push(x, y, z, ry);
     }
@@ -4743,9 +5071,19 @@ export class Game {
         }
         break;
       }
-      case 'shot':
-        if (d.sid !== this.myId) this.shotFx(v3(d.f), v3(d.e), d.hit, d.hex, v3(d.f), d.gun);
+      case 'shot': {
+        if (d.sid === this.myId) break;
+        const from = v3(d.f);
+        let firingAvatar = null, nearest = 3 * 3;
+        for (const avatar of this.avatars.values()) {
+          if (!avatar.alive || !avatar.group.visible) continue;
+          const distance = avatar.group.position.distanceToSquared(from);
+          if (distance < nearest) { nearest = distance; firingAvatar = avatar; }
+        }
+        firingAvatar?.fire();
+        this.shotFx(from, v3(d.e), d.hit, d.hex, from, d.gun);
         break;
+      }
       case 'feed': hud.feed(safeFeedHtml(d.html)); break;
       case 'msg':
         if (!d.team || d.team === this.player.team) hud.message(d.text, d.color);
@@ -4766,6 +5104,7 @@ export class Game {
         break;
       case 'died': this._clientDied(d.rt, d.recap); break;
       case 'spawn':
+        this._serverLife = d.life;
         this.player.respawn({ x: d.x, y: d.y, z: d.z });
         if (Number.isFinite(d.yaw)) this.player.yaw = d.yaw;
         hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player);
@@ -4927,12 +5266,16 @@ export class Game {
     }
     for (const av of this.avatars.values()) av.update(this.time, this.world, this.effects);
     this._sendT -= dt;
-    if (this._sendT <= 0 && this.net) {
+    // A connection object exists before its welcome lands. Until the host has
+    // assigned myId/spawn/world, the local body still belongs to the menu map;
+    // sending it would look like an impossible teleport into the new room.
+    if (this._sendT <= 0 && this.net && this.myId) {
       this._sendT = 1 / 30; // 33ms input age — the uplink is tiny, spend it
       const p = this.player;
       const out = { t: 's', x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z,
         yaw: Math.atan2(-Math.cos(p.yaw), Math.sin(p.yaw)), tool: p.tool,
-        c: p.crouched ? 1 : 0, ts: performance.now() };
+        c: p.crouched ? 1 : 0, life: this._serverLife, ts: performance.now() };
+      if (Number.isSafeInteger(this._snapshotEcho)) out.echo = this._snapshotEcho;
       // Piggybacked on this same, already-firing 30Hz message rather
       // than a new send loop: while a called-in airstrike is falling,
       // this also reports where it's CURRENTLY being steered to, so the
@@ -4994,7 +5337,8 @@ export class Game {
     // Positional audio hears from the player's ear, right vector included.
     {
       const p = this.player, e = p.body.eye(this._listenerEye ??= new THREE.Vector3());
-      setListener({ x: e.x, y: e.y, z: e.z, rx: Math.sin(p.yaw), rz: Math.cos(p.yaw) });
+      setListener({ x: e.x, y: e.y, z: e.z, rx: Math.sin(p.yaw), rz: Math.cos(p.yaw),
+        occluded: this._audioOccluded });
     }
     this._updateContactFlow();
     this._updateGrenadeWarning();
@@ -5035,6 +5379,8 @@ export class Game {
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);
+    for (const e of this.entities()) if (e.alive) this._recordCombatPose(e);
+    if (this.mode === 'host') this._expireReconnectReservations();
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.

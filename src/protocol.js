@@ -5,7 +5,7 @@ import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -46,32 +46,38 @@ export function validEditLog(value) {
 export function validClientMessage(d) {
   if (!isRecord(d) || !shortString(d.t, 8)) return false;
   if (d.t === 'ping') return exactKeys(d, ['t'], ['t']);
-  if (d.t === 'hi') return exactKeys(d, ['t', 'v', 'name', 'team'], ['t', 'v', 'name'])
+  if (d.t === 'hi') return exactKeys(d, ['t', 'v', 'name', 'team', 'resume'], ['t', 'v', 'name'])
     && d.v === PROTOCOL_VERSION && shortString(d.name, 64)
     // PeerJS/BinaryPack may preserve an omitted optional value as null.
     // Both null and undefined mean AUTO; named teams still need validation.
-    && (d.team == null || team(d.team));
+    && (d.team == null || team(d.team))
+    && (d.resume === undefined || (typeof d.resume === 'string'
+      && /^[A-Za-z0-9_-]{22,48}$/.test(d.resume)));
   if (d.t === 's') return exactKeys(d,
-    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c', 'ts', 'strike'],
-    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c'])
+    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c', 'life', 'ts', 'echo', 'strike'],
+    ['t', 'x', 'y', 'z', 'yaw', 'tool', 'c', 'life'])
     && [d.x, d.y, d.z, d.yaw].every(finite)
     && Number.isInteger(d.tool) && (d.c === 0 || d.c === 1)
+    && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6
     && (d.ts === undefined || finite(d.ts))
+    && (d.echo === undefined || (Number.isSafeInteger(d.echo) && d.echo >= 1))
     && (d.strike === undefined || (isRecord(d.strike) && finite(d.strike.x) && finite(d.strike.z)));
   if (d.t !== 'a' || !shortString(d.k, 16)) return false;
   if (SECURED_ACTIONS.includes(d.k)
       && (!Number.isSafeInteger(d.n) || d.n < 1)) return false;
   const actionKeys = {
     chat: ['t', 'k', 'text', 'scope'], class: ['t', 'k', 'cls'],
-    strike: ['t', 'k', 'n', 'x', 'z', 'yaw'],
+    strike: ['t', 'k', 'n', 'life', 'x', 'z', 'yaw'],
     mark: ['t', 'k', 'd'], squad: ['t', 'k'],
     votekick: ['t', 'k', 'target'],
-    resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n'],
-    shoot: ['t', 'k', 'n', 'd', 'o'], dig: ['t', 'k', 'n', 'd', 'o'],
-    place: ['t', 'k', 'n', 'd', 'o'], nade: ['t', 'k', 'n', 'd', 'o'],
+    resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n', 'life'],
+    shoot: ['t', 'k', 'n', 'life', 'd', 'o'], dig: ['t', 'k', 'n', 'life', 'd', 'o'],
+    place: ['t', 'k', 'n', 'life', 'd', 'o'], nade: ['t', 'k', 'n', 'life', 'd', 'o'],
     spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'],
   };
   if (!actionKeys[d.k] || !exactKeys(d, actionKeys[d.k], ['t', 'k'])) return false;
+  if (SECURED_ACTIONS.includes(d.k)
+      && (!Number.isSafeInteger(d.life) || d.life < 1 || d.life > 1e6)) return false;
   if (d.k === 'chat') return shortString(d.text, 512)
     && (d.scope === 'all' || d.scope === 'team');
   if (d.k === 'class') return Number.isInteger(d.cls);
@@ -151,7 +157,7 @@ function validEvent(d) {
     squad: ['t', 'k', 'voters'],
     ready: ['t', 'k', 'voters'],
     votekick: ['t', 'k', 'active', 'target', 'name', 'voters', 'needed', 'remaining'],
-    spawn: ['t', 'k', 'x', 'y', 'z', 'yaw'], corr: ['t', 'k', 'x', 'y', 'z'],
+    spawn: ['t', 'k', 'x', 'y', 'z', 'yaw', 'life'], corr: ['t', 'k', 'x', 'y', 'z'],
     kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
     end: ['t', 'k', 'winner', 'story'],
     restart: ['t', 'k', 'seed', 'map', 'mode'],
@@ -201,7 +207,8 @@ function validEvent(d) {
         && new Set(d.voters).size === d.voters.length
         && Number.isInteger(d.needed) && d.needed >= 2 && d.needed <= 9
         && Number.isInteger(d.remaining) && d.remaining >= 0 && d.remaining <= 30;
-    case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw));
+    case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw))
+      && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6;
     case 'corr': return [d.x, d.y, d.z].every(finite);
     case 'kick': return d.reason === 'integrity' || d.reason === 'vote';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
@@ -222,12 +229,13 @@ export function validServerMessage(d) {
     && Number.isInteger(d.v) && d.v >= 1 && d.v <= 1000;
   if (d.t === 'r') return validRoster(d);
   if (d.t === 'w') return exactKeys(d, ['t', 'id', 'team', 'seed', 'map', 'mode', 'me',
-      'log', 'r', 'reset', 'migrated', 'spawn', 'wr', 'wh', 'tb'],
+      'log', 'r', 'reset', 'migrated', 'spawn', 'wr', 'wh', 'tb', 'life'],
       ['t', 'id', 'team', 'seed', 'map', 'mode', 'me', 'log', 'r'])
     && shortString(d.id, 128) && team(d.team)
     && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
     && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
+    && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6
     && (d.reset === undefined || d.reset === 0 || d.reset === 1)
     && (d.migrated || parseSpawnRow(d.spawn))
     && (!d.reset || parseSpawnRow(d.spawn))

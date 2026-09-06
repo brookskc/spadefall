@@ -15,6 +15,19 @@ export function firstMinuteObjective(mode) {
   return 'STEAL THEIR FLAG AND BRING IT HOME';
 }
 
+// One terse, map-specific line makes the authored voxel decision visible in
+// the first match without adding another marker or permanent HUD panel.
+export function firstMinuteTerrainCue(mapIndex) {
+  return [
+    'CUT A NEW DOOR THROUGH THE MIDFIELD BELT',
+    'DIG COVER OR OPEN A SHORTER APPROACH',
+    'FINISH THE BROKEN BRIDGE OR USE THE STONE FORD',
+    'DROP COVER OR BUILD A NEW FIRING STEP',
+    'CUT OR REBUILD THE NORTH/SOUTH SPANS',
+    'OPEN A SHORT PATH THROUGH A BASALT GATE',
+  ][mapIndex] ?? 'DIG A ROUTE OR BUILD NEW COVER';
+}
+
 const finite = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 
 export class FirstMinuteGuide {
@@ -27,11 +40,13 @@ export class FirstMinuteGuide {
     this.actions = new Set();
   }
 
-  start({ mode = 'ctf', matchSecond = 0, x = 0, z = 0 } = {}) {
+  start({ mode = 'ctf', mapIndex = 0, matchSecond = 0, x = 0, z = 0 } = {}) {
     if (this.hasRun) return false;
     this.hasRun = true;
     this.active = true;
     this.mode = ['ctf', 'tdm', 'koth'].includes(mode) ? mode : 'ctf';
+    this.mapIndex = Number.isInteger(mapIndex) && mapIndex >= 0 && mapIndex < 6
+      ? mapIndex : 0;
     this.startedAtSecond = Math.max(0, finite(matchSecond));
     this.origin = { x: finite(x), z: finite(z) };
     this.actions.clear();
@@ -84,7 +99,7 @@ export class FirstMinuteGuide {
       hint = 'LEFT MOUSE FIRE · RIGHT MOUSE AIM';
     } else if (progress.move && progress.fire && !progress.terrain) {
       prompt = 'RESHAPE THE FIGHT';
-      hint = '3 SPADE TO DIG · 4 BLOCKS TO BUILD';
+      hint = firstMinuteTerrainCue(this.mapIndex);
     } else if (progress.move && progress.fire && progress.terrain && !progress.ping) {
       prompt = 'MARK FOR YOUR SQUAD';
       hint = 'G PLACES A TEAM PING';

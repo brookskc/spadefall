@@ -3,6 +3,7 @@
 // ?ns=name scopes all peer ids — tests and events get their own universe.
 import { isRecord } from './multiplayer.js';
 import { PROTOCOL_VERSION, validPong, validServerMessage } from './protocol.js';
+import { createResumeToken, validResumeToken } from './reconnect.js';
 const ns = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
   .get('ns')?.replace(/[^\w-]/g, '').slice(0, 16); // guarded for headless import
 const PREFIX = 'spadefall-' + (ns ? ns + '-' : '');
@@ -80,7 +81,27 @@ export function usableIceServers(payload) {
 
 // Options for every Peer we construct. undefined means "PeerJS defaults",
 // which is the pre-TURN behaviour.
-export const peerOptions = () => iceServers ? { config: { iceServers } } : undefined;
+export const peerOptions = () => {
+  const relayOnly = typeof location !== 'undefined'
+    && new URLSearchParams(location.search).get('relayonly') === '1';
+  if (!iceServers && !relayOnly) return undefined;
+  return { config: { ...(iceServers ? { iceServers } : {}),
+    ...(relayOnly ? { iceTransportPolicy: 'relay' } : {}) } };
+};
+
+let memoryResumeToken = null;
+export function resumeToken() {
+  if (memoryResumeToken) return memoryResumeToken;
+  try {
+    const saved = sessionStorage.getItem('spadefall.resume');
+    if (validResumeToken(saved)) return memoryResumeToken = saved;
+    const made = createResumeToken();
+    sessionStorage.setItem('spadefall.resume', made);
+    return memoryResumeToken = made;
+  } catch {
+    return memoryResumeToken = createResumeToken();
+  }
+}
 
 export function resetIce() { iceServers = null; iceExpiresAt = 0; icePending = null; }
 
@@ -395,7 +416,8 @@ export class Net {
       // team is the player's own OPTIONAL side preference (undefined when
       // they never set one) — the host honors it if given, falls back to
       // its own balance pick otherwise. See Game#_hostAddPlayer.
-      const onOpen = () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team });
+      const onOpen = () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team,
+        resume: resumeToken() });
       const onData = d => {
         if (!isRecord(d)) return;
         // Do not adopt a channel on a merely welcome-shaped packet. A stale

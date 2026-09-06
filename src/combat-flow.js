@@ -33,7 +33,7 @@ export function ctfEscalation(state = {}, now = 0, flagLive = false) {
 
 export function usefulVoxelAction({ type, changedPassability = false, changedLos = false,
   bridgedGap = false, tactical = false, blockedThreat = false } = {}) {
-  if (type === 'dig' && (changedPassability || changedLos)) return 'BREACH OPENED';
+  if (type === 'dig' && (changedPassability || changedLos)) return 'PATH CLEARED';
   if (type === 'build' && bridgedGap) return 'ROUTE BUILT';
   if (type === 'build' && tactical && blockedThreat) return 'COVER SAVE';
   return null;

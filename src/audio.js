@@ -52,8 +52,8 @@ function noiseBuffer() {
   return (_noise = buf);
 }
 
-let listener = null; // { x, y, z, rx, rz } — position + unit right vector
-let _pan = 0, _scale = 1, _spatialPitch = 1;
+let listener = null; // { x, y, z, rx, rz, occluded?(pos, name) }
+let _pan = 0, _scale = 1, _spatialPitch = 1, _occlusionHz = 0;
 export function setListener(l) { listener = l; }
 export function spatialVerticality(dy, distance) {
   const ratio = Number.isFinite(dy) && Number.isFinite(distance) && distance > 0
@@ -62,11 +62,20 @@ export function spatialVerticality(dy, distance) {
 }
 
 function route(node) {
+  let output = node;
+  if (_occlusionHz) {
+    const wall = ctx.createBiquadFilter();
+    wall.type = 'lowpass';
+    wall.frequency.value = _occlusionHz;
+    wall.Q.value = 0.7;
+    output.connect(wall);
+    output = wall;
+  }
   if (_pan) {
     const p = ctx.createStereoPanner();
     p.pan.value = _pan;
-    node.connect(p).connect(master);
-  } else node.connect(master);
+    output.connect(p).connect(master);
+  } else output.connect(master);
 }
 
 // A few audible volume ledges instead of a perfectly smooth fade are the
@@ -155,6 +164,38 @@ const profile = v => SURFACE[voxelSurface(v)];
 // Mechanical pitch, not a musical note: the compact SMG is a little lighter,
 // the sniper bolt heavier, and none lives in the piercing 600–1200Hz range.
 export const reloadPitch = kind => kind === 'smg' ? 330 : kind === 'sniper' ? 235 : 275;
+
+const QUIET_SPACE = Object.freeze({ step: 24, dig: 30, spadeHit: 28,
+  reloadStart: 26, reloadEject: 26, reloadInsert: 26, reloadChamber: 26 });
+const FAR_SPACE = Object.freeze({ rifle: 95, smg: 82, sniper: 115,
+  explosion: 100, airstrikeImpact: 130, drone: 110, missile: 110,
+  missileLaunch: 110 });
+
+// Pure spatial mix seam used by the runtime and tests. Occlusion changes
+// timbre more than loudness: a weapon behind a ridge remains actionable, but
+// loses the brittle high-frequency edge that falsely reads as line-of-sight.
+export function spatialAudioMix(name, pos, ear, occluded = false) {
+  if (!pos || !ear || ![pos.x, pos.z, ear.x, ear.y, ear.z, ear.rx, ear.rz]
+    .every(Number.isFinite)) return null;
+  const cutoff = QUIET_SPACE[name] ?? FAR_SPACE[name] ?? 70;
+  const dx = pos.x - ear.x, dy = (Number.isFinite(pos.y) ? pos.y : ear.y) - ear.y;
+  const dz = pos.z - ear.z, distance = Math.hypot(dx, dy, dz);
+  if (distance > cutoff) return null;
+  const quiet = Object.hasOwn(QUIET_SPACE, name);
+  const falloff = quiet ? 0.16
+    : name === 'drone' || name === 'missile' ? 0.045 : 0.075;
+  const blockedGain = !occluded ? 1
+    : name === 'explosion' || name === 'airstrikeImpact' ? 0.78
+      : quiet ? 0.46 : 0.58;
+  return {
+    distance,
+    pan: distance < 1.5 ? 0 : Math.max(-0.9, Math.min(0.9,
+      (dx * ear.rx + dz * ear.rz) / distance)),
+    pitch: name === 'step' ? spatialVerticality(dy, distance).pitch : 1,
+    scale: blockedGain / (1 + distance * falloff),
+    occlusionHz: occluded ? (quiet ? 720 : 980) : 0,
+  };
+}
 
 export const sfx = {
   // Each gun shares a noise face, pitched body, and mechanical pixel. The
@@ -333,23 +374,18 @@ export const sfx = {
   // Additional arguments survive positional routing (material/progress).
   at(name, pos, ...args) {
     if (!ctx || !listener || !this[name] || !pos) return;
-    const QUIET = { step: 24, dig: 30, spadeHit: 28, reloadStart: 26,
-      reloadEject: 26, reloadInsert: 26, reloadChamber: 26 };
-    const FAR = { rifle: 95, smg: 82, sniper: 115, explosion: 100,
-      airstrikeImpact: 130, drone: 110, missile: 110, missileLaunch: 110 };
-    const cutoff = QUIET[name] ?? FAR[name] ?? 70;
     const dx = pos.x - listener.x, dy = (pos.y ?? listener.y) - listener.y,
-          dz = pos.z - listener.z;
-    const d = Math.hypot(dx, dy, dz);
-    if (d > cutoff) return;
-    _pan = d < 1.5 ? 0 : Math.max(-0.9, Math.min(0.9,
-      (dx * listener.rx + dz * listener.rz) / d));
-    // Height should help locate footsteps without making every gunshot or
-    // explosion above the listener sound unnaturally pitch-shifted.
-    _spatialPitch = name === 'step' ? spatialVerticality(dy, d).pitch : 1;
-    const falloff = QUIET[name] ? 0.16 : name === 'drone' || name === 'missile' ? 0.045 : 0.075;
-    _scale = 1 / (1 + d * falloff);
+      dz = pos.z - listener.z;
+    const distance = Math.hypot(dx, dy, dz);
+    const occluded = distance > 4 && typeof listener.occluded === 'function'
+      ? !!listener.occluded(pos, name) : false;
+    const mix = spatialAudioMix(name, pos, listener, occluded);
+    if (!mix) return;
+    _pan = mix.pan;
+    _spatialPitch = mix.pitch;
+    _scale = mix.scale;
+    _occlusionHz = mix.occlusionHz;
     this[name](...args);
-    _pan = 0; _scale = 1; _spatialPitch = 1;
+    _pan = 0; _scale = 1; _spatialPitch = 1; _occlusionHz = 0;
   },
 };

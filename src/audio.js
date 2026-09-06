@@ -2,7 +2,27 @@
 // compact sine/triangle bodies keep it tactile and stylized without drifting
 // into either realistic sample-pack foley or thin chiptune square-wave chirps.
 let ctx = null, master = null;
+const buses = { effects: null, ambience: null, ui: null };
+const busLevel = { effects: 1, ambience: 1, ui: 1 };
+let activeCategory = 'effects';
+export const SOUND_META = Object.freeze({
+  rifle: { category: 'effects', priority: 3 }, smg: { category: 'effects', priority: 2 }, sniper: { category: 'effects', priority: 3 },
+  reloadStart: { category: 'effects' }, reloadEject: { category: 'effects' }, reloadInsert: { category: 'effects' }, reloadChamber: { category: 'effects' },
+  step: { category: 'effects', priority: 1 }, slide: { category: 'effects' }, explosion: { category: 'effects', priority: 3 }, airstrikeImpact: { category: 'effects', priority: 3 },
+  drone: { category: 'ambience', priority: 1 }, missile: { category: 'effects', priority: 2 }, missileLaunch: { category: 'effects', priority: 3 },
+  hit: { category: 'ui', priority: 3 }, kill: { category: 'ui', priority: 3 },
+  headshot: { category: 'ui', priority: 3 }, multiKill: { category: 'ui', priority: 3 },
+  click: { category: 'ui' }, radio: { category: 'ui' }, ping: { category: 'ui' },
+  pickup: { category: 'ui', priority: 2 }, drop: { category: 'ui', priority: 2, localCaption: true },
+  capture: { category: 'ui', priority: 3, localCaption: true },
+  lose: { category: 'ui', priority: 3, localCaption: true },
+  respawn: { category: 'ui', priority: 2 },
+  danger: { category: 'ui', priority: 3, localCaption: true },
+  hurt: { category: 'ui', priority: 3, localCaption: true },
+  telegraph: { category: 'ui', priority: 3, localCaption: true },
+});
 let masterLevel = 1, muted = false;
+const activeVoiceEnds = [];
 const applyMaster = () => {
   if (master) master.gain.value = 0.48 * masterLevel * (muted ? 0 : 1);
 };
@@ -12,6 +32,12 @@ export function setMasterVolume(value) {
   masterLevel = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1;
   applyMaster();
 }
+export function setBusVolume(category, value) {
+  if (!(category in busLevel)) return;
+  const n = Number(value); busLevel[category] = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1;
+  if (buses[category]) buses[category].gain.value = busLevel[category];
+}
+export function getBusVolume(category) { return busLevel[category] ?? 1; }
 
 export function setAudioMuted(value) { muted = !!value; applyMaster(); }
 export function isAudioMuted() { return muted; }
@@ -25,6 +51,9 @@ export function initAudio() {
   if (!AudioCtor) return;
   ctx = new AudioCtor();
   master = ctx.createGain();
+  for (const category of Object.keys(buses)) {
+    buses[category] = ctx.createGain(); buses[category].gain.value = busLevel[category]; buses[category].connect(master);
+  }
   applyMaster();
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = -9;
@@ -53,12 +82,33 @@ function noiseBuffer() {
 }
 
 let listener = null; // { x, y, z, rx, rz, occluded?(pos, name) }
+let captionSink = null;
+export function setCaptionSink(sink) { captionSink = typeof sink === 'function' ? sink : null; }
 let _pan = 0, _scale = 1, _spatialPitch = 1, _occlusionHz = 0;
 export function setListener(l) { listener = l; }
 export function spatialVerticality(dy, distance) {
   const ratio = Number.isFinite(dy) && Number.isFinite(distance) && distance > 0
     ? Math.max(-1, Math.min(1, dy / distance)) : 0;
   return { pitch: 1 + ratio * .16, vertical: ratio > .22 ? 'above' : ratio < -.22 ? 'below' : 'level' };
+}
+
+// Count complete cues rather than oscillator layers. Under a chaotic full-room
+// firefight, incidental movement/reload sounds yield first while gunshots,
+// impacts, and local combat confirmations keep a small emergency reserve.
+function claimVoice(name) {
+  if (!ctx) return true;
+  const now = ctx.currentTime;
+  while (activeVoiceEnds.length && activeVoiceEnds[0] <= now) activeVoiceEnds.shift();
+  const priority = SOUND_META[name]?.priority ?? 1;
+  const limit = priority >= 3 ? 44 : priority === 2 ? 36 : 28;
+  if (activeVoiceEnds.length >= limit) return false;
+  const lifetime = name === 'airstrikeImpact' ? 1.1
+    : name === 'explosion' || name === 'sniper' ? .55 : .35;
+  const end = now + lifetime;
+  const index = activeVoiceEnds.findIndex(value => value > end);
+  if (index < 0) activeVoiceEnds.push(end);
+  else activeVoiceEnds.splice(index, 0, end);
+  return true;
 }
 
 function route(node) {
@@ -71,11 +121,12 @@ function route(node) {
     output.connect(wall);
     output = wall;
   }
+  const bus = buses[activeCategory] || master;
   if (_pan) {
     const p = ctx.createStereoPanner();
     p.pan.value = _pan;
-    output.connect(p).connect(master);
-  } else output.connect(master);
+    output.connect(p).connect(bus);
+  } else output.connect(bus);
 }
 
 // A few audible volume ledges instead of a perfectly smooth fade are the
@@ -124,7 +175,7 @@ function burst({ dur = 0.12, freq = 1100, q = 0.8, gain = 0.35,
 }
 
 function tone({ freq = 440, end = freq, dur = 0.1, type = 'triangle',
-  gain = 0.16, steps = 3, delay = 0 }) {
+  gain = 0.16, steps: _steps = 3, delay = 0 }) {
   if (!ready()) return;
   const t0 = ctx.currentTime + delay;
   const o = ctx.createOscillator();
@@ -381,6 +432,9 @@ export const sfx = {
       ? !!listener.occluded(pos, name) : false;
     const mix = spatialAudioMix(name, pos, listener, occluded);
     if (!mix) return;
+    // Captions receive only the already-approved mix, after range and wall
+    // tests.  They therefore never disclose an event that audio rejected.
+    captionSink?.(name, mix);
     _pan = mix.pan;
     _spatialPitch = mix.pitch;
     _scale = mix.scale;
@@ -389,3 +443,19 @@ export const sfx = {
     _pan = 0; _scale = 1; _spatialPitch = 1; _occlusionHz = 0;
   },
 };
+
+// Keep every existing call site (`sfx.rifle()`, `sfx.at(...)`) stable while
+// giving synthesis a deterministic bus/category selected from metadata.
+for (const [name, fn] of Object.entries(sfx)) {
+  if (name === 'at') continue;
+  sfx[name] = function categorizedSound(...args) {
+    if (!claimVoice(name)) return;
+    const prior = activeCategory;
+    activeCategory = SOUND_META[name]?.category || 'effects';
+    try {
+      if (SOUND_META[name]?.localCaption)
+        captionSink?.(name, { pan: 0, pitch: 1, distance: 0, scale: 1, occlusionHz: 0 });
+      return fn.apply(this, args);
+    } finally { activeCategory = prior; }
+  };
+}

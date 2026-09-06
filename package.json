@@ -8,10 +8,15 @@
     "test:fuzz:soak": "node tests/map-fuzz.mjs --seeds=200",
     "test:multiplayer": "node tests/multiplayer.browser.mjs",
     "test:stress": "node tests/full-room.browser.mjs",
-    "test:ci": "npm test && npm run test:multiplayer && npm run test:stress",
-    "capture:results": "node tests/capture-results.mjs"
+    "test:accessibility": "node tests/accessibility.browser.mjs",
+    "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility && npm run test:multiplayer && npm run test:stress",
+    "capture:results": "node tests/capture-results.mjs",
+    "lint": "eslint src/audio.js src/captions.js src/controls.js src/settings.js src/reload-timeline.js src/hud.js src/spawn-controller.js src/objectives.js src/match-lifecycle.js src/bots.js src/bot-navigation.js src/bot-combat.js src/performance-auto.js src/telemetry.js worker/src/index.js",
+    "typecheck": "tsc --noEmit -p jsconfig.json"
   },
   "devDependencies": {
-    "playwright": "^1.62.1"
+    "eslint": "^9.39.5",
+    "playwright": "^1.62.1",
+    "typescript": "^5.9.3"
   }
 }

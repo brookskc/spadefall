@@ -32,7 +32,7 @@ export const originAllowed = origin =>
 
 const corsHeaders = origin => ({
   'access-control-allow-origin': originAllowed(origin) ? origin : 'https://spadefall.io',
-  'access-control-allow-methods': 'GET, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
   'access-control-allow-headers': 'content-type, accept',
   'access-control-max-age': '86400',
   vary: 'origin',
@@ -70,11 +70,89 @@ async function mint(env, fetcher) {
   } finally { clearTimeout(timer); }
 }
 
+const DIAGNOSTIC_ENUMS = Object.freeze({
+  connection_failure: { stage: ['signaling', 'ice', 'turn', 'welcome', 'reconnect', 'other'],
+    reason: ['timeout', 'down', 'unavailable', 'closed', 'protocol', 'network', 'other'],
+    relay: ['yes', 'no', 'unknown'] },
+  crash: { kind: ['error', 'rejection', 'other'] },
+  frame_budget: { tier: ['medium', 'high'], result: ['pass', 'fail'] },
+  migration: { outcome: ['success', 'failure'],
+    reason: ['timeout', 'closed', 'protocol', 'network', 'other'] },
+  match_abandon: { reason: ['pagehide', 'network', 'menu', 'other'] },
+});
+
+const exactKeys = (value, required, optional = []) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return required.every(key => keys.includes(key))
+    && keys.every(key => required.includes(key) || optional.includes(key));
+};
+
+export function validDiagnosticsEnvelope(value) {
+  if (!exactKeys(value, ['v', 'build', 'events']) || value.v !== 1
+      || typeof value.build !== 'string' || !/^[A-Za-z0-9._-]{1,24}$/.test(value.build)
+      || !Array.isArray(value.events) || !value.events.length || value.events.length > 12)
+    return false;
+  return value.events.every(event => {
+    const schema = DIAGNOSTIC_ENUMS[event?.type];
+    if (!schema) return false;
+    const extras = event.type === 'crash' ? ['fingerprint']
+      : event.type === 'frame_budget' ? ['frame', 'long']
+        : event.type === 'match_abandon' ? ['time'] : [];
+    if (!exactKeys(event, ['type', ...Object.keys(schema), ...extras])) return false;
+    if (!Object.entries(schema).every(([key, allowed]) => allowed.includes(event[key])))
+      return false;
+    if (event.type === 'crash' && !/^[a-f0-9]{8}$/.test(event.fingerprint)) return false;
+    if (event.type === 'frame_budget'
+        && (![event.frame, event.long].every(n => Number.isInteger(n) && n >= 0 && n <= 4)))
+      return false;
+    return event.type !== 'match_abandon'
+      || (Number.isInteger(event.time) && event.time >= 0 && event.time <= 4);
+  });
+}
+
+async function acceptDiagnostics(request, env, origin) {
+  if (request.method === 'OPTIONS')
+    return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405, origin);
+  if (!env.GAME_ANALYTICS || typeof env.DIAGNOSTICS_RATE_LIMITER?.limit !== 'function')
+    return json({ error: 'not configured' }, 503, origin);
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 4096)
+    return json({ error: 'payload too large' }, 413, origin);
+  const raw = await request.text();
+  if (raw.length > 4096) return json({ error: 'payload too large' }, 413, origin);
+  let payload;
+  try { payload = JSON.parse(raw); }
+  catch { return json({ error: 'invalid payload' }, 400, origin); }
+  if (!validDiagnosticsEnvelope(payload)) return json({ error: 'invalid payload' }, 400, origin);
+  const actor = request.headers.get('cf-connecting-ip') || 'unknown';
+  let success = false;
+  try { ({ success } = await env.DIAGNOSTICS_RATE_LIMITER.limit({ key: actor })); }
+  catch { return json({ error: 'rate limiter unavailable' }, 503, origin); }
+  if (!success) return json({ error: 'rate limited' }, 429, origin);
+  for (const event of payload.events) {
+    const fields = Object.entries(event).filter(([key]) => key !== 'type');
+    env.GAME_ANALYTICS.writeDataPoint({
+      indexes: [event.type],
+      blobs: [payload.build, ...fields.filter(([, value]) => typeof value === 'string')
+        .map(([key, value]) => `${key}:${value}`)],
+      doubles: fields.filter(([, value]) => typeof value === 'number')
+        .map(([, value]) => value),
+    });
+  }
+  return new Response(null, { status: 204, headers: {
+    ...corsHeaders(origin), 'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  } });
+}
+
 export async function handleRequest(request, env, fetcher = fetch) {
   const url = new URL(request.url);
   const origin = request.headers.get('origin') ?? '';
-  if (url.pathname !== '/ice') return json({ error: 'not found' }, 404, origin);
   if (!originAllowed(origin)) return json({ error: 'forbidden' }, 403, origin);
+  if (url.pathname === '/diagnostics') return acceptDiagnostics(request, env, origin);
+  if (url.pathname !== '/ice') return json({ error: 'not found' }, 404, origin);
   if (request.method === 'OPTIONS')
     return new Response(null, { status: 204, headers: corsHeaders(origin) });
   if (request.method !== 'GET')

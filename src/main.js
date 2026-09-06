@@ -1,30 +1,60 @@
 // main.js — boot, renderer, sky, lobby flow (solo / host / join), main loop.
 import * as THREE from 'three';
 import { Game } from './game.js';
-import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume } from './audio.js';
+import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume, setBusVolume, setCaptionSink, sfx } from './audio.js';
+import { captionFromMix } from './captions.js';
 import { SX, SZ, skyGradient } from './world.js';
 import { MAPS } from './mapgen.js';
 import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, resumeToken, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { BASE_FOV } from './player.js';
 import { animateSoldier, setCrouch, setSoldierTool } from './entities.js';
-import { getGfxLevel, setGfxLevel, gfxPreset, getShowFps, setShowFps,
+import { getGfxLevel, setGfxLevel, getGfxMode, requestAutomaticGfx,
+  automaticGfxNeeded, saveAutomaticGfxLevel, gfxPreset, getShowFps, setShowFps,
   getHudScale, setHudScale, getHudOpacity, setHudOpacity,
   getMotionScale, getMotionLevel, setMotionLevel,
   getColorMode, setColorMode, getMouseSensitivity, setMouseSensitivity,
-  getMasterVolume, setMasterVolume, getMuted, setMuted } from './settings.js';
+  getMasterVolume, setMasterVolume, getEffectsVolume, setEffectsVolume, getAmbienceVolume, setAmbienceVolume, getUiVolume, setUiVolume,
+  getCaptionMode, setCaptionMode, getCrouchMode, setCrouchMode, getAimMode, setAimMode, getObjectiveContrast, setObjectiveContrast, getDamageContrast, setDamageContrast, getMuted, setMuted } from './settings.js';
 import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
 import { callsignIssue, normalizeCallsign } from './callsign.js';
 import { topSpecialty } from './combat-flow.js';
+import { BINDING_LABELS } from './controls.js';
+import { AUTO_GFX_BENCHMARK_VERSION,
+  FirstSessionGraphicsBenchmark } from './performance-auto.js';
+import { ProductionTelemetry, errorFingerprint } from './telemetry.js';
 
 const $ = id => document.getElementById(id);
+// Legacy visual controls retain their look, but are reachable and activatable
+// with a keyboard until their markup can be retired in a visual refresh.
+for (const el of document.querySelectorAll('.opt, .plink, .play')) {
+  if (el.matches('button,a,input,select,summary')) continue;
+  el.tabIndex = 0; el.setAttribute('role', 'button');
+  el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
+}
 const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
 if (engagementFeatures.publicChat)
   document.documentElement.dataset.publicChat = 'on';
 const engagement = new EngagementTracker();
+const fieldTelemetry = new ProductionTelemetry({ build: `p${PROTOCOL_VERSION}` });
+const connectionReason = value => {
+  const reason = String(value?.type ?? value ?? '').toLowerCase();
+  if (reason.includes('timeout')) return 'timeout';
+  if (reason.includes('unavailable') || reason.includes('not-found')) return 'unavailable';
+  if (reason.includes('close')) return 'closed';
+  if (reason.includes('version') || reason.includes('protocol')) return 'protocol';
+  if (reason.includes('down')) return 'down';
+  if (reason.includes('network') || reason.includes('webrtc') || reason.includes('ice')) return 'network';
+  return 'other';
+};
+const reportConnectionFailure = (stage, value) => {
+  if (fieldTelemetry.record('connection_failure', {
+    stage, reason: connectionReason(value), relay: 'unknown',
+  })) fieldTelemetry.flush();
+};
 engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
   protocol: PROTOCOL_VERSION, startedAt: new Date().toISOString(), faults: [],
@@ -41,6 +71,9 @@ const rememberFault = (kind, value) => {
   diagnostics.faults.push({ kind, at: new Date().toISOString(),
     message: String(value?.message ?? value ?? 'unknown').slice(0, 500) });
   if (diagnostics.faults.length > 20) diagnostics.faults.shift();
+  fieldTelemetry.record('crash', { kind: kind === 'rejection' ? 'rejection' : 'error',
+    fingerprint: errorFingerprint(value) }, { always: true });
+  fieldTelemetry.flush();
 };
 window.addEventListener('error', e => rememberFault('error', e.error ?? e.message));
 window.addEventListener('unhandledrejection', e => rememberFault('rejection', e.reason));
@@ -50,6 +83,7 @@ const mapQa = params.has('mapqa');
 const reportQa = params.has('reportqa');
 const pingQa = params.has('pingqa');
 const deathRecapQa = params.has('deathrecapqa');
+const audioQa = params.has('audioqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset().pixelRatio));
@@ -71,7 +105,40 @@ game.onRoundEnd = () => {
   if (document.pointerLockElement === renderer.domElement) document.exitPointerLock?.();
 };
 game.player.vmRoot.visible = false; // hidden until first deploy
+let lastCaption = null;
+setCaptionSink((name, mix) => {
+  const caption = captionFromMix(name, mix, getCaptionMode(), performance.now(), lastCaption);
+  if (!caption) return;
+  lastCaption = caption;
+  const el = $('soundCaption');
+  if (!el) return;
+  el.textContent = caption.text;
+  el.classList.remove('pop');
+  void el.offsetWidth;
+  el.classList.add('pop');
+});
+if (audioQa) {
+  const play = name => { initAudio(); sfx[name]?.(); };
+  const sequence = (names, gap = 550) => names.forEach((name, i) =>
+    setTimeout(() => play(name), i * gap));
+  window.__audioQa = {
+    sounds: Object.keys(sfx).filter(k => k !== 'at'), play, sequence,
+    comparisons: {
+      weapons: () => sequence(['rifle', 'smg', 'sniper'], 850),
+      feedback: () => sequence(['hit', 'headshot', 'kill'], 650),
+      reload: (kind = 'rifle') => {
+        initAudio();
+        const duration = { rifle: 2.2, smg: 1.8, sniper: 3 }[kind] ?? 2.2;
+        [['reloadStart', 0], ['reloadEject', .24], ['reloadInsert', .62],
+          ['reloadChamber', .86]].forEach(([name, fraction]) =>
+          setTimeout(() => sfx[name](kind), duration * fraction * 1000));
+      },
+      airstrike: () => sequence(['drone', 'missileLaunch', 'missile', 'airstrikeImpact'], 900),
+    },
+  };
+}
 applyMasterVolume(getMasterVolume());
+setBusVolume('effects', getEffectsVolume()); setBusVolume('ambience', getAmbienceVolume()); setBusVolume('ui', getUiVolume());
 setAudioMuted(getMuted());
 if (engagementFeatures.publicChat) $('chatkey').textContent = 'T room chat · Y team · TAB scores';
 // Browser screenshot hook: force the sniper loadout and hold ADS without
@@ -132,6 +199,11 @@ let net = null;
 let roomCode = null;
 window.addEventListener('pagehide', e => {
   if (e.persisted) return;
+  if (!game.over && (playing || game.mode === 'host' || game.mode === 'client')) {
+    fieldTelemetry.record('match_abandon', { reason: netDead ? 'network' : 'pagehide',
+      seconds: game.matchElapsed ?? 0 });
+    fieldTelemetry.flush();
+  }
   engagement.abandon('pagehide');
   net?.destroy();
 });
@@ -298,7 +370,10 @@ function adoptHost(n, code, opts = {}) {
         n.destroy();
         if (net === n) net = null;
         opts.onTaken?.(); // roll again with a fresh peer
-      } else status(`network error: ${e.type}`);
+      } else {
+        reportConnectionFailure('signaling', e);
+        status(`network error: ${e.type}`);
+      }
     },
     onData: (id, d) => game.hostOnData(id, d),
     onLeave: id => game.hostOnLeave(id),
@@ -330,6 +405,8 @@ function abandonedNotice() {
 function failMigration(guest) {
   guest?.destroy();
   engagement.abandon('network');
+  fieldTelemetry.record('migration', { outcome: 'failure', reason: 'timeout' }, { always: true });
+  fieldTelemetry.flush();
   netDead = true;
   $('end').classList.add('hidden'); // a dead room ends the rotation wait too
   status('connection lost — the host left, and nobody could pick up the baton');
@@ -360,11 +437,16 @@ function adoptMigratedHost(n, code, gen) {
   n.handlers = {
     onData: (id, d) => game.hostOnData(id, d),
     onLeave: id => game.hostOnLeave(id),
-    onError: e => status(`network error: ${e.type}`),
+    onError: e => {
+      reportConnectionFailure('reconnect', e);
+      status(`network error: ${e.type}`);
+    },
   };
   game.onAbandoned = abandonedNotice;
   console.debug(`[mig] promoted to host of ${code}`);
   game.promoteToHost(n);
+  if (fieldTelemetry.record('migration', { outcome: 'success', reason: 'other' }))
+    fieldTelemetry.flush();
   // Survivors who knocked between the claim and this moment were buffered,
   // not dropped — hand them to the now-live handlers.
   n.flushPending?.();
@@ -392,6 +474,8 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
     : 'connection closed after sustained invalid gameplay input');
   console.debug(`[mig] rejoined migrated room ${code} as client`);
   game.clientOnData(welcome); // migrated welcome: world and kit kept as-is
+  if (fieldTelemetry.record('migration', { outcome: 'success', reason: 'other' }))
+    fieldTelemetry.flush();
   $('roomcode').querySelector('b').textContent = code;
   game.hud.message('BATON PASSED — THE MATCH CONTINUES', '#ffd97a');
   status('host dropped — a teammate picked it up');
@@ -478,6 +562,7 @@ function adoptJoin(n, code) {
     ? 'players in that room voted to remove you'
     : 'connection closed after sustained invalid gameplay input');
   n.handlers.onError = e => {
+    reportConnectionFailure('welcome', e);
     // Join failed before the match started — reset so the lobby still works.
     if (net === n) { net = null; game.net = null; game.mode = 'solo'; }
     n.destroy();
@@ -655,15 +740,27 @@ for (const el of document.querySelectorAll('#endClassOpts .opt')) {
   const startAA = gfxPreset().antialias; // what the renderer was actually built with, to detect a genuine pending AA change
   function renderGfx() {
     const level = getGfxLevel();
-    for (const el of opts) el.classList.toggle('picked', el.dataset.gfx === level);
+    const automatic = getGfxMode() === 'auto';
+    const selected = automatic ? 'auto' : level;
+    for (const el of opts) el.classList.toggle('picked', el.dataset.gfx === selected);
+    const auto = [...opts].find(el => el.dataset.gfx === 'auto');
+    if (auto) auto.textContent = automatic
+      && !automaticGfxNeeded(AUTO_GFX_BENCHMARK_VERSION)
+      ? `AUTO · ${level.toUpperCase()}` : 'AUTO';
     if (note) note.classList.toggle('show', gfxPreset(level).antialias !== startAA);
   }
   for (const el of opts) {
     el.addEventListener('click', () => {
       const level = el.dataset.gfx;
-      setGfxLevel(level);
-      renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset(level).pixelRatio));
-      game.applyGraphics(level);
+      if (level === 'auto') {
+        requestAutomaticGfx();
+        autoGfxBenchmark = new FirstSessionGraphicsBenchmark();
+      } else {
+        setGfxLevel(level);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset(level).pixelRatio));
+        game.applyGraphics(level);
+        autoGfxBenchmark = null;
+      }
       renderGfx();
     });
   }
@@ -692,7 +789,7 @@ for (const el of document.querySelectorAll('#endClassOpts .opt')) {
 
 // Accessibility/display choices apply live and remain cosmetic: they never
 // alter fog, draw distance, objective geometry, or multiplayer information.
-function choiceRow(id, read, write, apply) {
+function choiceRow(id, read, write, apply = () => {}) {
   const opts = document.querySelectorAll(`#${id} .opt`);
   const render = () => {
     const value = String(read());
@@ -723,9 +820,63 @@ choiceRow('mouseSensitivityOpts', () => Math.round(getMouseSensitivity() * 100),
   setMouseSensitivity, () => { game.player.mouseSensitivity = getMouseSensitivity(); });
 choiceRow('masterVolumeOpts', () => Math.round(getMasterVolume() * 100),
   setMasterVolume, () => { applyMasterVolume(getMasterVolume()); });
+choiceRow('effectsVolumeOpts', () => Math.round(getEffectsVolume() * 100), setEffectsVolume, () => setBusVolume('effects', getEffectsVolume()));
+choiceRow('ambienceVolumeOpts', () => Math.round(getAmbienceVolume() * 100), setAmbienceVolume, () => setBusVolume('ambience', getAmbienceVolume()));
+choiceRow('uiVolumeOpts', () => Math.round(getUiVolume() * 100), setUiVolume, () => setBusVolume('ui', getUiVolume()));
+choiceRow('captionOpts', getCaptionMode, setCaptionMode);
+choiceRow('crouchModeOpts', getCrouchMode, setCrouchMode, () => { game.player._crouchToggled = false; });
+choiceRow('aimModeOpts', getAimMode, setAimMode, () => { game.player._aimToggled = false; });
+choiceRow('objectiveContrastOpts', getObjectiveContrast, setObjectiveContrast, value => { document.body.dataset.objectiveContrast = value; });
+choiceRow('damageContrastOpts', getDamageContrast, setDamageContrast, value => { document.body.dataset.damageContrast = value; });
+
+// Rebinding is intentionally a short capture state, never a modal: Escape
+// cancels; duplicates report their action and leave the current binding alone.
+const bindBox = $('controlsBindings');
+if (bindBox) {
+  const renderBindings = () => {
+    bindBox.replaceChildren();
+    for (const [action, label] of Object.entries(BINDING_LABELS)) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'bind'; button.dataset.action = action;
+      button.textContent = `${label}: ${game.player.controls.bindings[action].join(' / ')}`;
+      bindBox.appendChild(button);
+    }
+    const reset = document.createElement('button');
+    reset.type = 'button'; reset.className = 'bind'; reset.dataset.reset = '1';
+    reset.textContent = 'RESET DEFAULTS'; bindBox.appendChild(reset);
+    const status = document.createElement('small'); status.id = 'bindStatus';
+    status.setAttribute('aria-live', 'polite'); bindBox.appendChild(status);
+  };
+  renderBindings();
+  bindBox.addEventListener('click', event => {
+    const button = event.target.closest('button'); if (!button) return;
+    if (button.dataset.reset) { game.player.controls.reset(); renderBindings(); return; }
+    const action = button.dataset.action;
+    const status = $('bindStatus');
+    status.textContent = `PRESS A KEY OR MOUSE BUTTON FOR ${BINDING_LABELS[action]} (ESC CANCELS)`;
+    const done = (code, event) => {
+      cleanup();
+      if (code === 'Escape') status.textContent = 'CANCELLED';
+      else {
+        const result = game.player.controls.rebind(action, code);
+        status.textContent = result.ok ? 'BOUND' : `CONFLICT: ${result.conflicts.map(name => BINDING_LABELS[name]).join(', ')}`;
+        if (result.ok) renderBindings();
+      }
+      event.preventDefault(); event.stopPropagation();
+    };
+    const keyCapture = event => done(event.code, event);
+    const mouseCapture = event => done(`Mouse${event.button}`, event);
+    const cleanup = () => {
+      window.removeEventListener('keydown', keyCapture, true);
+      window.removeEventListener('mousedown', mouseCapture, true);
+    };
+    window.addEventListener('keydown', keyCapture, true);
+    window.addEventListener('mousedown', mouseCapture, true);
+  });
+}
 
 addEventListener('keydown', e => {
-  if (e.code !== 'KeyM' || e.repeat || e.ctrlKey || e.metaKey || e.altKey
+  if (!game.player.controls.matches('mute', e.code) || e.repeat || e.ctrlKey || e.metaKey || e.altKey
       || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   const next = !isAudioMuted();
   setMuted(next);
@@ -878,6 +1029,7 @@ $('quickBtn').addEventListener('click', async () => {
       adoptHost(r.net, slotCode(r.slot), { public: true, alreadyOpen: true });
       game.hud.message(`HOSTING PUBLIC ROOM ${r.slot + 1} — PLAYERS WILL DROP IN`, '#ffd97a');
     } else {
+      reportConnectionFailure('signaling', r.kind);
       status(r.kind === 'down' ? 'cannot reach the matchmaking service — check your connection'
         : r.kind === 'version' ? 'game version mismatch — refresh this page'
         : r.kind === 'timeout' ? 'matchmaking is taking too long — try again, or HOST a private room'
@@ -934,6 +1086,8 @@ function roomRow(room) {
   join.textContent = 'JOIN →';
   row.append(main, seats, join);
   row.addEventListener('click', () => joinFromBrowser(room));
+  row.tabIndex = 0; row.setAttribute('role', 'button');
+  row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); } });
   return row;
 }
 
@@ -1162,6 +1316,7 @@ game.onVoteKickState = renderPlayerSafety;
 function enterPause() {
   // Drop all held inputs so nobody runs/shoots blind while the menu is up.
   game.player.keys = {};
+  game.player.controls.clear();
   game.player.mouseDown = [false, false, false];
   game.hud.statsHide(); // a Tab keyup lost to the unlock can't strand it
   renderPlayerSafety();
@@ -1242,6 +1397,8 @@ const perfOn = params.has('perf');
 const perfSamples = new Float32Array(240);
 let perfCount = 0, perfCursor = 0;
 const runtimeHealth = new RuntimeHealth(240);
+let autoGfxBenchmark = automaticGfxNeeded(AUTO_GFX_BENCHMARK_VERSION)
+  ? new FirstSessionGraphicsBenchmark() : null;
 let resourceBaseline = null;
 const soakOn = params.has('soak');
 const soakEvery = Math.max(5, parseInt(params.get('soak'), 10) || 12);
@@ -1290,6 +1447,35 @@ function frame() {
 
   if (wallDt > 0) fpsEma = fpsEma * 0.9 + (1 / wallDt) * 0.1;
   if (wallDt > 0) runtimeHealth.frame(wallDt * 1000);
+  if (autoGfxBenchmark && wallDt > 0) {
+    const info = renderer.info.render;
+    const result = autoGfxBenchmark.frame(wallDt * 1000, {
+      // Background tabs, browser automation, and matchmaking transitions are
+      // not representative of this device's normal play budget.
+      eligible: playing && !game.over && !params.has('auto')
+        && document.visibilityState === 'visible' && document.hasFocus()
+        && !matchmaking && !scanning,
+      drawCalls: info.calls,
+      triangles: info.triangles,
+    });
+    if (result?.level) {
+      const level = result.level;
+      saveAutomaticGfxLevel(level, AUTO_GFX_BENCHMARK_VERSION);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, gfxPreset(level).pixelRatio));
+      game.applyGraphics(level);
+      diagnostics.autoGraphics = result;
+      fieldTelemetry.record('frame_budget', {
+        tier: level,
+        result: level === 'high' ? 'pass' : 'fail',
+        frame: Math.max(0, Math.min(4, Math.floor(result.sample.frameP95Ms / 8))),
+        long: Math.max(0, Math.min(4, Math.floor(result.sample.longFrameRate * 100))),
+      });
+      fieldTelemetry.flush();
+      const auto = document.querySelector('#gfxOpts [data-gfx="auto"]');
+      if (auto) auto.textContent = `AUTO · ${level.toUpperCase()}`;
+      autoGfxBenchmark = null;
+    }
+  }
   if (perfOn && wallDt > 0) {
     perfSamples[perfCursor] = wallDt * 1000;
     perfCursor = (perfCursor + 1) % perfSamples.length;

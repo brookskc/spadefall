@@ -8,11 +8,13 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
 import { SEA, SX, SZ, BLOCK } from './world.js';
 import { TOOLS, GUN_CLASSES } from './player.js';
 import { sfx } from './audio.js';
+import { nextReloadCue } from './reload-timeline.js';
 import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
-import { botDifficulty, botSeparation, botTargetScore, chooseLocalRoute,
-  hillPost, rememberedEnemyPosition } from './bot-rules.js';
+import { botDifficulty, botSeparation, rememberedEnemyPosition } from './bot-rules.js';
 import { clampToEnvelope, mapEnvelope } from './mapgen.js';
+import { goal as botGoal, hasOverhead, planLocalRoute } from './bot-navigation.js';
+import { acquireTarget, buildCover, digVoxel, hasCover } from './bot-combat.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -59,6 +61,8 @@ const CLASS_PROFILE = {
 // movement, weapon stats and line-of-sight rules remain identical.
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 const BOTQ = botDifficulty(QUERY.get('botq'));
+const NAV_CONTEXT = Object.freeze({ THREE, SEA, SX, SZ, BLOCK, mapEnvelope, clampToEnvelope });
+const COMBAT_CONTEXT = Object.freeze({ THREE });
 
 let n = 0;        // name rotation
 let nextId = 0;   // stable identity for network snapshots
@@ -142,173 +146,9 @@ export class Bot {
     this.crouched = false;     // mirrors the duck posture for fireHitscan
   }
 
-  // Perpendicular offset so a team advances on a broad front instead of
-  // single file down the middle of the map.
-  _laned(pos) {
-    const v = pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y ?? 0, pos.z);
-    // Tapers the lane spread to zero as the destination gets close, rather
-    // than holding a fixed lane offset (+-18, see the constructor) all
-    // the way in. The spread is good for crossing open midfield without
-    // bunching up — that's the whole reason lanes exist — but the enemy
-    // base's perimeter wall (buildBase, mapgen.js) only opens gates
-    // within 2 units of the flag's own z. A full 18-unit lane offset
-    // points two-thirds of attacking bots at solid wall instead of a
-    // gate or the flag itself — and goal() keeps recomputing that same
-    // offset point every frame, so a bot stuck on it never moves off,
-    // just digs at whatever's in front of it indefinitely. Full offset
-    // stays in beyond ~35 units out (still spread crossing the field);
-    // zero within 15 (already converged well before the wall's own
-    // 9-unit radius comes into play).
-    const d = Math.hypot(v.x - this.body.pos.x, v.z - this.body.pos.z);
-    const taper = Math.min(1, Math.max(0, (d - 15) / 20));
-    let lane = this.lane;
-    if (this.game.gameMode === 'ctf') {
-      if (this.tacticalRole === 'flank-left') lane = -44;
-      else if (this.tacticalRole === 'flank-right') lane = 44;
-      else if (this.tacticalRole === 'attack') lane = 0;
-    }
-    v.z += lane * taper;
-    return v;
-  }
-
-  // Living non-carrier teammates sorted by id — stable ranks for roles.
-  _rank() {
-    const mates = this.game.bots
-      .filter(b => b.alive && b.team === this.team && !b.carrier)
-      .sort((a, b) => a.id - b.id);
-    return mates.indexOf(this);
-  }
-
-  // Deathmatch has no flag to chase, so hunt the freshest sign of the enemy
-  // (gunfire, kills, sightings — the game's intel feed). No intel? Roam.
-  _huntGoal() {
-    const g = this.game, b = this.body;
-    const spot = g.huntSpot(this.team, b.pos, this.difficulty.hearing);
-    if (spot) {
-      const d = Math.hypot(spot.x - b.pos.x, spot.z - b.pos.z);
-      // Stood on the spot and nobody's here — the trail is cold. Scratch it
-      // off for the whole team so nobody else camps an empty corner.
-      if (d < 9 && !this.target) { g.consumeIntel(this.team, spot, 16); return this._patrolGoal(); }
-      const hunt = new THREE.Vector3(spot.x, g.world.surface(spot.x | 0, spot.z | 0), spot.z);
-      if (this.tacticalRole === 'flank-left') hunt.z -= 12;
-      if (this.tacticalRole === 'flank-right') hunt.z += 12;
-      hunt.z = Math.max(2, Math.min(SZ - 2, hunt.z));
-      return this._laned(hunt);
-    }
-    return this._patrolGoal();
-  }
-
-  // Roam the contested middle band, biased toward the enemy half — a patrol,
-  // not a camp. Fresh waypoint on arrival or on a timeout.
-  _patrolGoal() {
-    const b = this.body, w = this.game.world, envelope = mapEnvelope(this.game.mapIndex);
-    const arrived = this.patrol && Math.hypot(this.patrol.x - b.pos.x, this.patrol.z - b.pos.z) < 7;
-    if (!this.patrol || arrived || this.patrolT <= 0) {
-      this.patrolT = 18;
-      for (let tries = 0; tries < 8; tries++) {
-        const advance = 0.24 + Math.random() * 0.52;
-        const px = this.heading > 0
-          ? envelope.minX + advance * (envelope.maxX - envelope.minX)
-          : envelope.maxX - advance * (envelope.maxX - envelope.minX);
-        const flank = (Math.random() - 0.5) * (envelope.maxZ - envelope.minZ) * 0.72;
-        const taper = Math.min(1, Math.abs(px - (envelope.minX + envelope.maxX) / 2)
-          / ((envelope.maxX - envelope.minX) * 0.32));
-        const p = clampToEnvelope(envelope, px,
-          (envelope.minZ + envelope.maxZ) / 2 + flank * (1 - taper * 0.6), 5);
-        const pz = p.z;
-        if (w.surface(px | 0, pz | 0) < SEA) continue; // don't patrol the sea
-        this.patrol = new THREE.Vector3(px, w.surface(px | 0, pz | 0), pz);
-        break;
-      }
-      this.patrol ??= new THREE.Vector3(SX / 2, w.surface(SX / 2, SZ / 2), SZ / 2);
-    }
-    return this._laned(this.patrol);
-  }
-
-  // Team-colored masonry overhead is a structure somebody built — and the
-  // collapse system can drop it. Don't camp under what you can't vouch for.
-  _overhead() {
-    const w = this.game.world, b = this.body;
-    const fx = Math.floor(b.pos.x), fy = Math.floor(b.pos.y), fz = Math.floor(b.pos.z);
-    for (let dy = 3; dy <= 6; dy++) {
-      const v = w.get(fx, fy + dy, fz);
-      if (v === BLOCK.BLUE || v === BLOCK.GREEN) return true;
-    }
-    return false;
-  }
-
-  _orderGoal() {
-    const order = this.game.activeBotOrder?.(this.team);
-    if (!order || !order.responders?.includes(this.id)
-        || this.carrier || ['recover', 'escort'].includes(this.tacticalRole)) {
-      this.orderId = null;
-      return null;
-    }
-    this.orderId = order.id;
-    return new THREE.Vector3(order.x,
-      this.game.world.surface(Math.floor(order.x), Math.floor(order.z)), order.z);
-  }
-
-  goal() {
-    const g = this.game;
-    this.responding = false;
-    if (this.carrier) return g.standOf(this.team);                   // run it home
-    const own = g.flags?.[this.team];
-    // Flag recovery outranks a voluntary squad order. The director assigns
-    // only the closest pair, so the rest of the squad can still obey humans.
-    if (own?.state === 'carried' || own?.state === 'dropped') {
-      const emergency = own.state === 'dropped' ? own.pos
-        : g.huntSpot(this.team, this.body.pos, this.difficulty.hearing)
-          ?? g.standOf(this.team).clone().lerp(g.standOf(g.enemyOf(this.team)), 0.5);
-      if (this.tacticalRole === 'recover' && emergency) {
-        this.responding = true;
-        return new THREE.Vector3(emergency.x,
-          g.world.surface(Math.floor(emergency.x), Math.floor(emergency.z)), emergency.z);
-      }
-    }
-    const ordered = this._orderGoal();
-    if (ordered) return ordered;
-    if (g.hill) {
-      // Occupy a stable post INSIDE the hill instead of sending ten bodies to
-      // the exact center coordinate. This reduces bunching and makes control
-      // look like a squad holding ground rather than one tangled voxel stack.
-      const post = hillPost({ x: g.hill.pos.x, z: g.hill.pos.z, r: g.hill.r },
-        this.id, this.team);
-      if (post) {
-        // Flankers enter on opposite shoulders before converging; anchors and
-        // contesters remain physically inside the scoring radius.
-        if (this.tacticalRole === 'flank-left') post.z -= Math.min(4, g.hill.r * 0.35);
-        if (this.tacticalRole === 'flank-right') post.z += Math.min(4, g.hill.r * 0.35);
-        return new THREE.Vector3(post.x,
-          g.world.surface(Math.floor(post.x), Math.floor(post.z)), post.z);
-      }
-      return g.hill.pos;
-    }
-    if (!own) { this.role = 'attack'; return this._huntGoal(); }     // deathmatch: hunt
-    // The host-side director assigns stable, mode-aware roles. The rank-based
-    // fallback keeps old migrated bot rows safe until the first director tick.
-    const rank = this._rank();
-    this.role = this.tacticalRole
-      ?? (rank === 0 ? 'defend' : rank === 1 ? 'mid' : 'attack');
-    if (this.role === 'escort') {
-      const carrier = g.entities().find(e => e !== this && e.alive
-        && e.team === this.team && e.carrier);
-      if (carrier) {
-        const home = g.standOf(this.team);
-        const toward = home.clone().sub(carrier.body.pos).setY(0);
-        if (toward.lengthSq() > 0.01) toward.normalize();
-        const side = new THREE.Vector3(-toward.z, 0, toward.x)
-          .multiplyScalar(this.id % 2 ? 2.5 : -2.5);
-        return carrier.body.pos.clone().addScaledVector(toward, 4).add(side);
-      }
-    }
-    if (this.role === 'defend') return this._laned(g.standOf(this.team));
-    if (this.role === 'mid')
-      return this._laned(new THREE.Vector3(SX / 2, g.world.surface(SX / 2, SZ / 2), SZ / 2));
-    const enemyFlag = g.flags[g.enemyOf(this.team)];
-    if (enemyFlag.state === 'dropped') return enemyFlag.pos;         // grab the loose flag
-    return this._laned(g.standOf(g.enemyOf(this.team)));             // storm their base
-  }
+  // Navigation and combat helpers live in their own modules. Keeping these
+  // calls at the orchestration boundary makes update()'s sequencing explicit.
+  goal() { return botGoal(this, NAV_CONTEXT); }
 
   update(dt) {
     if (!this.alive) { // corpse: tumble where it fell, then vanish
@@ -331,7 +171,7 @@ export class Bot {
     const thinks = !g._botThinkSet || g._botThinkSet.has(this.id);
     if (thinks) {
       const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      const seen = this._acquire(profile);
+      const seen = acquireTarget(this, profile, COMBAT_CONTEXT);
       if (seen !== this.target || (seen && !this.targetVisible)) {
         this.aimT = 0;    // fresh eyes: reaction time
         this._reactJitter = 0.8 + Math.random() * 0.5;
@@ -346,7 +186,7 @@ export class Bot {
         this.memorySeenAt = g.time;
         this.memoryT = this.difficulty.memory * this.skill;
       } else this.targetVisible = false;
-      this.cachedGoal = this.goal().clone();
+      this.cachedGoal = botGoal(this, NAV_CONTEXT).clone();
       const cadenceJitter = 0.9 + (this.id % 3) * 0.1;
       this.nextThink = g.time + this.difficulty.thinkInterval * cadenceJitter;
       const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - started;
@@ -516,8 +356,8 @@ export class Bot {
       // not abandoning it to flee blind. The cover-building right after
       // still helps a carrier survive the run, so that part stays.
       if (!this.carrier) dir.set(-toFoe.x - this.heading * 0.5, 0, -toFoe.z).normalize();
-      if (b.onGround && this.blocks >= 3 && this.buildT <= 0 && !this._hasCover(toFoe))
-        this._build(toFoe);
+      if (b.onGround && this.blocks >= 3 && this.buildT <= 0 && !hasCover(this, toFoe))
+        buildCover(this, toFoe, COMBAT_CONTEXT);
     }
 
     // --- combat engineering: caught in the open at range, throw up a
@@ -529,14 +369,14 @@ export class Bot {
     if (this.gunClass !== 1 && this.target && !this.carrier && !this.responding && toFoe &&
         b.onGround && !b.inWater && this.blocks >= 3 && this.buildT <= 0 &&
         this.coverT <= 0) {
-      if (foeD > 8 && foeD < 42 && !this._hasCover(toFoe)) this._build(toFoe);
+      if (foeD > 8 && foeD < 42 && !hasCover(this, toFoe)) buildCover(this, toFoe, COMBAT_CONTEXT);
     }
     // A defender with quiet hands fortifies: wall off the enemy approach to
     // the flag stand, one knee wall at a time.
     else if (this.role === 'defend' && !this.target && this.blocks >= 6 &&
         this.buildT <= 0 && b.onGround && !b.inWater) {
       if (b.pos.distanceTo(g.standOf(this.team)) < 12) {
-        this._build(new THREE.Vector3(this.heading, 0, 0));
+        buildCover(this, new THREE.Vector3(this.heading, 0, 0), COMBAT_CONTEXT);
         this.coverT = 0; // fortifying, not fighting — keep patrolling
       }
     }
@@ -544,7 +384,7 @@ export class Bot {
     // team-colored masonry overhead, which the collapse system can drop on us.
     // A retreating bot never holds: the wall it just threw up is for falling
     // back BEHIND, not for standing next to.
-    const coverHold = this.coverT > 0 && this.target && this.retreatT <= 0 && !this._overhead();
+    const coverHold = this.coverT > 0 && this.target && this.retreatT <= 0 && !hasOverhead(this, NAV_CONTEXT);
     if (coverHold) dir.multiplyScalar(0.15);
     // Holding a ranged firing line: plant the feet while crouch-firing.
     const holdingLine = this.target && !this.carrier && foeD > profile.hold
@@ -587,7 +427,7 @@ export class Bot {
     }
     if (routeEligible && this.routeT > 0) dir.copy(this.route);
     if (routeEligible && (thinks || navChanged || this.routeT <= 0)) {
-      const planned = this._planLocalRoute(dir, fy);
+      const planned = planLocalRoute(this, dir, fy, NAV_CONTEXT);
       if (planned) {
         dir.copy(planned);
         this.route.copy(planned);
@@ -634,14 +474,14 @@ export class Bot {
       this.lastDig = g.time;
       const uphill = dest.y - b.pos.y > 1.5;
       if (lo && uphill) {
-        this._digV(tx, fy + 1, tz); this._digV(tx, fy + 2, tz);  // the ledge
-        this._digV(tx, fy + 3, tz);                              // its headroom
+        digVoxel(this, tx, fy + 1, tz); digVoxel(this, tx, fy + 2, tz);  // the ledge
+        digVoxel(this, tx, fy + 3, tz);                              // its headroom
         // The block above our own head: an overhang would guillotine the hop.
-        this._digV(Math.floor(b.pos.x), fy + 2, Math.floor(b.pos.z));
+        digVoxel(this, Math.floor(b.pos.x), fy + 2, Math.floor(b.pos.z));
         b.jump();
         if (b.inWater) b.vel.y = 6; // swim-hop needs extra lift to crest the lip
       } else {
-        this._digV(tx, fy, tz); this._digV(tx, fy + 1, tz);      // wall face or lip
+        digVoxel(this, tx, fy, tz); digVoxel(this, tx, fy + 1, tz);      // wall face or lip
       }
     }
     const digging = g.time - this.lastDig < 0.9;
@@ -797,15 +637,8 @@ export class Bot {
       const spec = TOOLS[this.gunClass];
       this.reloading -= dt;
       const progress = 1 - Math.max(0, this.reloading) / spec.reload;
-      if (this.reloadStage === 1 && progress >= 0.24) {
-        this.reloadStage = 2; sfx.at('reloadEject', b.pos, spec.key);
-      }
-      if (this.reloadStage === 2 && progress >= 0.62) {
-        this.reloadStage = 3; sfx.at('reloadInsert', b.pos, spec.key);
-      }
-      if (this.reloadStage === 3 && progress >= 0.86) {
-        this.reloadStage = 4; sfx.at('reloadChamber', b.pos, spec.key);
-      }
+      const cue = nextReloadCue(this.reloadStage, progress);
+      if (cue) { this.reloadStage = cue.stage; sfx.at(cue.name, b.pos, spec.key); }
       if (this.reloading <= 0) { this.ammo = spec.mag; this.reloadStage = 0; }
     } else if (!this.target && this.ammo < TOOLS[this.gunClass].mag * 0.55) {
       // Top off during a lull instead of discovering an almost-empty magazine
@@ -888,65 +721,6 @@ export class Bot {
     animateSoldier(this.parts, Math.hypot(b.vel.x, b.vel.z), g.time + this.name.length);
   }
 
-  _planLocalRoute(direct, fy) {
-    const w = this.game.world, b = this.body;
-    const side = this.id % 2 ? -1 : 1;
-    const degrees = [0, 30 * side, -30 * side, 60 * side, -60 * side,
-      90 * side, -90 * side];
-    const candidates = [];
-    for (const deg of degrees) {
-      const angle = deg * Math.PI / 180;
-      const x = direct.x * Math.cos(angle) - direct.z * Math.sin(angle);
-      const z = direct.x * Math.sin(angle) + direct.z * Math.cos(angle);
-      let clear = 0, maxStep = 0, maxDrop = 0;
-      for (const reach of [1.1, 2.1, 3.1, 4.1]) {
-        const px = Math.floor(b.pos.x + x * reach);
-        const pz = Math.floor(b.pos.z + z * reach);
-        // A one-high obstacle with two cells above it is a step; a two-high
-        // face is a wall. Open cells need support no more than two down or the
-        // route is a fall/bridge decision handled by the existing rim logic.
-        if (w.solid(px, fy, pz)) {
-          if (w.solid(px, fy + 1, pz) || w.solid(px, fy + 2, pz)) break;
-          maxStep = Math.max(maxStep, 1);
-        } else {
-          if (w.solid(px, fy + 1, pz)) break;
-          let drop = 0;
-          for (let y = fy - 1; y >= fy - 3 && !w.solid(px, y, pz); y--) drop++;
-          maxDrop = Math.max(maxDrop, drop);
-          if (drop > 2) break;
-        }
-        clear++;
-      }
-      candidates.push({ angle, x, z, clear, maxStep, maxDrop,
-        progress: Math.cos(angle) * clear });
-    }
-    const best = chooseLocalRoute(candidates);
-    return best ? new THREE.Vector3(best.x, 0, best.z).normalize() : null;
-  }
-
-  _acquire(profile = CLASS_PROFILE[this.gunClass]) {
-    // The flag thief gets no psychic outline: he is seen by the same eyes as
-    // everyone else — in front of you, or close enough to hear.
-    const to = new THREE.Vector3();
-    let best = null, bestScore = Infinity;
-    for (const f of this.game.foesOf(this.team)) {
-      if (!f.alive) continue;
-      const d = this.body.pos.distanceTo(f.body.pos);
-      if (d >= profile.vision) continue;
-      if (f !== this.target) { // a target already being tracked stays tracked
-        to.subVectors(f.body.pos, this.body.pos).setY(0).normalize();
-        if (d > 7 && this.face.dot(to) < 0.26) continue; // outside the ~150° cone
-      }
-      // Distance is the baseline, but a flag carrier or someone already hurt
-      // is worth reaching past a merely-nearer foe for — press an advantage
-      // instead of restarting the fight on whoever's a step closer.
-      const score = botTargetScore(d, f.health, f.carrier, f === this.target);
-      if (score >= bestScore) continue;
-      if (this.game.losClear(this.body.eye(), f.body.eye())) { best = f; bestScore = score; }
-    }
-    return best;
-  }
-
   // Shot in the back? The impact supplies a direction, not wall vision.
   alert(from) {
     if (from?.alive && from.team !== this.team) {
@@ -958,43 +732,6 @@ export class Bot {
       this.memoryT = Math.min(1.5, this.difficulty.memory);
       this.aimT = 0;
       this.nextThink = Math.min(this.nextThink, this.game.time + 0.08);
-    }
-  }
-
-  // Shovel a single voxel (debris, edit log, network sync all handled inside).
-  _digV(x, y, z) {
-    if (this.game.world.solid(x, y, z)) this.game.digVoxel(this, x, y, z);
-  }
-
-  // Knee-high cover already standing between us and the foe?
-  _hasCover(toFoe) {
-    const w = this.game.world, b = this.body, fy = Math.floor(b.pos.y);
-    for (const reach of [1.2, 2.2, 3.2]) {
-      const px = Math.floor(b.pos.x + toFoe.x * reach);
-      const pz = Math.floor(b.pos.z + toFoe.z * reach);
-      if (w.solid(px, fy, pz)) return true;
-    }
-    return false;
-  }
-
-  // A three-wide knee wall two paces toward the threat: tall enough to hide a
-  // crouch, low enough to shoot over standing. Follows the ground one step
-  // down so walls on a downhill slope don't float.
-  _build(toFoe) {
-    const b = this.body, fy = Math.floor(b.pos.y), w = this.game.world;
-    const perp = new THREE.Vector3(-toFoe.z, 0, toFoe.x);
-    const placed = [];
-    for (const off of [-1, 0, 1]) {
-      const cx = Math.floor(b.pos.x + toFoe.x * 2.2 + perp.x * off);
-      const cz = Math.floor(b.pos.z + toFoe.z * 2.2 + perp.z * off);
-      const gy = w.solid(cx, fy - 1, cz) ? fy : w.solid(cx, fy - 2, cz) ? fy - 1 : null;
-      if (gy !== null && this.game.tryBuild(this, cx, gy, cz)) placed.push([cx, cz]);
-    }
-    if (placed.length) {
-      this.buildT = 9; this.coverT = 6;
-      const now = this.game.time;
-      this._cover = this._cover.filter(c => now - c.t < 8)
-        .concat(placed.map(([x, z]) => ({ x, z, t: now })));
     }
   }
 

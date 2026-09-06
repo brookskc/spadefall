@@ -154,6 +154,12 @@
   .setting .opt { opacity:.5; cursor:pointer; }
   .setting .opt:hover { opacity:.8; }
   .setting .opt.picked { opacity:1; color:#ffd97a; }
+  button.opt { appearance:none; border:0; background:transparent; font:inherit; padding:0; color:inherit; }
+  :focus-visible { outline:2px solid #ffd97a; outline-offset:3px; }
+  #controlsBindings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; margin-top:10px; }
+  .bind { font:inherit; color:inherit; background:rgba(0,0,0,.2); border:1px solid rgba(255,255,255,.25); padding:5px; cursor:pointer; }
+  body[data-objective-contrast="high"] #objective { color:#fff; background:#000; outline:3px solid #ffd97a; padding:6px 10px; font-weight:800; }
+  body[data-damage-contrast="high"] #dmgDir .chevron { opacity:1!important; filter:drop-shadow(0 0 2px #000) drop-shadow(0 0 3px #fff); }
   #roomcode { display:none; margin:8px 0 2px; font-size:11px; letter-spacing:2px;
     opacity:.68; }
   #roomcode b { color:#ffd97a; letter-spacing:4px; }
@@ -501,6 +507,11 @@
     75%  { opacity:1; }
     100% { opacity:0; }
   }
+  #soundCaption { position:fixed; left:50%; bottom:150px; transform:translateX(-50%);
+    padding:5px 9px; color:#fff; background:rgba(0,0,0,.76); border:1px solid rgba(255,255,255,.55);
+    font-size:11px; font-weight:800; letter-spacing:1.5px; opacity:0; pointer-events:none; }
+  #soundCaption.pop { animation:captionpop 1.15s steps(4,end); }
+  @keyframes captionpop { 0%,72%{opacity:1} 100%{opacity:0} }
 
   /* Airstrike targeting: shown while piloting the overhead camera. The
      camera always looks straight down (see Player#_updatePiloting), so
@@ -723,6 +734,7 @@
     <div id="dmgDir"><div class="chevron"></div></div>
     <div id="dangerCue"><div id="dangerText">FRAG</div><div class="fragArrow"></div></div>
     <div id="killcallout"></div>
+    <div id="soundCaption" role="status" aria-live="polite"></div>
     <div id="airstrikeHud"><div class="reticle"></div><div class="label">airstrike — click to confirm</div></div>
     <div id="airstrikeReady">airstrike ready — [F]</div>
     <div id="objective"><span class="arrow"></span><span class="label"></span></div>
@@ -872,6 +884,7 @@
       <div class="setting">
         <div class="lbl">graphics</div>
         <div class="opts" id="gfxOpts">
+          <span class="opt" data-gfx="auto">AUTO</span>
           <span class="opt" data-gfx="low">LOW</span>
           <span class="opt" data-gfx="medium">MEDIUM</span>
           <span class="opt" data-gfx="high">HIGH</span>
@@ -902,7 +915,28 @@
       <div class="setting"><div class="lbl">master volume</div><div class="opts" id="masterVolumeOpts">
         <span class="opt" data-value="0">0</span><span class="opt" data-value="50">50</span><span class="opt" data-value="75">75</span><span class="opt" data-value="100">100</span>
       </div></div>
+      <div class="setting"><div class="lbl">effects volume</div><div class="opts" id="effectsVolumeOpts">
+        <button class="opt" type="button" data-value="0">0</button><button class="opt" type="button" data-value="50">50</button><button class="opt" type="button" data-value="75">75</button><button class="opt" type="button" data-value="100">100</button>
+      </div></div>
+      <div class="setting"><div class="lbl">ambience volume</div><div class="opts" id="ambienceVolumeOpts">
+        <button class="opt" type="button" data-value="0">0</button><button class="opt" type="button" data-value="50">50</button><button class="opt" type="button" data-value="75">75</button><button class="opt" type="button" data-value="100">100</button>
+      </div></div>
+      <div class="setting"><div class="lbl">ui volume</div><div class="opts" id="uiVolumeOpts">
+        <button class="opt" type="button" data-value="0">0</button><button class="opt" type="button" data-value="50">50</button><button class="opt" type="button" data-value="75">75</button><button class="opt" type="button" data-value="100">100</button>
+      </div></div>
+      <div class="setting"><div class="lbl">sound captions</div><div class="opts" id="captionOpts">
+        <button class="opt" type="button" data-value="off">OFF</button><button class="opt" type="button" data-value="critical">CRITICAL</button><button class="opt" type="button" data-value="full">FULL</button>
+      </div></div>
+      <div class="setting"><div class="lbl">crouch</div><div class="opts" id="crouchModeOpts">
+        <button class="opt" type="button" data-value="hold">HOLD</button><button class="opt" type="button" data-value="toggle">TOGGLE</button>
+      </div></div>
+      <div class="setting"><div class="lbl">aim</div><div class="opts" id="aimModeOpts">
+        <button class="opt" type="button" data-value="hold">HOLD</button><button class="opt" type="button" data-value="toggle">TOGGLE</button>
+      </div></div>
+      <div class="setting"><div class="lbl">objective contrast</div><div class="opts" id="objectiveContrastOpts"><button class="opt" type="button" data-value="standard">STANDARD</button><button class="opt" type="button" data-value="high">HIGH</button></div></div>
+      <div class="setting"><div class="lbl">damage contrast</div><div class="opts" id="damageContrastOpts"><button class="opt" type="button" data-value="standard">STANDARD</button><button class="opt" type="button" data-value="high">HIGH</button></div></div>
       </div>
+      <div class="lbl">controls</div><div id="controlsBindings" aria-label="Rebind controls"></div>
       <div id="gfxReloadNote">antialiasing changes take effect next launch</div>
     </details>
   </div>
@@ -912,11 +946,11 @@
     <div id="browsestatus">scanning…</div>
     <div id="browselist"></div>
     <div class="bfoot">
-      <span class="plink disabled" id="browsePrev">PREVIOUS</span>
+      <button class="plink disabled" type="button" id="browsePrev">PREVIOUS</button>
       <span id="browsePage">1 / 8</span>
-      <span class="plink" id="browseNext">NEXT</span>
-      <span class="plink" id="browseRefresh">RESCAN</span>
-      <span class="plink" id="browseBack">BACK</span>
+      <button class="plink" type="button" id="browseNext">NEXT</button>
+      <button class="plink" type="button" id="browseRefresh">RESCAN</button>
+      <button class="plink" type="button" id="browseBack">BACK</button>
     </div>
   </div>
 

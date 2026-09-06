@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "checkJs": true, "allowJs": true, "noEmit": true, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "skipLibCheck": true },
+  "include": ["src/audio.js", "src/captions.js", "src/controls.js", "src/settings.js", "src/reload-timeline.js", "src/hud.js", "src/spawn-controller.js", "src/objectives.js", "src/match-lifecycle.js", "src/bot-navigation.js", "src/bot-combat.js", "src/performance-auto.js", "src/telemetry.js", "worker/src/index.js"]
+}

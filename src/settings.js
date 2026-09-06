@@ -39,7 +39,41 @@ export function getGfxLevel() {
 
 export function setGfxLevel(level) {
   if (!(level in GFX_PRESETS)) return;
-  try { localStorage.setItem('tos.gfx', level); } catch { /* best effort */ }
+  try {
+    localStorage.setItem('tos.gfx', level);
+    localStorage.setItem('tos.gfxMode', 'manual');
+  } catch { /* best effort */ }
+}
+
+export function getGfxMode() {
+  try {
+    const explicit = localStorage.getItem('tos.gfxMode');
+    if (explicit === 'auto' || explicit === 'manual') return explicit;
+    return localStorage.getItem('tos.gfx') ? 'manual' : 'auto';
+  } catch { return 'auto'; }
+}
+
+export function requestAutomaticGfx() {
+  try {
+    localStorage.setItem('tos.gfxMode', 'auto');
+    localStorage.removeItem('tos.gfxBenchmark');
+  } catch { /* best effort */ }
+}
+
+export function automaticGfxNeeded(version) {
+  if (getGfxMode() !== 'auto') return false;
+  try { return localStorage.getItem('tos.gfxBenchmark') !== String(version); }
+  catch { return true; }
+}
+
+export function saveAutomaticGfxLevel(level, version) {
+  if (!(level in GFX_PRESETS)) return false;
+  try {
+    localStorage.setItem('tos.gfx', level);
+    localStorage.setItem('tos.gfxMode', 'auto');
+    localStorage.setItem('tos.gfxBenchmark', String(version));
+  } catch { /* best effort */ }
+  return true;
 }
 
 export function gfxPreset(level = getGfxLevel()) {
@@ -72,6 +106,10 @@ export const MOTION_LEVELS = ['full', 'reduced'];
 export const COLOR_MODES = ['standard', 'accessible'];
 export const MOUSE_SENSITIVITIES = ['60', '80', '100', '120', '140'];
 export const MASTER_VOLUMES = ['0', '50', '75', '100'];
+export const AUDIO_VOLUMES = MASTER_VOLUMES;
+export const CAPTION_MODES = ['off', 'critical', 'full'];
+export const TOGGLE_MODES = ['hold', 'toggle'];
+export const CONTRAST_MODES = ['standard', 'high'];
 const TEAM_PALETTES = {
   standard: { green: 0x4a9e4a, blue: 0x4a6cd4 },
   // Okabe-Ito inspired orange/sky pairing: distinct under the common red/
@@ -92,6 +130,22 @@ export const getMouseSensitivity = () => Number(choice('mouseSensitivity', MOUSE
 export const setMouseSensitivity = value => saveChoice('mouseSensitivity', value, MOUSE_SENSITIVITIES);
 export const getMasterVolume = () => Number(choice('masterVolume', MASTER_VOLUMES, '100')) / 100;
 export const setMasterVolume = value => saveChoice('masterVolume', value, MASTER_VOLUMES);
+export const getEffectsVolume = () => Number(choice('effectsVolume', AUDIO_VOLUMES, '100')) / 100;
+export const setEffectsVolume = value => saveChoice('effectsVolume', value, AUDIO_VOLUMES);
+export const getAmbienceVolume = () => Number(choice('ambienceVolume', AUDIO_VOLUMES, '100')) / 100;
+export const setAmbienceVolume = value => saveChoice('ambienceVolume', value, AUDIO_VOLUMES);
+export const getUiVolume = () => Number(choice('uiVolume', AUDIO_VOLUMES, '100')) / 100;
+export const setUiVolume = value => saveChoice('uiVolume', value, AUDIO_VOLUMES);
+export const getCaptionMode = () => choice('captions', CAPTION_MODES, 'off');
+export const setCaptionMode = value => saveChoice('captions', value, CAPTION_MODES);
+export const getCrouchMode = () => choice('crouchMode', TOGGLE_MODES, 'hold');
+export const setCrouchMode = value => saveChoice('crouchMode', value, TOGGLE_MODES);
+export const getAimMode = () => choice('aimMode', TOGGLE_MODES, 'hold');
+export const setAimMode = value => saveChoice('aimMode', value, TOGGLE_MODES);
+export const getObjectiveContrast = () => choice('objectiveContrast', CONTRAST_MODES, 'standard');
+export const setObjectiveContrast = value => saveChoice('objectiveContrast', value, CONTRAST_MODES);
+export const getDamageContrast = () => choice('damageContrast', CONTRAST_MODES, 'standard');
+export const setDamageContrast = value => saveChoice('damageContrast', value, CONTRAST_MODES);
 export function getMuted() {
   try { return localStorage.getItem('tos.muted') === 'on'; } catch { return false; }
 }

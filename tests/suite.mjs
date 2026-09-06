@@ -25,7 +25,8 @@ import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } f
 import { allowInbound, claimErrorKind, claimPeerChannel, Net, peerOptions, primeIce,
   probeErrorKind, PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce,
   shouldSend, slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
-import { handleRequest as handleTurnRequest, originAllowed } from '../worker/src/index.js';
+import { handleRequest as handleTurnRequest, originAllowed,
+  validDiagnosticsEnvelope } from '../worker/src/index.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
 import { actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -34,8 +35,11 @@ import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
 import { modeScoreLimit } from '../src/match-modes.js';
 import { PresentationSchedule } from '../src/presentation.js';
-import { reloadPitch, sfx, spatialAudioMix, spatialVerticality,
+import { SOUND_META, reloadPitch, sfx, spatialAudioMix, spatialVerticality,
   voxelSurface } from '../src/audio.js';
+import { DEFAULT_BINDINGS, bindingConflicts, normalizeBindings } from '../src/controls.js';
+import { captionFromMix } from '../src/captions.js';
+import { nextReloadCue } from '../src/reload-timeline.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
@@ -73,6 +77,12 @@ import { autoSprint, contactCue, ctfEscalation, intensityCue, nextBotDifficulty,
 import { MAX_REWIND_SECONDS, observeSnapshotRtt, recordPose,
   rewindSecondsForRtt, samplePose } from '../src/lag-compensation.js';
 import { createResumeToken, reservationMatches, validResumeToken } from '../src/reconnect.js';
+import { FirstSessionGraphicsBenchmark, automaticGraphicsLevel } from '../src/performance-auto.js';
+import { ProductionTelemetry, errorFingerprint, sanitizeTelemetryEvent,
+  telemetryEnvelope } from '../src/telemetry.js';
+import { chooseSpawn } from '../src/spawn-controller.js';
+import { ctfFlagInteraction } from '../src/objectives.js';
+import { advanceMatchClock } from '../src/match-lifecycle.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -491,7 +501,17 @@ function hostileInputTests() {
 
 // ---------------------------------------------------------------------------
 function audioPaletteTests() {
-  group('audio: voxel palette and gameplay coverage');
+  group('input, captions, and voxel audio');
+  const defaults = normalizeBindings();
+  ok('controls preserve default crouch bindings', defaults.crouch.includes('ControlLeft'));
+  ok('controls normalize malformed binding storage', normalizeBindings({ aim: ['Mouse2', 9] }).aim.length === 1);
+  ok('controls report binding conflicts', bindingConflicts(DEFAULT_BINDINGS, 'aim', 'KeyR').includes('reload'));
+  const audible = spatialAudioMix('rifle', { x: 8, y: 1, z: 0 }, { x: 0, y: 1, z: 0, rx: 1, rz: 0 });
+  ok('caption uses an audible final mix', captionFromMix('rifle', audible, 'full', 100)?.text.includes('RIGHT'));
+  ok('caption suppresses unaudible and duplicate events', !captionFromMix('rifle', null, 'full', 100)
+    && !captionFromMix('rifle', audible, 'full', 200, { name: 'rifle', at: 0 }));
+  ok('reload timeline advances shared authored cue stages', nextReloadCue(1, .24)?.name === 'reloadEject'
+    && nextReloadCue(2, .62)?.name === 'reloadInsert' && nextReloadCue(3, .86)?.name === 'reloadChamber');
   const required = ['rifle', 'smg', 'sniper', 'reloadStart', 'reloadEject',
     'reloadInsert', 'reloadChamber', 'swing', 'dig', 'spadeHit', 'step',
     'drone', 'missileLaunch', 'missile', 'explosion', 'airstrikeImpact'];
@@ -517,6 +537,9 @@ function audioPaletteTests() {
     spatialAudioMix('step', { x: 23, y: 2, z: 0 }, ear) !== null
       && spatialAudioMix('step', { x: 25, y: 2, z: 0 }, ear) === null
       && spatialAudioMix('rifle', { x: 25, y: 2, z: 0 }, ear) !== null);
+  ok('combat confirmations and objectives use the UI bus and survive voice pressure',
+    ['hit', 'headshot', 'kill', 'capture', 'danger'].every(name =>
+      SOUND_META[name].category === 'ui' && SOUND_META[name].priority === 3));
 }
 
 // ---------------------------------------------------------------------------
@@ -2245,6 +2268,69 @@ async function iceConfigTests() {
       .every(t => claimErrorKind(t) === 'down'));
 }
 
+function productionReadinessTests() {
+  group('automatic graphics selection and anonymous field diagnostics');
+  ok('healthy representative hardware selects High while overloaded hardware selects Medium',
+    automaticGraphicsLevel({ sampledFrames: 180, frameP95Ms: 16.7,
+      longFrameRate: 0, drawCalls: 400, triangles: 400000 }) === 'high'
+      && automaticGraphicsLevel({ sampledFrames: 180, frameP95Ms: 34,
+        longFrameRate: .1, drawCalls: 900, triangles: 1e6 }) === 'medium');
+  ok('short samples cannot permanently select a graphics tier',
+    automaticGraphicsLevel({ sampledFrames: 119, frameP95Ms: 1,
+      longFrameRate: 0, drawCalls: 1, triangles: 1 }) === null);
+  const benchmark = new FirstSessionGraphicsBenchmark({ warmup: 2, samples: 120 });
+  benchmark.frame(200, { eligible: false, drawCalls: 5000, triangles: 9e6 });
+  benchmark.frame(100, { drawCalls: 5000, triangles: 9e6 });
+  benchmark.frame(100, { drawCalls: 5000, triangles: 9e6 });
+  let result = null;
+  for (let i = 0; i < 120; i++) result = benchmark.frame(16,
+    { drawCalls: 300, triangles: 250000 });
+  ok('background frames are ignored and warmup frames do not poison the benchmark',
+    result?.level === 'high' && result.sample.sampledFrames === 120
+      && result.sample.drawCalls === 300);
+
+  const fingerprint = errorFingerprint(new Error('failed at https://secret.example/room/ABC:12:9'));
+  const crash = sanitizeTelemetryEvent('crash', { kind: 'error', fingerprint,
+    callsign: 'must-not-survive' });
+  ok('client diagnostics retain only a fixed anonymous schema',
+    /^[a-f0-9]{8}$/.test(fingerprint) && crash.callsign === undefined
+      && sanitizeTelemetryEvent('migration', { outcome: 'bogus', reason: 'other' }) === null);
+  const envelope = telemetryEnvelope('p14', [crash, {
+    type: 'match_abandon', reason: 'pagehide', seconds: 91, room: 'secret',
+  }]);
+  ok('telemetry buckets elapsed time and passes the independent edge schema',
+    envelope.events[1].time === 1 && envelope.events[1].room === undefined
+      && validDiagnosticsEnvelope(envelope));
+  const transport = [];
+  const telemetry = new ProductionTelemetry({ build: 'p14', sample: true,
+    fetcher: async (...args) => { transport.push(args); return { ok: true }; } });
+  telemetry.record('frame_budget', { tier: 'medium', result: 'fail', frame: 3, long: 2 });
+  ok('a bounded payload can flush without adding a session or player identifier',
+    telemetry.flush({ beacon: null }) && transport.length === 1
+      && !transport[0][1].body.includes('session') && !transport[0][1].body.includes('player'));
+
+  const base = team => `base:${team}`;
+  ok('the extracted spawn policy preserves preference, mode, and safe fallback order',
+    chooseSpawn({ mode: 'ctf', base, ctf: () => 'front', dynamic: () => null },
+      'green') === 'front'
+      && chooseSpawn({ mode: 'tdm', base, ctf: () => null, dynamic: () => null },
+        'blue') === 'base:blue'
+      && chooseSpawn({ mode: 'ctf', base, ctf: () => 'front', dynamic: () => null },
+        'green', 'base') === 'base:green');
+  const distance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+  const entity = { alive: true, carrier: false, body: { pos: { x: 0, z: 0 } } };
+  ok('the extracted CTF controller keeps pickup, return, then capture precedence',
+    ctfFlagInteraction(entity, { state: 'home', home: { x: 0, z: 0 } },
+      { state: 'home', pos: { x: 1, z: 0 } }, (e, p) => distance(e.body.pos, p)) === 'pickup'
+      && ctfFlagInteraction(entity, { state: 'dropped', pos: { x: 1, z: 0 } },
+        { state: 'carried', pos: { x: 9, z: 0 } }, (e, p) => distance(e.body.pos, p)) === 'return');
+  const clock = advanceMatchClock({ over: false, overtime: false, elapsed: 9,
+    remaining: .1 }, .2, () => ({ winner: 'green' }));
+  ok('the extracted lifecycle controller crosses regulation exactly once',
+    clock.elapsed === 9.2 && clock.remaining === 0
+      && clock.event[0] === 'end' && clock.event[1] === 'green');
+}
+
 function combatNetworkContinuityTests() {
   group('latency compensation and reconnect continuity');
   ok('rewind includes interpolation delay and remains hard-capped',
@@ -2327,6 +2413,28 @@ async function turnWorkerTests() {
     limit: async () => { throw new Error('edge binding down'); },
   } }, fetcher);
   ok('a failed edge limiter cannot fail open', limiterDown.status === 503);
+
+  const points = [];
+  const diagnosticsEnv = {
+    DIAGNOSTICS_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    GAME_ANALYTICS: { writeDataPoint: point => points.push(point) },
+  };
+  const diagnosticsBody = telemetryEnvelope('p14', [{ type: 'connection_failure',
+    stage: 'ice', reason: 'timeout', relay: 'unknown' }]);
+  const diagnosticsRequest = body => new Request('https://turn.example/diagnostics', {
+    method: 'POST', headers: { origin: 'https://spadefall.io',
+      'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.5' }, body,
+  });
+  const accepted = await handleTurnRequest(diagnosticsRequest(JSON.stringify(diagnosticsBody)),
+    diagnosticsEnv, fetcher);
+  ok('the diagnostics edge accepts and stores a strict anonymous event',
+    accepted.status === 204 && points.length === 1
+      && points[0].indexes[0] === 'connection_failure');
+  const rejected = await handleTurnRequest(diagnosticsRequest(JSON.stringify({
+    ...diagnosticsBody, player: 'Ada',
+  })), diagnosticsEnv, fetcher);
+  ok('the diagnostics edge rejects identity fields rather than storing them',
+    rejected.status === 400 && points.length === 1);
 }
 
 export async function run() {
@@ -2338,6 +2446,7 @@ export async function run() {
   combatNetworkContinuityTests();
   securityPhaseTests();
   releasePhaseTests();
+  productionReadinessTests();
   audioPaletteTests();
   mapgenTests();
   raycastTests();

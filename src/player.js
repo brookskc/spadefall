@@ -5,6 +5,9 @@ import { sfx } from './audio.js';
 import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, getMouseSensitivity, teamHex } from './settings.js';
+import { getAimMode, getCrouchMode } from './settings.js';
+import { Controls } from './controls.js';
+import { nextReloadCue } from './reload-timeline.js';
 import { resetEnvironmentalState } from './environment.js';
 import { autoSprint } from './combat-flow.js';
 
@@ -86,6 +89,9 @@ export class Player {
     this.yaw = 0; // face the enemy base (+x)
     this.pitch = 0;
     this.keys = {};
+    this.controls = new Controls();
+    this._crouchToggled = false;
+    this._aimToggled = false;
     this._forwardHeld = 0;
     this._spawnPreference = 'front';
     this.mouseDown = [false, false, false];
@@ -202,6 +208,7 @@ export class Player {
           && !e.ctrlKey && !e.metaKey && !e.altKey && !/^F\d{1,2}$/.test(e.code))
         e.preventDefault();
       this.keys[e.code] = true;
+      this.controls.set(e.code, true);
       if (e.repeat) return; // one-shot actions below: only on the initial press
       // TAB scoreboard works while dead too — the redeploy wait is exactly
       // when you want it. preventDefault keeps browser focus in the page —
@@ -212,23 +219,26 @@ export class Player {
       // apart from an actual Esc/alt-tab and re-lock silently instead of
       // pausing the match over a keystroke that only meant to check the
       // score.
-      if (e.code === 'Tab') {
+      if (this.controls.matches('scoreboard', e.code)) {
         e.preventDefault();
         this.game._tabUnlockAt = performance.now();
         this.game.hud.statsShow(this.game);
         return;
       }
+      if (this.controls.matches('crouch', e.code) && getCrouchMode() === 'toggle')
+        this._crouchToggled = !this._crouchToggled;
+      if (this.controls.matches('aim', e.code) && getAimMode() === 'toggle')
+        this._aimToggled = !this._aimToggled;
       if (this.game.over || !this.alive) {
         // Class select while waiting to respawn: 1/2/3 for rifle/smg/
         // sniper. Applied at the moment respawn() actually fires, not
         // immediately — changing your mind mid-wait just changes what
         // you're about to spawn with, not your current (dead) loadout.
-        if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') {
-          const idx = GUN_CLASSES[Number(e.code.slice(-1)) - 1];
-          this.selectClass(idx);
-        }
-        if (!this.game.over && (e.code === 'KeyF' || e.code === 'KeyB')) {
-          const pref = e.code === 'KeyB' ? 'base' : 'front';
+        for (let i = 1; i <= 3; i++)
+          if (this.controls.matches(`tool${i}`, e.code)) this.selectClass(GUN_CLASSES[i - 1]);
+        if (!this.game.over && (this.controls.matches('ability', e.code)
+            || this.controls.matches('spawnBase', e.code))) {
+          const pref = this.controls.matches('spawnBase', e.code) ? 'base' : 'front';
           this._spawnPreference = pref;
           this.game._recordLocalAction(this, pref === 'base' ? 'spawn_base' : 'spawn_front');
           if (this.game.mode === 'client') this.game.net?.send({ t: 'a', k: 'spawnpref', pref });
@@ -237,21 +247,20 @@ export class Player {
         if (this.game.over && e.code === 'Enter') this.game.requestIntermissionReady();
         return;
       }
-      if (e.code >= 'Digit1' && e.code <= 'Digit4')
-        this._selectTool(this._toolSlots()[Number(e.code.slice(-1)) - 1]);
-      if (e.code === 'KeyQ' || e.code === 'KeyE') // cycle back / forward
-        this._cycleTool(e.code === 'KeyE' ? 1 : -1);
+      for (let i = 1; i <= 4; i++) if (this.controls.bindings[`tool${i}`]?.includes(e.code)) this._selectTool(this._toolSlots()[i - 1]);
+      if (this.controls.bindings.previousTool?.includes(e.code) || this.controls.bindings.nextTool?.includes(e.code))
+        this._cycleTool(this.controls.bindings.nextTool?.includes(e.code) ? 1 : -1);
       // A real gun has a mag; spade/block/nade don't — checking for that
       // instead of a hardcoded tool index is what makes adding a gun (the
       // sniper) not require touching this line at all.
-      if (e.code === 'KeyR' && TOOLS[this.tool].mag !== undefined
+      if (this.controls.bindings.reload?.includes(e.code) && TOOLS[this.tool].mag !== undefined
           && this.ammo[this.tool] < TOOLS[this.tool].mag)
         this._reload();
-      if (e.code === 'KeyG' && document.pointerLockElement === dom)
+      if (this.controls.bindings.ping?.includes(e.code) && document.pointerLockElement === dom)
         this.game.requestTeamPing(this);
-      if (e.code === 'Space') { this.slideT = 0; this.body.jump(); } // hop out of a slide
+      if (this.controls.bindings.jump?.includes(e.code)) { this.slideT = 0; this.body.jump(); } // hop out of a slide
       // F opens airstrike targeting once the contribution meter is full.
-      if (e.code === 'KeyF') {
+      if (this.controls.matches('ability', e.code)) {
         if (this._piloting) {
           this._piloting = false;
         } else if (this.game.availableStreak(this) === 'airstrike') {
@@ -263,18 +272,28 @@ export class Player {
     });
     addEventListener('keyup', e => {
       this.keys[e.code] = false;
-      if (e.code === 'Tab') this.game.hud.statsHide();
+      this.controls.set(e.code, false);
+      if (this.controls.matches('scoreboard', e.code)) this.game.hud.statsHide();
     });
     // A click only counts if the pointer was already locked when it landed.
     // The click that re-locks the pointer must never fire the tool: it used
     // to throw a grenade nobody aimed (lock engaged a moment later, the held
     // flag was still set, and the "first" grenade went off on its own).
     dom.addEventListener('mousedown', e => {
-      if (document.pointerLockElement === dom) this.mouseDown[e.button] = true;
+      if (document.pointerLockElement === dom) {
+        this.mouseDown[e.button] = true; this.controls.set(`Mouse${e.button}`, true);
+        if (this.controls.matches('aim', `Mouse${e.button}`) && getAimMode() === 'toggle')
+          this._aimToggled = !this._aimToggled;
+      }
     });
-    addEventListener('mouseup', e => { this.mouseDown[e.button] = false; });
+    addEventListener('mouseup', e => { this.mouseDown[e.button] = false; this.controls.set(`Mouse${e.button}`, false); });
     document.addEventListener('pointerlockchange', () => {
       this.mouseDown = [false, false, false];
+      this.controls.set('Mouse0', false); this.controls.set('Mouse1', false); this.controls.set('Mouse2', false);
+      if (document.pointerLockElement !== dom) {
+        this._aimToggled = false;
+        this._crouchToggled = false;
+      }
     });
     addEventListener('mousemove', e => {
       if (document.pointerLockElement !== dom) return;
@@ -304,6 +323,7 @@ export class Player {
     // your chosen class is always available.
     if (GUN_CLASSES.includes(i) && i !== this.gunClass) { sfx.click(); return; }
     this.tool = i;
+    this._aimToggled = false;
     this.reloading = 0;
     this._reloadStage = 0;
     sfx.click();
@@ -512,13 +532,13 @@ export class Player {
     // slide trigger, and — the one that actually mattered here — a 55%
     // horizontal speed penalty that would have made "hold Ctrl to dive"
     // also quietly cripple your swimming speed the whole time you held it.
-    this.crouched = !b.inWater && !!(this.keys['ControlLeft'] || this.keys['ControlRight']);
+    this.crouched = !b.inWater && (getCrouchMode() === 'toggle' ? this._crouchToggled : this.controls.down('crouch'));
     // Slide: crouch mid-sprint at speed and you skid low — a burst of
     // momentum, barely any steering, no ledge-guard. Jump pops out of it.
     this.slideT = Math.max(0, (this.slideT ?? 0) - dt);
     this.slideCd = Math.max(0, (this.slideCd ?? 0) - dt);
     const hspeed = Math.hypot(b.vel.x, b.vel.z);
-    if (this.crouched && !this._wasCrouched && (this.keys['ShiftLeft'] || this.keys['ShiftRight'])
+    if (this.crouched && !this._wasCrouched && this.controls.down('sprint')
         && b.onGround && hspeed > 6 && this.slideCd <= 0) {
       this.slideT = 0.7; this.slideCd = 1.4;
       const boost = 9 / Math.max(hspeed, 0.01);
@@ -535,12 +555,12 @@ export class Player {
     // Crouch-walking grips the rim: no falling into ravines or off parapets.
     // A slide has no such brakes — skidding off the edge is the whole point.
     b.guard = this.crouched && !sliding;
-    const shift = !!(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    this._forwardHeld = this.keys['KeyW'] ? this._forwardHeld + dt : 0;
+    const shift = this.controls.down('sprint');
+    this._forwardHeld = this.controls.down('moveForward') ? this._forwardHeld + dt : 0;
     // Iron sights: RMB with a gun trades mobility for accuracy.
-    this.aiming = !!((this._scopeQa || this.mouseDown[2]) && TOOLS[this.tool].zoom !== undefined);
-    const sprint = autoSprint({ forward: !!this.keys['KeyW'], strafe: !!(this.keys['KeyA'] || this.keys['KeyD']),
-      back: !!this.keys['KeyS'], aiming: this.aiming, crouched: this.crouched,
+    this.aiming = !!((this._scopeQa || (getAimMode() === 'toggle' ? this._aimToggled : this.controls.down('aim'))) && TOOLS[this.tool].zoom !== undefined);
+    const sprint = autoSprint({ forward: this.controls.down('moveForward'), strafe: this.controls.down('moveLeft') || this.controls.down('moveRight'),
+      back: this.controls.down('moveBack'), aiming: this.aiming, crouched: this.crouched,
       grounded: b.onGround, held: this._forwardHeld, shift }) ? 1.45 : 1;
     const speed = (b.inWater ? 3.2 : 5.4) * sprint * (this.crouched ? 0.45 : 1)
       * (this.aiming ? 0.6 : 1);
@@ -551,10 +571,10 @@ export class Player {
     const f = this._moveForward.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     const r = this._moveRight.set(-f.z, 0, f.x);
     const wish = this._moveWish.set(0, 0, 0);
-    if (this.keys['KeyW']) wish.add(f);
-    if (this.keys['KeyS']) wish.sub(f);
-    if (this.keys['KeyD']) wish.add(r);
-    if (this.keys['KeyA']) wish.sub(r);
+    if (this.controls.down('moveForward')) wish.add(f);
+    if (this.controls.down('moveBack')) wish.sub(f);
+    if (this.controls.down('moveRight')) wish.add(r);
+    if (this.controls.down('moveLeft')) wish.sub(r);
     if (wish.lengthSq() > 0) wish.normalize().multiplyScalar(speed);
     // Snappy but not slippery. A slide overrides steering entirely: momentum
     // and a little ground friction decide where you stop.
@@ -577,8 +597,8 @@ export class Player {
     // applies normally otherwise, so letting go still means a natural,
     // gentle sink, not a sudden stop.
     if (b.inWater) {
-      const swimTarget = this.keys['Space'] ? 3
-        : (this.keys['ControlLeft'] || this.keys['ControlRight']) ? -3
+      const swimTarget = this.controls.down('jump') ? 3
+        : this.controls.down('crouch') ? -3
         : null;
       if (swimTarget !== null) b.vel.y += (swimTarget - b.vel.y) * Math.min(1, dt * 8);
     }
@@ -667,15 +687,8 @@ export class Player {
       const spec = TOOLS[this.tool];
       this.reloading -= dt;
       const progress = 1 - Math.max(0, this.reloading) / spec.reload;
-      if (this._reloadStage === 1 && progress >= 0.24) {
-        this._reloadStage = 2; sfx.reloadEject(spec.key);
-      }
-      if (this._reloadStage === 2 && progress >= 0.62) {
-        this._reloadStage = 3; sfx.reloadInsert(spec.key);
-      }
-      if (this._reloadStage === 3 && progress >= 0.86) {
-        this._reloadStage = 4; sfx.reloadChamber(spec.key);
-      }
+      const cue = nextReloadCue(this._reloadStage, progress);
+      if (cue) { this._reloadStage = cue.stage; sfx[cue.name](spec.key); }
       if (this.reloading <= 0) {
         this.ammo[this.tool] = TOOLS[this.tool].mag;
         this._reloadStage = 0;
@@ -684,10 +697,10 @@ export class Player {
     // The lock gate: a click that lands while the pointer is unlocked (the
     // click that re-locks it) must never fire the tool — it used to throw a
     // grenade nobody aimed.
-    } else if (this.mouseDown[0] && this.cooldown <= 0
+    } else if (this.controls.down('fire') && this.cooldown <= 0
                && document.pointerLockElement === this.dom) {
       const t = TOOLS[this.tool];
-      if (!t.auto) this.mouseDown[0] = false;
+      if (!t.auto) { this.controls.release('fire'); this.mouseDown[0] = false; }
       this.cooldown = t.interval;
       this._useTool();
     }
@@ -712,10 +725,10 @@ export class Player {
   _updatePiloting(dt) {
     const p = this._pilotPos;
     const wish = this._moveWish.set(0, 0, 0);
-    if (this.keys['KeyW']) wish.z -= 1;
-    if (this.keys['KeyS']) wish.z += 1;
-    if (this.keys['KeyD']) wish.x += 1;
-    if (this.keys['KeyA']) wish.x -= 1;
+    if (this.controls.down('moveForward')) wish.z -= 1;
+    if (this.controls.down('moveBack')) wish.z += 1;
+    if (this.controls.down('moveRight')) wish.x += 1;
+    if (this.controls.down('moveLeft')) wish.x -= 1;
     if (wish.lengthSq() > 0) wish.normalize();
     const speed = 40; // faster than the death flycam's 9 — this is a deliberate
                        // "scan the whole map quickly" tool, not a leisurely spectate cam
@@ -726,7 +739,7 @@ export class Player {
     // Confirm on LMB's rising edge only, so a held click doesn't fire on
     // every frame — there's no cooldown/mag system in play here at all,
     // this is a one-shot commit.
-    const firing = !!this.mouseDown[0];
+    const firing = this.controls.down('fire');
     if (firing && !this._pilotFireWas) {
       // Capture the direction the soldier was facing when the strike was
       // committed. The camera is already straight down here, so camera yaw
@@ -767,10 +780,10 @@ export class Player {
     if (this._fallingT < 0) this._fallingT = 0;
     const p = this._pilotPos;
     const wish = this._moveWish.set(0, 0, 0);
-    if (this.keys['KeyW']) wish.z -= 1;
-    if (this.keys['KeyS']) wish.z += 1;
-    if (this.keys['KeyD']) wish.x += 1;
-    if (this.keys['KeyA']) wish.x -= 1;
+    if (this.controls.down('moveForward')) wish.z -= 1;
+    if (this.controls.down('moveBack')) wish.z += 1;
+    if (this.controls.down('moveRight')) wish.x += 1;
+    if (this.controls.down('moveLeft')) wish.x -= 1;
     if (wish.lengthSq() > 0) wish.normalize();
     const steerSpeed = 12; // AIRSTRIKE_STEER_SPEED in game.js — see that constant's comment
     p.x = Math.max(0, Math.min(SX, p.x + wish.x * steerSpeed * dt));
@@ -825,6 +838,8 @@ export class Player {
 
   die(killer) {
     this.alive = false;
+    this._aimToggled = false;
+    this._crouchToggled = false;
     this.health = 0;
     this.deadT = 0;
     this.crouched = false;
@@ -856,6 +871,7 @@ export class Player {
   // easing here on purpose: you're dead, there's no "smoothly" un-aim a
   // scope you can no longer use.
   resetZoom() {
+    this._aimToggled = false;
     this.camera.fov = this.baseFov;
     this.camera.updateProjectionMatrix();
     this.aiming = false;

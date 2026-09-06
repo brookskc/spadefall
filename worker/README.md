@@ -3,6 +3,8 @@
 Mints short-lived Cloudflare TURN credentials so browsers behind symmetric NAT
 or a restrictive corporate firewall can still reach a match. The long-lived
 TURN API token stays in the Worker's secret store and never reaches a client.
+The same deployment accepts strictly bounded anonymous game-health counters at
+`/diagnostics` and writes them to the `GAME_ANALYTICS` Analytics Engine dataset.
 
 ## Deploy
 
@@ -41,3 +43,7 @@ unavailable; a missing secret or rate-limit binding returns 500.
 - Rotating the key: create a new TURN key in the dashboard, update
   `DEFAULT_TURN_KEY_ID` (or provide `TURN_KEY_ID` as a Worker variable), re-run
   `wrangler secret put`, and redeploy.
+- Diagnostics accept only fixed enums and coarse numeric buckets. The Worker
+  uses source addresses only for edge rate limiting and never writes them to
+  the analytics dataset. Callsigns, chat, room data, positions, raw URLs, raw
+  errors, and persistent identifiers are rejected by the payload schema.

@@ -23,6 +23,7 @@ export class RemotePlayer {
     this.tool = 0;
     this.gunClass = 0;
     this._pendingClass = 0;
+    this._spawnPreference = 'front';
     this.yaw = team === 'green' ? -Math.PI / 2 : Math.PI / 2;
     this.nades = 3;
     this.nadeRegen = 0;
@@ -48,7 +49,8 @@ export class RemotePlayer {
   }
 
   respawn(at = null, notify = true) {
-    const p = at ?? this.game.spawnPoint(this.team);
+    const p = at ?? this.game.spawnPoint(this.team, this._spawnPreference);
+    this._spawnPreference = 'front';
     this.body.pos.set(p.x, p.y, p.z);
     this.body.vel.set(0, 0, 0);
     this.body.half.h = STAND_HEIGHT;

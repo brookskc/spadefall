@@ -32,7 +32,7 @@ const distance2d = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 // or directly into a live fight. The rendered controller supplies terrain
 // and line-of-sight facts; this pure boundary keeps the mode rules testable.
 export function ctfFrontlineAllowed(candidate, {
-  ownX, enemyX, enemies = [], activeFlags = [], visibleEnemies = 0,
+  ownX, enemyX, enemies = [], activeFlags = [], visibleEnemies = 0, frontlineBonus = 0,
 } = {}) {
   if (!candidate || !Number.isFinite(candidate.x) || !Number.isFinite(candidate.z)
       || !Number.isFinite(ownX) || !Number.isFinite(enemyX) || ownX === enemyX
@@ -40,8 +40,9 @@ export function ctfFrontlineAllowed(candidate, {
   const dir = Math.sign(enemyX - ownX);
   const halfField = Math.abs(enemyX - ownX) / 2;
   const progress = (candidate.x - ownX) * dir;
+  const bonus = Math.max(0, Math.min(8, Number(frontlineBonus) || 0));
   if (progress < CTF_SPAWN.minProgress
-      || progress > halfField - CTF_SPAWN.midfieldBuffer) return false;
+      || progress > halfField - CTF_SPAWN.midfieldBuffer + bonus) return false;
   const near = (point, distance) => point && Number.isFinite(point.x)
     && Number.isFinite(point.z) && distance2d(candidate, point) < distance;
   if (enemies.some(enemy => near(enemy, CTF_SPAWN.enemyClearance))) return false;
@@ -64,21 +65,27 @@ export function ctfObjectiveKind({ carrier = false, ownState = 'home',
 // squad cohesion only decide among candidates that are not immediate traps.
 export function tacticalSpawnScore(candidate, {
   enemies = [], allies = [], objective = null, visibleEnemies = 0,
+  recentDeaths = [], mode = 'tdm', upcomingObjective = null,
 } = {}) {
   const nearestEnemy = enemies.length
     ? Math.min(...enemies.map(e => distance2d(candidate, e))) : 70;
-  if (nearestEnemy < 13) return -Infinity;
+  if (nearestEnemy < 13 || visibleEnemies > 0) return -Infinity;
 
   const nearestAlly = allies.length
     ? Math.min(...allies.map(a => distance2d(candidate, a))) : 18;
   const actionDistance = objective ? distance2d(candidate, objective) : nearestEnemy;
-  const idealAction = objective ? 34 : 38;
+  const idealAction = mode === 'tdm' ? 32 : objective ? 34 : 38;
   const safety = Math.min(60, nearestEnemy) * 2.4;
   const exposure = Math.max(0, visibleEnemies) * 48;
   const action = Math.abs(actionDistance - idealAction) * 0.7;
   const cohesion = Math.abs(nearestAlly - 12) * 0.35;
   const crowding = nearestAlly < 3 ? 25 : 0;
-  return safety - exposure - action - cohesion - crowding;
+  const hotspot = recentDeaths.some(d => distance2d(candidate, d) < 16) ? 80 : 0;
+  // A mild pull toward the next KOTH approach lane, never onto the point.
+  const upcomingDistance = upcomingObjective ? distance2d(candidate, upcomingObjective) : 0;
+  const upcoming = upcomingObjective && upcomingDistance >= 22
+    ? Math.max(0, 42 - upcomingDistance) * 0.35 : 0;
+  return safety - exposure - action - cohesion - crowding - hotspot + upcoming;
 }
 
 export const scoreLeader = scores => {

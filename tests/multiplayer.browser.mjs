@@ -100,6 +100,30 @@ try {
   await host.waitForFunction(previous => [...window.__game.remote.values()][0]?._pendingClass === previous,
     intermissionClass.current, { timeout: 5_000 });
 
+  await host.evaluate(() => { [...window.__game.remote.values()][0].alive = false; });
+  await guest.evaluate(() => {
+    const game = window.__game;
+    game.player.alive = false;
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyB', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyB', bubbles: true }));
+  });
+  await host.waitForFunction(() => [...window.__game.remote.values()][0]?._spawnPreference === 'base',
+    null, { timeout: 5_000 });
+  await guest.evaluate(() => { window.__game.player.alive = true; });
+  await host.evaluate(() => { [...window.__game.remote.values()][0].alive = true; });
+
+  await host.evaluate(() => { window.__game.over = true; });
+  await guest.evaluate(() => {
+    window.__game.over = true;
+    window.__game.requestIntermissionReady();
+  });
+  await host.waitForFunction(() => window.__game._intermissionReady.size === 1,
+    null, { timeout: 5_000 });
+  await guest.waitForFunction(() => document.getElementById('readyBtn')?.textContent.includes('1/2'),
+    null, { timeout: 5_000 });
+  await host.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
+  await guest.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
+
   const hostPosition = await host.evaluate(() => {
     const p = [...window.__game.remote.values()][0].body.pos;
     return { x: p.x, y: p.y, z: p.z };

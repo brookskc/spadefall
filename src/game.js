@@ -51,10 +51,12 @@ import { collapseKey, unsupportedCollapseCells } from './simulation.js';
 import { CAP_TIME, HILL_CYCLE, HOLD_LIMIT, KILL_LIMIT, MATCH_TIME_OVERRIDE,
   WIN_SCORE, holdClock, modeScoreLimit } from './match-modes.js';
 import { PresentationSchedule } from './presentation.js';
+import { contactCue, ctfEscalation, intensityCue,
+  nextBotDifficulty, usefulVoxelAction } from './combat-flow.js';
 
 export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
 
-const POST_MATCH_TIME = 14;
+const POST_MATCH_TIME = 10;
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
 // A client declares the host dead after this much snapshot silence. Chosen
@@ -295,6 +297,22 @@ const hud = {
     $('airfill').style.width = (seconds / BREATH_MAX * 100) + '%';
     $('airnum').textContent = seconds > 0 ? `${Math.ceil(seconds)}s` : 'EMPTY';
   },
+  danger(row) {
+    const el = $('dangerCue');
+    if (!el) return;
+    el.classList.toggle('on', !!row);
+    if (!row) return;
+    el.style.setProperty('--bearing', `${row.bearing}rad`);
+    $('dangerText').style.transform = `rotate(${-row.bearing}rad)`;
+    $('dangerText').textContent = `FRAG · ${Math.max(1, Math.ceil(row.distance))}m`;
+  },
+  ready(count, total, mine = false) {
+    const button = $('readyBtn');
+    if (!button) return;
+    button.textContent = mine ? `READY · ${count}/${total}` : `READY FOR NEXT · ${count}/${total}`;
+    button.classList.toggle('voted', mine);
+    button.disabled = mine;
+  },
   // Round trip to the host, piggybacked on traffic that already exists (see
   // the 'ts' field on the client uplink and its echo in _broadcastSnapshot)
   // — no separate ping message and no extra round trip. Only clients have a
@@ -514,11 +532,12 @@ const hud = {
         + `ASSISTS ${Math.round(saved.a ?? 0)} · OBJECTIVE ${Math.round(saved.objective ?? 0)}`;
     }
     const mastery = recordUpdate.mastery ?? stats.mastery();
-    $('endMastery').textContent = recordUpdate.newMasteryTier
+    $('endMastery').textContent = (recordUpdate.newMasteryTier
       ? `${recordUpdate.newMasteryTier.name} MASTERY RANK UNLOCKED`
       : mastery.next
         ? `${mastery.tier.name} MASTERY · ${mastery.remaining} SCORE TO ${mastery.next.name}`
-        : `${mastery.tier.name} MASTERY · MAXIMUM RANK`;
+        : `${mastery.tier.name} MASTERY · MAXIMUM RANK`)
+      + (recordUpdate.specialty ? ` · ${recordUpdate.specialty.toUpperCase()} SPECIALTY` : '');
   },
   voxelStory(story) {
     const el = $('endStory');
@@ -636,7 +655,14 @@ const hud = {
     $('respawn').style.opacity = t > 0 ? 1 : 0;
     if (t > 0) $('respawn').textContent = `TEAM WAVE IN ${Math.ceil(t)}…`;
     $('classPick').style.opacity = t > 0 ? 1 : 0;
+    $('spawnPick').style.opacity = t > 0 ? 1 : 0;
     if (!(t > 0)) this.deathRecap(null);
+  },
+  spawnPreference(pref = 'front') {
+    const el = $('spawnPick');
+    if (!el) return;
+    el.innerHTML = `<span class="${pref === 'front' ? 'picked' : ''}">F FRONT</span>`
+      + ` · <span class="${pref === 'base' ? 'picked' : ''}">B BASE</span>`;
   },
   deathRecap(recap) {
     const el = $('deathRecap');
@@ -982,6 +1008,13 @@ export class Game {
     this._botThinkSet = null;
     this._openingDeployment = false;      // new rounds begin at the authored bases
     this._squadVotes = new Set();
+    this._intermissionReady = new Set();
+    this._contactState = new Map();
+    this._recentDeaths = [];
+    this._ctfProgressAt = 0;
+    this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
+    this._intensityFired = new Set();
+    this._botDifficultyKey = 'normal';
     this._voteKick = null;
     this._voteKickTimer = null;
     this._activeSquads = [];
@@ -1025,6 +1058,8 @@ export class Game {
     this.hud = hud;
     this.chat = new Chat(this);
     $('squadBtn')?.addEventListener('click', () => this.requestStayAsSquad());
+    $('readyBtn')?.addEventListener('click', () => this.requestIntermissionReady());
+    $('shareResultBtn')?.addEventListener('click', () => this.onShareResult?.(this._resultShareText));
 
     if (this.mode !== 'client') this._spawnBots();
 
@@ -1173,6 +1208,12 @@ export class Game {
     hud.deathRecap(null);
     this._clearTeamPings();
     this._squadVotes.clear();
+    this._intermissionReady.clear();
+    this._contactState.clear();
+    this._recentDeaths = [];
+    this._ctfProgressAt = this.time;
+    this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
+    this._intensityFired.clear();
     this._clearVoteKick();
     if (this.mode === 'client') this._squadHostEnabled = false;
     hud.staySquad(this, []);
@@ -1286,13 +1327,17 @@ export class Game {
     r.team = e.team; // migration/rejoin could flip an index's side
     return r;
   }
-  _award(e, points = 0, { assists = 0, objective = 0 } = {}, refresh = true) {
+  _award(e, points = 0, { assists = 0, objective = 0,
+    specialty = null, specialtyPoints = 0 } = {}, refresh = true) {
     if (!e) return;
     const earned = Math.max(0, Number(points) || 0);
     const r = this._kdRow(e);
     r.score += earned;
     r.a += Math.max(0, Number(assists) || 0);
     r.objective += Math.max(0, Number(objective) || 0);
+    if (r.specialties && Object.prototype.hasOwnProperty.call(r.specialties, specialty))
+      r.specialties[specialty] += Math.max(0, Math.floor(Number(specialtyPoints) || earned));
+    if (earned || objective || assists) this._noteAction(e);
     if (e === this.player) this.engagement?.contribution({
       points: earned, assists, objective,
     });
@@ -1310,7 +1355,8 @@ export class Game {
   }
   _scoreRows() {
     return [...this.kd].map(([key, r]) => [key, r.name, r.team, r.k, r.d,
-      Math.round(r.score), r.a, Math.round(r.objective)]);
+      Math.round(r.score), r.a, Math.round(r.objective), ...['rifle', 'smg', 'sniper', 'objective', 'terrain']
+        .map(kind => Math.round(r.specialties?.[kind] ?? 0))]);
   }
   _broadcastScoreboard(force = false) {
     if (!this._scoreDirty && !force) return;
@@ -1358,7 +1404,7 @@ export class Game {
   }
 
   _newBot(team, name = null, difficultyKey = null) {
-    return new Bot(this, team, name, difficultyKey);
+    return new Bot(this, team, name, difficultyKey ?? this._botDifficultyKey);
   }
 
   _humanCap() { return Math.min(MAX_HUMANS, teamSizeForMode(this.gameMode) * 2); }
@@ -1396,6 +1442,93 @@ export class Game {
     this.intel.push({ x: pos.x, z: pos.z, team, t: this.time,
       kind: ['sight', 'combat'].includes(kind) ? kind : 'sound' });
     if (this.intel.length > 48) this.intel.splice(0, this.intel.length - 48);
+  }
+
+  _noteAction(e) {
+    if (!e) return;
+    const state = this._contactState.get(e) ?? {};
+    state.lastAction = this.time; state.alive = !!e.alive;
+    this._contactState.set(e, state);
+  }
+  _updateContactFlow() {
+    if (this.over || this.time < (this._contactNextAt ?? 0)) return;
+    this._contactNextAt = this.time + 0.5;
+    const humans = this.mode === 'client' ? [this.player]
+      : [this.player, ...this.remote.values()];
+    for (const e of humans) if (e?.alive) {
+      const state = this._contactState.get(e) ?? { lastAction: this.time, alive: true };
+      state.alive = true;
+      const objective = this.hill?.pos ?? this.flags?.[this.enemyOf(e.team)]?.pos;
+      const mark = [...this.teamPings].reverse().find(p => p.team === e.team)?.pos;
+      const intel = this.mode === 'client' ? null : this.huntSpot(e.team, e.body.pos);
+      // Existing shared intel wins. Objectives are public fallback data and
+      // never reveal an enemy who was not already perceived.
+      const candidates = [intel && { kind: 'intel', x: intel.x, z: intel.z },
+        mark && { kind: 'mark', x: mark.x, z: mark.z },
+        objective && { kind: 'objective', x: objective.x, z: objective.z }].filter(Boolean);
+      if (this.mode !== 'client' && this.foesOf(e.team).some(foe => foe.alive
+          && foe.body.eye().distanceToSquared(e.body.eye()) < 70 ** 2
+          && this.losClear(e.body.eye(), foe.body.eye()))) state.lastAction = this.time;
+      const cue = contactCue(state, this.time, candidates);
+      if (cue) {
+        state.lastCue = this.time;
+        this.messageTo(e, cue.label, '#ffd97a');
+        const y = this.world.surface(Math.floor(cue.x), Math.floor(cue.z)) + 1;
+        const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: 'RADIO',
+          team: e.team, x: cue.x, y, z: cue.z, kind: 'MOVE' };
+        if (e === this.player) this._receiveTeamPing(msg);
+        else if (e.isRemote) this.net.sendTo(e.id, msg);
+      }
+      this._contactState.set(e, state);
+    }
+  }
+
+  _updateIntensityCues() {
+    if (this.over) return;
+    const cue = intensityCue({ mode: this.gameMode, green: this.captures.green,
+      blue: this.captures.blue, remaining: this.matchRemaining,
+      escalation: this._ctfEscalation.active, fired: this._intensityFired });
+    if (!cue) return;
+    this._intensityFired.add(cue.id);
+    this.message(cue.text, cue.id === 'deadlock' ? '#e05a4e' : '#ffd97a');
+    if (cue.id === 'frontline') this.feed('<b>FRONT LINES ADVANCING</b> — BOTH TEAMS PUSH FORWARD');
+    sfx.radio();
+  }
+
+  _updateGrenadeWarning() {
+    const p = this.player;
+    if (!p?.alive) return hud.danger(null);
+    if (this.time < (this._grenadeWarningNextAt ?? 0)) return;
+    this._grenadeWarningNextAt = this.time + .1;
+    const rows = this.mode === 'client' ? (this._lastGrenades ?? []) : this.grenades;
+    let nearest = null;
+    const eye = p.body.eye(this._grenadeEye ??= new THREE.Vector3());
+    const probe = this._grenadeProbe ??= new THREE.Vector3();
+    for (const row of rows) {
+      const x = this.mode === 'client' ? dx(row[0]) : row.pos.x;
+      const y = this.mode === 'client' ? dy(row[1]) : row.pos.y;
+      const z = this.mode === 'client' ? dx(row[2]) : row.pos.z;
+      const distance = Math.hypot(x - p.body.pos.x, y - p.body.pos.y, z - p.body.pos.z);
+      if (distance > 10 || (nearest && distance >= nearest.distance)) continue;
+      probe.set(x, y, z);
+      if (!this.losClear(eye, probe)) continue;
+      nearest = { distance, bearing: this._bearingTo(probe) };
+    }
+    hud.danger(nearest);
+    if (nearest && nearest.distance < 7 && this.time >= (this._grenadeWarnAt ?? 0)) {
+      this._grenadeWarnAt = this.time + .8;
+      sfx.danger();
+    }
+  }
+
+  _hostPlaceSystemPing(team, x, z, kind = 'MOVE') {
+    if (this.mode === 'client' || !Number.isFinite(x) || !Number.isFinite(z)) return;
+    const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
+    const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: 'SQUAD', team,
+      x: Math.max(0, Math.min(SX, x)), y, z: Math.max(0, Math.min(SZ, z)), kind };
+    if (this.player.team === team) this._receiveTeamPing(msg);
+    if (this.mode === 'host') for (const p of this.remote.values())
+      if (p.team === team) this.net.sendTo(p.id, msg);
   }
   // Freshest fair enemy sign. Sightings are shared over the squad radio;
   // ordinary weapon/explosion sounds must be within the listener's hearing
@@ -1476,7 +1609,8 @@ export class Game {
     const own = BASE[team], enemy = BASE[this.enemyOf(team)];
     const dir = Math.sign(enemy.x - own.x);
     const halfField = Math.abs(enemy.x - own.x) / 2;
-    const maxAdvance = halfField - CTF_SPAWN.midfieldBuffer;
+    const maxAdvance = halfField - CTF_SPAWN.midfieldBuffer
+      + Math.max(0, Math.min(8, this._ctfEscalation?.frontlineBonus || 0));
     const progress = e => (e.body.pos.x - own.x) * dir;
     const ownSideAnchors = anchors.filter(e => progress(e) >= 0
       && progress(e) <= maxAdvance);
@@ -1521,7 +1655,8 @@ export class Game {
         }
       }
       if (!ctfFrontlineAllowed(candidate, { ownX: own.x, enemyX: enemy.x,
-        enemies: enemyRows, activeFlags, visibleEnemies })) continue;
+        enemies: enemyRows, activeFlags, visibleEnemies,
+        frontlineBonus: this._ctfEscalation?.frontlineBonus })) continue;
       const advance = (candidate.x - own.x) * dir;
       const score = tacticalSpawnScore(candidate, {
         enemies: enemyRows, allies: allyRows, objective, visibleEnemies,
@@ -1582,6 +1717,8 @@ export class Game {
       }
       const score = tacticalSpawnScore(candidate, {
         enemies: enemyRows, allies: allyRows, objective, visibleEnemies,
+        recentDeaths: this._recentDeaths.filter(d => d.team === team), mode: this.gameMode,
+        upcomingObjective: this.gameMode === 'koth' ? this.hill?.spots?.[nextHillIndex(this.hill.index, this.hill.spots.length)] : null,
       });
       if (score > bestScore) { bestScore = score; best = candidate; }
     }
@@ -1591,7 +1728,8 @@ export class Game {
   // Opening CTF deployments and failed safety searches use the base. Later
   // CTF waves may reinforce their own frontline; TDM/KOTH continue to use
   // their less territory-constrained dynamic battlefield spawns.
-  spawnPoint(team) {
+  spawnPoint(team, preference = 'front') {
+    if (preference === 'base') return this._baseSpawnPoint(team);
     if (this.gameMode === 'ctf') {
       const frontline = this._ctfSpawnPoint(team);
       if (frontline) return frontline;
@@ -1667,6 +1805,7 @@ export class Game {
 
   // ---------------- combat ----------------
   fireHitscan(shooter, from, dir, spec) {
+    this._noteAction(shooter);
     shooter._combatAt = this.time;
     shooter.protT = 0; // firing drops spawn protection
     dir = this._dropCompensate(from, dir, spec, shooter);
@@ -1726,7 +1865,7 @@ export class Game {
         { cause: spec.key, headshot: head });
       // hit was drawn from alive-only foes above, so !hit.alive here means
       // THIS shot is what did it — not just "they happen to be dead."
-      if (damaged) this._hitFeedback(shooter, !hit.alive);
+      if (damaged) this._hitFeedback(shooter, !hit.alive, head);
     }
 
     // Gunfire chips blocks: the voxel that stopped the bullet accumulates
@@ -1926,8 +2065,19 @@ export class Game {
     const origin = e.body.eye();
     const dir = v3(direction);
     const hit = this.world.raycast(origin, dir, TEAM_PING_RANGE);
+    const voxelDistance = hit?.dist ?? TEAM_PING_RANGE;
+    let aimedEnemy = null, aimedDistance = Infinity;
+    for (const foe of this.foesOf(e.team)) {
+      if (!foe.alive) continue;
+      const ray = rayVsSoldier(origin, dir, foe.body);
+      if (ray && ray.t < voxelDistance && ray.t < aimedDistance) {
+        aimedEnemy = foe; aimedDistance = ray.t;
+      }
+    }
     let pos;
-    if (hit) {
+    if (aimedEnemy) {
+      pos = aimedEnemy.body.pos.clone().add(new THREE.Vector3(0, 1, 0));
+    } else if (hit) {
       pos = new THREE.Vector3(hit.x + 0.5 + hit.nx * 0.56,
         hit.y + 0.5 + hit.ny * 0.56, hit.z + 0.5 + hit.nz * 0.56);
     } else {
@@ -1940,12 +2090,13 @@ export class Game {
     pos.y = Math.min(SY + 8, Math.max(-4, pos.y));
     pos.z = Math.min(SZ, Math.max(0, pos.z));
     const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: cleanName(e.name),
-      team: e.team, x: pos.x, y: pos.y, z: pos.z, kind: this._teamPingKind(pos, e.team) };
+      team: e.team, x: pos.x, y: pos.y, z: pos.z,
+      kind: aimedEnemy ? 'ENEMY' : this._teamPingKind(pos, e.team) };
     const candidates = this.bots.filter(b => b.team === e.team).map(b => ({
       id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
       carrier: b.carrier, role: b.tacticalRole,
     }));
-    const limit = ['ATTACK', 'HILL'].includes(msg.kind) ? 3 : 2;
+    const limit = ['ATTACK', 'HILL', 'ENEMY', 'BREACH'].includes(msg.kind) ? 3 : 2;
     this.botOrders[e.team] = { ...msg, expires: this.time + TEAM_PING_TTL,
       responders: botsForSquadOrder(candidates, msg, limit) };
     if (this.player.team === e.team) this._receiveTeamPing(msg);
@@ -2087,6 +2238,7 @@ export class Game {
 
   _recordLocalAction(p, action) {
     if (p !== this.player) return;
+    this._noteAction(p);
     this.engagement?.action(action, this.matchElapsed);
     this.firstMinuteGuide?.mark(action);
   }
@@ -2153,7 +2305,7 @@ export class Game {
   // 4 seconds apart each still chains into a triple, but 5+ seconds of
   // nothing breaks it, matching the sliding-window convention this genre
   // already uses (Halo's multikill medals work the same way).
-  _hitFeedback(attacker, killed) {
+  _hitFeedback(attacker, killed, headshot = false) {
     if (!attacker) return;
     let tier = null;
     if (killed) {
@@ -2167,9 +2319,11 @@ export class Game {
     if (attacker === this.player) {
       hud.hitmark(killed); // the crosshair confirmation is unconditional — multi-kill or not, every kill gets it
       if (tier) hud.killCallout(tier); // replaces the plain chime below, doesn't play alongside it
+      else if (headshot) sfx.headshot(killed);
       else killed ? sfx.kill() : sfx.hit();
     } else if (attacker.isRemote) {
-      this.net.sendTo(attacker.id, { t: 'e', k: 'hit', kill: killed, tier });
+      this.net.sendTo(attacker.id, { t: 'e', k: 'hit', kill: killed, tier,
+        head: headshot ? 1 : 0 });
     }
   }
 
@@ -2197,6 +2351,8 @@ export class Game {
     }
     victim._combatAt = this.time;
     if (attacker && attacker !== victim) attacker._combatAt = this.time;
+    this._noteAction(victim);
+    this._noteAction(attacker);
     victim.health -= amount;
     victim.alert?.(attacker); // bots whirl toward whoever shot them
     const src = sourcePos ?? attacker?.body?.pos;
@@ -2266,6 +2422,9 @@ export class Game {
   onDeath(victim, killer) {
     const wasCarrier = !!victim.carrier;
     const deathCause = victim._deathCause;
+    this._recentDeaths.push({ x: victim.body.pos.x, z: victim.body.pos.z,
+      t: this.time, team: victim.team });
+    this._recentDeaths = this._recentDeaths.filter(row => this.time - row.t < 20).slice(-24);
     if (deathCause === 'collapse') this.voxelStory?.recordCollapseKill();
     const engagementCause = deathCause
       ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
@@ -2278,6 +2437,7 @@ export class Game {
     if (this.flags && victim.carrier) {
       victim.carrier = false;
       this.flags[this.enemyOf(victim.team)].drop(victim.body.pos.clone());
+      this.flags[this.enemyOf(victim.team)].dropTimer = this._ctfEscalation.returnTime;
       // this.feed/this.message, not hud.* — the wrappers relay to clients.
       this.feed(`${nameSpan(victim)} dropped the flag`);
       this.message('FLAG DROPPED', '#ffd97a');
@@ -2290,6 +2450,7 @@ export class Game {
     victim._deathCause = null;
     // A corpse marks a fight: the fallen's teammates hunt toward it.
     if (killer && killer !== victim) this.pingIntel(victim.body.pos, killer.team, 'combat');
+    if (killer) this._noteAction(killer);
 
     // Scoreboard: a death for the fallen, a kill for the killer — suicides
     // and terrain score a death only, same as TDM team scoring below.
@@ -2297,25 +2458,33 @@ export class Game {
     this._scoreDirty = true;
     if (killer && killer !== victim) {
       this._kdRow(killer).k++;
-      this._award(killer, CONTRIBUTION.kill);
+      const weaponSpecialty = ['rifle', 'smg', 'sniper'].includes(deathCause) ? deathCause
+        : deathCause === 'collapse' ? 'terrain' : null;
+      this._award(killer, CONTRIBUTION.kill,
+        { specialty: weaponSpecialty, specialtyPoints: 1 });
       if (deathCause === 'collapse')
-        this._award(killer, CONTRIBUTION.collapseKill);
+        this._award(killer, CONTRIBUTION.collapseKill,
+          { specialty: 'terrain', specialtyPoints: 1 });
 
-      if (wasCarrier) this._award(killer, CONTRIBUTION.carrierStop, { objective: 1 });
+      if (wasCarrier) this._award(killer, CONTRIBUTION.carrierStop,
+        { objective: 1, specialty: 'objective', specialtyPoints: 1 });
       if (this.flags) {
         const own = this.flags[killer.team].home;
         if (killer.body.pos.distanceTo(own) <= 18 || victim.body.pos.distanceTo(own) <= 18)
-          this._award(killer, CONTRIBUTION.objectiveDefense, { objective: 1 });
+          this._award(killer, CONTRIBUTION.objectiveDefense,
+            { objective: 1, specialty: 'objective', specialtyPoints: 1 });
         const carrier = this.entities().find(e => e !== killer && e.alive
           && e.team === killer.team && e.carrier);
         if (carrier && (carrier.body.pos.distanceTo(killer.body.pos) <= 20
             || carrier.body.pos.distanceTo(victim.body.pos) <= 20))
-          this._award(killer, CONTRIBUTION.carrierEscort, { objective: 1 });
+          this._award(killer, CONTRIBUTION.carrierEscort,
+            { objective: 1, specialty: 'objective', specialtyPoints: 1 });
       } else if (this.hill) {
         const radius = this.hill.r + 8;
         if (killer.body.pos.distanceTo(this.hill.pos) <= radius
             || victim.body.pos.distanceTo(this.hill.pos) <= radius)
-          this._award(killer, CONTRIBUTION.objectiveDefense, { objective: 1 });
+          this._award(killer, CONTRIBUTION.objectiveDefense,
+            { objective: 1, specialty: 'objective', specialtyPoints: 1 });
       }
 
       for (const helper of assistCreditors(victim._damageLedger, killer, this.time))
@@ -2451,9 +2620,18 @@ export class Game {
       sfx.at('dig', { x, y, z }, v);
       if (who.isRemote) who.blocks = Math.min(99, who.blocks + 1);
     }
+    const bodyPassage = (dx, dz) => !this.world.get(x + dx, y, z + dz)
+      && !this.world.get(x + dx, y + 1, z + dz);
+    const changedPassability = (bodyPassage(-1, 0) && bodyPassage(1, 0))
+      || (bodyPassage(0, -1) && bodyPassage(0, 1));
+    const tactical = this.time - (who?._combatAt ?? -Infinity) < 10
+      || v === BLOCK.BLUE || v === BLOCK.GREEN;
+    this._recognizeVoxel(who, usefulVoxelAction({ type: 'dig',
+      changedPassability: changedPassability && tactical }), x, z);
   }
 
   playerDig(p, origin = null, dir = null) {
+    this._noteAction(p);
     p._combatAt = this.time;
     p.protT = 0; // swinging is firing: melee must not stay invulnerable
     origin = origin ?? p.body.eye();
@@ -2475,6 +2653,7 @@ export class Game {
   }
 
   playerPlace(p, origin = null, dir = null) {
+    this._noteAction(p);
     if (p.blocks <= 0) { if (p === this.player) sfx.click(); return; }
     origin = origin ?? p.body.eye();
     dir = dir ?? p.lookDir();
@@ -2508,9 +2687,27 @@ export class Game {
           z + 1 > b.pos.z - b.half.x && z < b.pos.z + b.half.x &&
           y + 1 > b.pos.y && y < b.pos.y + b.half.h) return false;
     }
+    const beforeSurface = this.world.surface(x, z);
+    const bridgedGap = beforeSurface < SEA || y > beforeSurface + 1;
+    const recentCombat = this.time - (p._combatAt ?? -Infinity) < 8;
+    const pCenter = p.body.pos.clone().add(new THREE.Vector3(0, .9, 0));
+    const clearThreats = recentCombat ? this.foesOf(p.team).filter(e => e.alive
+      && e.body.pos.distanceToSquared(p.body.pos) < 24 ** 2
+      && this.losClear(e.body.eye(), pCenter)) : [];
     this.applyEdit(x, y, z, p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN, p);
     p.blocks--;
+    this._recognizeVoxel(p, usefulVoxelAction({ type: 'build',
+      bridgedGap, tactical: recentCombat,
+      blockedThreat: clearThreats.some(e => !this.losClear(e.body.eye(), pCenter)) }), x, z);
     return true;
+  }
+
+  _recognizeVoxel(p, label, x, z) {
+    if (!label || !p || this.time - (p._voxelRecognitionAt ?? -Infinity) < 12) return;
+    p._voxelRecognitionAt = this.time;
+    this._award(p, 20, { specialty: 'terrain', specialtyPoints: 1 });
+    this.messageTo(p, label, '#ffd97a');
+    if (label === 'BREACH OPENED') this._hostPlaceSystemPing(p.team, x + 0.5, z + 0.5, 'BREACH');
   }
 
   _protectedBuildReason(x, y, z) {
@@ -2534,6 +2731,7 @@ export class Game {
 
   // ---------------- grenades ----------------
   throwGrenade(owner, origin, dir, speed) {
+    this._noteAction(owner);
     owner._combatAt = this.time;
     owner.protT = 0; // covers proxy throws arriving via the host action path
     this.grenades.push({
@@ -2841,7 +3039,16 @@ export class Game {
 
   // ---------------- flag logic ----------------
   _updateFlags(dt) {
+    const wasDropped = Object.fromEntries(['green', 'blue'].map(team =>
+      [team, this.flags[team].state === 'dropped']));
+    const flagLive = Object.values(this.flags).some(flag => flag.state !== 'home');
+    if (flagLive) this._ctfProgressAt = this.time;
+    const escalation = ctfEscalation({ active: this._ctfEscalation.active,
+      progressAt: this._ctfProgressAt }, this.time, flagLive);
+    this._ctfEscalation = escalation;
     for (const team of ['green', 'blue']) this.flags[team].update(dt, this.time);
+    if (['green', 'blue'].some(team => wasDropped[team] && this.flags[team].state === 'home'))
+      this._ctfProgressAt = this.time;
 
     for (const e of this.entities()) {
       if (!e.alive) continue;
@@ -2852,8 +3059,11 @@ export class Game {
         enemyFlag.state = 'carried';
         enemyFlag.carrier = e;
         e.carrier = true;
+        this._ctfProgressAt = this.time;
+        this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
         sfx.pickup();
-        this._award(e, CONTRIBUTION.flagPickup, { objective: 1 });
+        this._award(e, CONTRIBUTION.flagPickup,
+          { objective: 1, specialty: 'objective', specialtyPoints: 1 });
         this._broadcastScoreboard(true);
         this.feed(`${nameSpan(e)} took the ${this.enemyOf(e.team).toUpperCase()} flag`);
         this.messageTo(e, 'YOU HAVE THE FLAG — RUN HOME!', '#ffd97a');
@@ -2862,7 +3072,10 @@ export class Game {
       // Touching your own dropped flag sends it home.
       if (ownFlag.state === 'dropped' && e.body.pos.distanceTo(ownFlag.pos) < 1.9) {
         ownFlag.returnHome();
-        this._award(e, CONTRIBUTION.flagReturn, { objective: 1 });
+        this._ctfProgressAt = this.time;
+        this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
+        this._award(e, CONTRIBUTION.flagReturn,
+          { objective: 1, specialty: 'objective', specialtyPoints: 1 });
         this._broadcastScoreboard(true);
         this.feed(`${nameSpan(e)} returned the ${e.team.toUpperCase()} flag`);
         this.messageTo(e, 'FLAG RETURNED', '#8fd98f');
@@ -2872,8 +3085,11 @@ export class Game {
           e.body.pos.distanceTo(ownFlag.home) < 3.2) {
         e.carrier = false;
         this.captures[e.team]++;
+        this._ctfProgressAt = this.time;
+        this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
         enemyFlag.returnHome();
-        this._award(e, CONTRIBUTION.flagCapture, { objective: 1 });
+        this._award(e, CONTRIBUTION.flagCapture,
+          { objective: 1, specialty: 'objective', specialtyPoints: 3 });
         this._broadcastScoreboard(true);
         sfx.capture();
         this.feed(`${nameSpan(e)} <b>CAPTURED</b> the flag`);
@@ -2997,7 +3213,8 @@ export class Game {
     h.progress = capture.progress;
     if (capture.captured) {
       for (const e of present[capture.captured])
-        this._award(e, CONTRIBUTION.hillCapture, { objective: 1 }, false);
+        this._award(e, CONTRIBUTION.hillCapture,
+          { objective: 1, specialty: 'objective', specialtyPoints: 1 }, false);
       this._broadcastScoreboard(true);
       sfx.capture();
       this.feed(capture.captured === 'green' ? '<b>GREEN</b> holds the hill' : '<b>BLUE</b> holds the hill');
@@ -3075,6 +3292,7 @@ export class Game {
     this.over = true;
     this.winner = winner;
     this._squadVotes.clear();
+    this._intermissionReady.clear();
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     if (this.mode === 'host') {
@@ -3083,6 +3301,14 @@ export class Game {
       this.net.broadcast(event);
     }
     const report = buildMatchReport(this._kdKey(this.player), this.kd.entries());
+    const botScores = [...this.kd].filter(([key]) => key.startsWith('b')).map(([, row]) => row.score)
+      .sort((a, b) => a - b);
+    const medianBot = botScores.length ? botScores[Math.floor(botScores.length / 2)] : 0;
+    const humanScores = [...this.kd].filter(([key]) => key.startsWith('p')).map(([, row]) => row.score);
+    const humanAverage = humanScores.length
+      ? humanScores.reduce((sum, score) => sum + score, 0) / humanScores.length : report.local.score;
+    this._nextBotDifficultyKey = nextBotDifficulty(this._botDifficultyKey,
+      { margin: humanAverage - medianBot, humanScore: humanAverage, medianScore: medianBot });
     const recordUpdate = stats.finishMatch(winner === this.player.team,
       this.gameMode, report.local);
     this.onStatsChanged?.();
@@ -3104,6 +3330,11 @@ export class Game {
       ? holdClock(this.captures.blue) : Math.floor(this.captures.blue ?? 0);
     $('endDetail').textContent = `${MAPS[this.mapIndex].name} · ${this.gameMode.toUpperCase()}`
       + ` · ${holdClock(this.matchElapsed)}`;
+    this._resultShareText = `${won ? 'Victory' : 'Defeat'} in Spadefall — `
+      + `${MAPS[this.mapIndex].name} ${this.gameMode.toUpperCase()}, `
+      + `${Math.floor(this.captures.green)}–${Math.floor(this.captures.blue)}. `
+      + `${Math.round(report.local.score)} score, ${report.local.k}/${report.local.d}/${report.local.a} K/D/A. `
+      + 'Play at https://spadefall.io';
     hud.matchReport(this, report, recordUpdate);
     hud.voxelStory(story);
     $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
@@ -3118,6 +3349,7 @@ export class Game {
     this.player.vmRoot.visible = false;
     // Retain pointer lock for a seamless automatic next round.
     this._publishSquadState();
+    this._publishReadyState();
     if (!won) sfx.lose();
     // The room rotates maps on its own a few seconds after the final capture.
     if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
@@ -3143,6 +3375,7 @@ export class Game {
     // atomic.
     // Host/solo only — clients receive the result in the roster below.
     const balance = this._balanceNextRoundTeams();
+    this._botDifficultyKey = this._nextBotDifficultyKey ?? this._botDifficultyKey;
     if (!balance.enabled) {
       const flip = t => (t === 'blue' ? 'green' : 'blue');
       this.player.team = flip(this.player.team);
@@ -3184,6 +3417,8 @@ export class Game {
   }
 
   _humanKeys() {
+    if (this.mode === 'client')
+      return [...(this._rosterP ?? new Map()).keys()].map(idx => 'p' + idx);
     return ['p' + this._hostIdx, ...[...this.remote.values()].map(p => 'p' + p.ridx)];
   }
 
@@ -3298,6 +3533,26 @@ export class Game {
     hud.staySquad(this, voters);
     if (this.mode === 'host' && this.engagementFeatures.stayAsSquad)
       this.net.broadcast({ t: 'e', k: 'squad', voters });
+  }
+
+  _publishReadyState() {
+    const voters = [...this._intermissionReady];
+    hud.ready(voters.length, this._humanKeys().length,
+      this._intermissionReady.has(this._kdKey(this.player)));
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'ready', voters });
+    if (this.mode !== 'client' && voters.length >= this._humanKeys().length)
+      this._rotateT = Math.min(this._rotateT ?? 1, .75);
+  }
+
+  requestIntermissionReady() {
+    if (!this.over) return false;
+    this._recordLocalAction(this.player, 'ready');
+    this.engagement?.record('continuation', { action: 'ready' });
+    if (this.mode === 'client') return !!this.net?.send({ t: 'a', k: 'ready' });
+    const key = this._kdKey(this.player);
+    this._intermissionReady.add(key);
+    this._publishReadyState();
+    return true;
   }
 
   requestStayAsSquad() {
@@ -3448,6 +3703,17 @@ export class Game {
     }
     if (d.t === 'a' && d.k === 'squad') {
       this._hostSquadVote(p);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'ready') {
+      if (this.over) {
+        this._intermissionReady.add(this._kdKey(p));
+        this._publishReadyState();
+      }
+      return;
+    }
+    if (d.t === 'a' && d.k === 'spawnpref') {
+      if (!p.alive && !this.over) p._spawnPreference = d.pref;
       return;
     }
     // Class pick: sent while dead, so it must NOT require p.alive the way
@@ -3713,6 +3979,7 @@ export class Game {
       this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
       if (this.engagementFeatures.stayAsSquad)
         this.net.sendTo(id, { t: 'e', k: 'squad', voters: [...this._squadVotes] });
+      this.net.sendTo(id, { t: 'e', k: 'ready', voters: [...this._intermissionReady] });
     }
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
     this._broadcastScoreboard(true);
@@ -3988,6 +4255,10 @@ export class Game {
         this.hill.contested ? 1 : 0, this.hill.capTeam, this.hill.index,
         Math.max(0, Math.round(this.hill.rotateIn * 10) / 10),
         this.hill.presence?.green ?? 0, this.hill.presence?.blue ?? 0],
+      // Preserve the current CTF pressure state if the host leaves. Age is
+      // relative, so a promoted guest can continue its own local clock.
+      ct: this.flags && [this._ctfEscalation.active ? 1 : 0,
+        Math.max(0, Math.min(820, Math.round((this.time - this._ctfProgressAt) * 10)))],
       c: [Math.round(this.captures.green * 10) / 10, Math.round(this.captures.blue * 10) / 10],
       g: this.grenades.map(g => pos(g.pos)),
       // Small unconditional channel: [id, target xyz, approach yaw,
@@ -4049,7 +4320,7 @@ export class Game {
       if (full) { sent.p.clear(); sent.b.clear(); }
       const out = { t: 's', q: (conn._snapshotSeq ?? 0) + 1, full: full ? 1 : 0,
         wr: this.editLog.length, wh: this._worldHash >>> 0,
-        f: snap.f, h: snap.h, c: snap.c, g: snap.g,
+        f: snap.f, h: snap.h, ct: snap.ct, c: snap.c, g: snap.g,
         a: snap.a, u: snap.u, tb: snap.tb, m: snap.m,
         o: snap.o, w: snap.w };
       const pingTs = this.remote.get(id)?._pingTs;
@@ -4381,6 +4652,12 @@ export class Game {
         this.hill.presence = { green: d.h[6], blue: d.h[7] };
       this._updateHillVisual();
     }
+    if (d.ct && this.flags) {
+      this._ctfEscalation = { active: !!d.ct[0],
+        returnTime: d.ct[0] ? 12 : FLAG_RETURN_TIME,
+        frontlineBonus: d.ct[0] ? 8 : 0 };
+      this._ctfProgressAt = this.time - d.ct[1] / 10;
+    }
     this.captures.green = d.c[0];
     this.captures.blue = d.c[1];
     if (d.m) {
@@ -4476,10 +4753,12 @@ export class Game {
       case 'hit':
         hud.hitmark(d.kill);
         if (d.tier) hud.killCallout(d.tier); // replaces the plain chime, same rule as the host-side path
+        else if (d.head) sfx.headshot(d.kill);
         else d.kill ? sfx.kill() : sfx.hit();
         break;
-      case 'dmgdir': hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
-      case 'envdmg': hud.damage(); sfx.hurt(); break;
+      case 'dmgdir': this._noteAction(this.player);
+        hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
+      case 'envdmg': this._noteAction(this.player); hud.damage(); sfx.hurt(); break;
       case 'chat':
         if (d.scope === 'all' && !this.publicChatEnabled()) break;
         hud.chatMsg({ name: cleanName(d.name), team: d.team === 'blue' ? 'blue' : 'green',
@@ -4498,6 +4777,11 @@ export class Game {
         this._squadVotes = new Set(d.voters);
         hud.staySquad(this, d.voters);
         break;
+      case 'ready':
+        this._intermissionReady = new Set(d.voters);
+        hud.ready(d.voters.length, this._humanKeys().length,
+          this._intermissionReady.has(this._kdKey(this.player)));
+        break;
       case 'votekick':
         this._voteKick = d.active ? { target: d.target, name: d.name,
           voters: new Set(d.voters), needed: d.needed, remaining: d.remaining } : null;
@@ -4515,7 +4799,9 @@ export class Game {
           [String(r[0]).slice(0, 8), contributionRow({ name: cleanName(r[1]),
             team: r[2] === 'blue' ? 'blue' : 'green', k: r[3] | 0, d: r[4] | 0,
             score: r[5] ?? (r[3] | 0) * CONTRIBUTION.kill,
-            a: r[6] ?? 0, objective: r[7] ?? 0 })]));
+            a: r[6] ?? 0, objective: r[7] ?? 0,
+            specialties: { rifle: r[8], smg: r[9], sniper: r[10],
+              objective: r[11], terrain: r[12] } })]));
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
@@ -4710,6 +4996,9 @@ export class Game {
       const p = this.player, e = p.body.eye(this._listenerEye ??= new THREE.Vector3());
       setListener({ x: e.x, y: e.y, z: e.z, rx: Math.sin(p.yaw), rz: Math.cos(p.yaw) });
     }
+    this._updateContactFlow();
+    this._updateGrenadeWarning();
+    this._updateIntensityCues();
     if (this.mode === 'client') { this._clientUpdate(dt); this.world.flushDirty(); return; }
 
     // Pending airstrikes: host/solo only, since only this side is

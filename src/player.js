@@ -6,6 +6,7 @@ import { stats } from './stats.js';
 import { SX, SY, SZ, BLOCK, PALETTE } from './world.js';
 import { getMotionScale, getMouseSensitivity, teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
+import { autoSprint } from './combat-flow.js';
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -85,6 +86,8 @@ export class Player {
     this.yaw = 0; // face the enemy base (+x)
     this.pitch = 0;
     this.keys = {};
+    this._forwardHeld = 0;
+    this._spawnPreference = 'front';
     this.mouseDown = [false, false, false];
     // One gun class per life — the other two simply aren't in the belt
     // this spawn. Persisted like gun color/lobby prefs so it carries over
@@ -224,6 +227,14 @@ export class Player {
           const idx = GUN_CLASSES[Number(e.code.slice(-1)) - 1];
           this.selectClass(idx);
         }
+        if (!this.game.over && (e.code === 'KeyF' || e.code === 'KeyB')) {
+          const pref = e.code === 'KeyB' ? 'base' : 'front';
+          this._spawnPreference = pref;
+          this.game._recordLocalAction(this, pref === 'base' ? 'spawn_base' : 'spawn_front');
+          if (this.game.mode === 'client') this.game.net?.send({ t: 'a', k: 'spawnpref', pref });
+          this.game.hud.spawnPreference(pref);
+        }
+        if (this.game.over && e.code === 'Enter') this.game.requestIntermissionReady();
         return;
       }
       if (e.code >= 'Digit1' && e.code <= 'Digit4')
@@ -507,7 +518,7 @@ export class Player {
     this.slideT = Math.max(0, (this.slideT ?? 0) - dt);
     this.slideCd = Math.max(0, (this.slideCd ?? 0) - dt);
     const hspeed = Math.hypot(b.vel.x, b.vel.z);
-    if (this.crouched && !this._wasCrouched && this.keys['ShiftLeft']
+    if (this.crouched && !this._wasCrouched && (this.keys['ShiftLeft'] || this.keys['ShiftRight'])
         && b.onGround && hspeed > 6 && this.slideCd <= 0) {
       this.slideT = 0.7; this.slideCd = 1.4;
       const boost = 9 / Math.max(hspeed, 0.01);
@@ -525,9 +536,12 @@ export class Player {
     // A slide has no such brakes — skidding off the edge is the whole point.
     b.guard = this.crouched && !sliding;
     const shift = !!(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    const sprint = !this.crouched && this.keys['ShiftLeft'] ? 1.45 : 1;
+    this._forwardHeld = this.keys['KeyW'] ? this._forwardHeld + dt : 0;
     // Iron sights: RMB with a gun trades mobility for accuracy.
     this.aiming = !!((this._scopeQa || this.mouseDown[2]) && TOOLS[this.tool].zoom !== undefined);
+    const sprint = autoSprint({ forward: !!this.keys['KeyW'], strafe: !!(this.keys['KeyA'] || this.keys['KeyD']),
+      back: !!this.keys['KeyS'], aiming: this.aiming, crouched: this.crouched,
+      grounded: b.onGround, held: this._forwardHeld, shift }) ? 1.45 : 1;
     const speed = (b.inWater ? 3.2 : 5.4) * sprint * (this.crouched ? 0.45 : 1)
       * (this.aiming ? 0.6 : 1);
     // Auto-step climbs one-block rises. Crouching keeps you hugging the
@@ -945,7 +959,8 @@ export class Player {
   }
 
   respawn(at = null) {
-    const p = at ?? this.game.spawnPoint(this.team);
+    const p = at ?? this.game.spawnPoint(this.team, this._spawnPreference);
+    this._spawnPreference = 'front';
     this.body.pos.set(p.x, p.y, p.z);
     this.body.vel.set(0, 0, 0);
     this.yaw = this.team === 'green' ? 0 : Math.PI; // face the enemy

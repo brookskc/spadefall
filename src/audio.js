@@ -53,8 +53,13 @@ function noiseBuffer() {
 }
 
 let listener = null; // { x, y, z, rx, rz } — position + unit right vector
-let _pan = 0, _scale = 1;
+let _pan = 0, _scale = 1, _spatialPitch = 1;
 export function setListener(l) { listener = l; }
+export function spatialVerticality(dy, distance) {
+  const ratio = Number.isFinite(dy) && Number.isFinite(distance) && distance > 0
+    ? Math.max(-1, Math.min(1, dy / distance)) : 0;
+  return { pitch: 1 + ratio * .16, vertical: ratio > .22 ? 'above' : ratio < -.22 ? 'below' : 'level' };
+}
 
 function route(node) {
   if (_pan) {
@@ -101,7 +106,7 @@ function burst({ dur = 0.12, freq = 1100, q = 0.8, gain = 0.35,
   const src = ctx.createBufferSource();
   src.buffer = noiseBuffer();
   const f = ctx.createBiquadFilter();
-  f.type = filter; f.frequency.value = freq; f.Q.value = q;
+  f.type = filter; f.frequency.value = freq * _spatialPitch; f.Q.value = q;
   const g = ctx.createGain();
   steppedEnvelope(g.gain, t0, gain, dur, decaySteps);
   src.connect(f).connect(g); route(g);
@@ -115,8 +120,8 @@ function tone({ freq = 440, end = freq, dur = 0.1, type = 'triangle',
   const t0 = ctx.currentTime + delay;
   const o = ctx.createOscillator();
   o.type = type;
-  o.frequency.setValueAtTime(Math.max(30, freq), t0);
-  if (end !== freq) o.frequency.exponentialRampToValueAtTime(Math.max(30, end), t0 + dur);
+  o.frequency.setValueAtTime(Math.max(30, freq * _spatialPitch), t0);
+  if (end !== freq) o.frequency.exponentialRampToValueAtTime(Math.max(30, end * _spatialPitch), t0 + dur);
   const g = ctx.createGain();
   roundedEnvelope(g.gain, t0, gain, dur, Math.min(0.006, dur * 0.18));
   o.connect(g); route(g);
@@ -228,6 +233,19 @@ export const sfx = {
     tone({ freq: 820, dur: 0.1, type: 'sine', gain: 0.19 });
     tone({ freq: 1160, dur: 0.14, type: 'triangle', gain: 0.15, delay: 0.07 });
   },
+  headshot: (killed = false) => {
+    metalTick(520, .08);
+    tone({ freq: killed ? 720 : 610, end: killed ? 980 : 760,
+      dur: .09, type: 'triangle', gain: .13, delay: .025 });
+  },
+  radio: () => {
+    burst({ dur: .06, freq: 680, gain: .055, decaySteps: 3, filter: 'bandpass' });
+    tone({ freq: 245, end: 285, dur: .08, type: 'triangle', gain: .06, delay: .035 });
+  },
+  danger: () => {
+    tone({ freq: 180, end: 145, dur: .08, type: 'triangle', gain: .13 });
+    tone({ freq: 180, end: 145, dur: .08, type: 'triangle', gain: .13, delay: .13 });
+  },
   multiKill: (notes) => {
     for (let i = 0; i < notes; i++)
       tone({ freq: 720 + i * 170, dur: 0.11, type: 'triangle', gain: 0.17, delay: i * 0.075 });
@@ -326,9 +344,12 @@ export const sfx = {
     if (d > cutoff) return;
     _pan = d < 1.5 ? 0 : Math.max(-0.9, Math.min(0.9,
       (dx * listener.rx + dz * listener.rz) / d));
+    // Height should help locate footsteps without making every gunshot or
+    // explosion above the listener sound unnaturally pitch-shifted.
+    _spatialPitch = name === 'step' ? spatialVerticality(dy, d).pitch : 1;
     const falloff = QUIET[name] ? 0.16 : name === 'drone' || name === 'missile' ? 0.045 : 0.075;
     _scale = 1 / (1 + d * falloff);
     this[name](...args);
-    _pan = 0; _scale = 1;
+    _pan = 0; _scale = 1; _spatialPitch = 1;
   },
 };

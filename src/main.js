@@ -17,6 +17,7 @@ import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
 import { callsignIssue, normalizeCallsign } from './callsign.js';
+import { topSpecialty } from './combat-flow.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -165,31 +166,43 @@ function inviteUrl() {
   url.search = '';
   url.hash = '';
   url.searchParams.set('code', roomCode);
+  url.searchParams.set('invite', '1');
   return url.href;
 }
 function showInvite() { $('inviteRow').style.display = roomCode ? 'block' : 'none'; }
-async function copyInvite() {
-  const url = inviteUrl();
-  if (!url) return;
+async function writeClipboard(value) {
   let copied = false;
   try {
     copied = await Promise.race([
-      navigator.clipboard.writeText(url).then(() => true, () => false),
+      navigator.clipboard.writeText(value).then(() => true, () => false),
       new Promise(resolve => setTimeout(() => resolve(false), 400)),
     ]);
   } catch { /* fallback below */ }
   if (!copied) {
     const input = document.createElement('textarea');
-    input.value = url;
+    input.value = value;
     input.style.position = 'fixed'; input.style.opacity = '0';
     document.body.appendChild(input); input.select();
     try { copied = document.execCommand('copy'); } catch { /* best effort */ }
     input.remove();
   }
+  return copied;
+}
+async function copyInvite() {
+  const url = inviteUrl();
+  if (!url) return;
+  const copied = await writeClipboard(url);
   status(copied ? `invite copied — <b>${roomCode}</b>`
     : `copy unavailable — share room code <b>${roomCode}</b>`);
 }
 $('inviteBtn').addEventListener('click', copyInvite);
+game.onShareResult = async text => {
+  const copied = await writeClipboard(text);
+  const button = $('shareResultBtn');
+  if (!button) return;
+  button.textContent = copied ? 'RESULT COPIED' : 'COPY UNAVAILABLE';
+  setTimeout(() => { button.textContent = 'COPY RESULT'; }, 1800);
+};
 
 // The big DEPLOY/RESUME button only exists once there's a session to enter.
 function showPlay(label) {
@@ -516,6 +529,9 @@ const modePref = $('modePref');
       ? `${mastery.tier.name} MASTERY · ${mastery.points} / ${mastery.next.points} · `
         + `${mastery.remaining} TO ${mastery.next.name}`
       : `${mastery.tier.name} MASTERY · ${mastery.points} · MAXIMUM RANK`;
+    const specialty = topSpecialty(s.specialties).toUpperCase();
+    const specialtyPoints = s.specialties?.[specialty.toLowerCase()] ?? 0;
+    if (specialtyPoints > 0) masteryLine.textContent += ` · ${specialty} SPECIALTY ${specialtyPoints}`;
     gunColors.innerHTML = '';
     const unlockedHex = new Set(stats.unlocked().map(c => c.hex));
     const equipped = stats.gunColor();
@@ -1018,7 +1034,9 @@ $('codeInput').addEventListener('keydown', e => {
 const invitedCode = (params.get('code') ?? '').trim().toUpperCase();
 if (/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(invitedCode) && !params.get('mp')) {
   $('codeInput').value = invitedCode;
-  status(`squad invite ready — enter a callsign and join <b>${invitedCode}</b>`);
+  status(params.get('invite') === '1'
+    ? `joining squad room <b>${invitedCode}</b>…`
+    : `squad invite ready — enter a callsign and join <b>${invitedCode}</b>`);
 }
 
 // Map rotation: the room moves to the next map after each match. The old
@@ -1206,6 +1224,9 @@ if (params.get('mp') === 'host') {
   setTimeout(() => $('quickBtn').click(), 400);
 } else if (params.get('mp') === 'browse') {
   setTimeout(() => $('browseBtn').click(), 400);
+} else if (params.get('invite') === '1' && invitedCode) {
+  if (!rawName()) $('nameInput').value = callsign();
+  setTimeout(() => $('joinBtn').click(), 500);
 }
 
 // ---------------- loop ----------------

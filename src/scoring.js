@@ -1,4 +1,5 @@
 // scoring.js — pure contribution values and assist attribution.
+import { normalizeSpecialties } from './combat-flow.js';
 
 export const CONTRIBUTION = Object.freeze({
   kill: 100,
@@ -42,6 +43,7 @@ export function contributionRow(row = {}) {
     d: Number(row.d) || 0,
     a: Number(row.a) || 0,
     objective: Number(row.objective) || 0,
+    specialties: normalizeSpecialties(row.specialties),
   };
 }
 

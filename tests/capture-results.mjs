@@ -59,6 +59,8 @@ try {
         impact: [...document.querySelectorAll('#endImpactMetrics b')]
           .map(node => Number(node.textContent)),
         pips: document.querySelectorAll('#endProgress i').length,
+        ready: document.querySelector('#readyBtn')?.textContent,
+        share: document.querySelector('#shareResultBtn')?.textContent,
         activePips: document.querySelectorAll('#endProgress i.on').length,
         intermissionTop: box('#endIntermission')?.top,
         boardTop: box('#endBoardLabel')?.top,
@@ -69,7 +71,9 @@ try {
     if (state.map !== 'island' || state.groups.join('|') !== 'GREEN FORCE|BLUE FORCE'
         || state.player !== 'You' || state.playerMarkers !== 0
         || state.impact.join(',') !== '0,52,18,34,1'
-        || state.pips !== 14 || state.activePips < 12 || state.fieldGoalsPresent
+        || state.pips !== 10 || state.activePips < 8
+        || !state.ready?.startsWith('READY FOR NEXT') || state.share !== 'COPY RESULT'
+        || state.fieldGoalsPresent
         || state.horizontalOverflow)
       throw new Error(`${shot.name}: invalid results composition ${JSON.stringify(state)}`);
     if (shot.width <= 760 && !(state.intermissionTop < state.boardTop))

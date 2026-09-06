@@ -287,6 +287,12 @@
   #squadReady { display:none; }
   #squadReady.on { display:block; }
   #squadReady small { display:block; margin-top:5px; font-size:10px; line-height:1.3; opacity:.6; }
+  #roundActions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:12px; }
+  #roundActions button { padding:8px 5px; color:#fff; background:rgba(4,7,9,.28);
+    border:1px solid rgba(255,255,255,.56); font:700 10px "Segoe UI",system-ui,sans-serif;
+    letter-spacing:.5px; cursor:pointer; }
+  #roundActions button:hover { background:rgba(255,255,255,.1); }
+  #roundActions button.voted, #roundActions button:disabled { color:var(--outcome); opacity:.7; }
   #endNote { margin-top:14px; padding-top:10px; border-top:1px solid rgba(255,255,255,.3);
     font-size:12px; font-weight:700; line-height:1.4; }
   #endProgress { display:flex; gap:3px; margin-top:9px; height:10px; }
@@ -348,7 +354,8 @@
   #hud.on { opacity:var(--hud-alpha); }
   #hud .panel, #hud #feed, #hud #msg, #hud #respawn, #hud #classPick,
   #hud #chat, #hud #chatkey, #hud #airstrikeReady,
-  #hud #minimap, #hud #teamPing, #hud #firstMinute { zoom:var(--hud-scale); }
+  #hud #minimap, #hud #teamPing, #hud #firstMinute, #hud #spawnPick,
+  #hud #dangerCue { zoom:var(--hud-scale); }
   /* Square, not a circle — the crosshair was the last always-visible piece
      of geometry in the whole game still shaped like something that isn't a
      box (flagged, not fixed, in the last pass: it's the single most-seen
@@ -463,6 +470,14 @@
     clip-path:polygon(40% 0,60% 0,60% 18%,80% 18%,80% 36%,100% 36%,
       100% 55%,63% 55%,63% 100%,37% 100%,37% 55%,0 55%,0 36%,20% 36%,
       20% 18%,40% 18%); }
+  #dangerCue { --bearing:0rad; display:none; position:fixed; left:50%; top:50%;
+    width:0; height:0; transform:rotate(var(--bearing)); pointer-events:none; }
+  #dangerCue.on { display:block; }
+  #dangerCue .fragArrow { position:absolute; left:-9px; top:-112px; width:18px; height:24px;
+    background:#ffd97a; clip-path:polygon(33% 0,67% 0,67% 34%,100% 34%,50% 100%,0 34%,33% 34%); }
+  #dangerText { position:absolute; left:-42px; top:-137px; width:84px; text-align:center;
+    color:#ffd97a; font-size:10px; font-weight:800; letter-spacing:1px;
+    text-shadow:1px 1px #05080a; }
   html[data-damageqa="on"] #dmgDir { transform:rotate(1.05rad); }
   html[data-damageqa="on"] #dmgDir .chevron { opacity:1; }
 
@@ -603,6 +618,9 @@
     text-transform:uppercase; }
   #classPick .opt, #startClassPick .opt { opacity:.5; }
   #classPick .opt.picked, #startClassPick .opt.picked { opacity:1; color:#ffd97a; }
+  #spawnPick { position:absolute; left:50%; top:68%; transform:translateX(-50%);
+    font-size:10px; letter-spacing:1.6px; opacity:0; text-transform:uppercase; }
+  #spawnPick .picked { color:#ffd97a; font-weight:800; }
 #startClassPick { margin-top:26px; font-size:12px; letter-spacing:2px;
     text-transform:uppercase; }
   #startClassPick .lbl { opacity:.5; margin-bottom:4px; }
@@ -703,6 +721,7 @@
   <div id="hud">
     <div id="crosshair"></div><div id="hitmark"></div>
     <div id="dmgDir"><div class="chevron"></div></div>
+    <div id="dangerCue"><div id="dangerText">FRAG</div><div class="fragArrow"></div></div>
     <div id="killcallout"></div>
     <div id="airstrikeHud"><div class="reticle"></div><div class="label">airstrike — click to confirm</div></div>
     <div id="airstrikeReady">airstrike ready — [F]</div>
@@ -759,6 +778,7 @@
       <div class="opt" data-cls="1">2 SMG</div>
       <div class="opt" data-cls="5">3 SNIPER</div>
     </div>
+    <div id="spawnPick"><span class="picked">F FRONT</span> · <span>B BASE</span></div>
     <div id="chat">
       <div id="chatlog"></div>
       <div id="chatrow">
@@ -836,7 +856,7 @@
     <details class="drawer home-only" id="howTo">
       <summary>how to play</summary>
       <div class="controls">
-        <div><b>W A S D</b> move · <b>SPACE</b> jump · <b>SHIFT</b> sprint · <b>CTRL</b> crouch</div>
+        <div><b>W A S D</b> move · <b>W HOLD</b> sprint · <b>SHIFT</b> sprint/slide · <b>CTRL</b> crouch</div>
         <div><b>MOUSE</b> look · <b>LMB</b> use tool · <b>RMB</b> aim · <b>R</b> reload</div>
         <div><b>1 · Q · E</b> gun · <b>2</b> spade · <b>3</b> block · <b>4</b> grenade</div>
         <div><b>G</b> squad ping · <b>TAB</b> scores · <b>Y</b> team chat · <b>M</b> mute</div>
@@ -976,16 +996,20 @@
             <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
             <small>Your teammates already carry into the next round.</small>
           </div>
+          <div id="roundActions">
+            <button id="readyBtn" type="button">READY FOR NEXT · 0/1</button>
+            <button id="shareResultBtn" type="button">COPY RESULT</button>
+          </div>
           <div id="endNote">rotating to the next map…</div>
           <div id="endProgress" aria-label="Intermission progress">
-            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
           </div>
-          <span id="endProgressLabel">ROTATION IN 14 SEC</span>
+          <span id="endProgressLabel">ROTATION IN 10 SEC</span>
         </aside>
       </div>
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=34"></script>
+  <script type="module" src="./src/main.js?v=36"></script>
 </body>
 </html>

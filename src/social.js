@@ -4,7 +4,7 @@ export const TEAM_PING_RANGE = 80;
 export const TEAM_PING_TTL = 6;
 export const TEAM_PING_COOLDOWN = 2;
 export const TEAM_PING_LIMIT = 4;
-export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL'];
+export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL', 'ENEMY', 'BREACH'];
 export const VOTE_KICK_DURATION = 30;
 export const VOTE_KICK_COOLDOWN = 90;
 

@@ -5,7 +5,7 @@ import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -69,6 +69,7 @@ export function validClientMessage(d) {
     resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n'],
     shoot: ['t', 'k', 'n', 'd', 'o'], dig: ['t', 'k', 'n', 'd', 'o'],
     place: ['t', 'k', 'n', 'd', 'o'], nade: ['t', 'k', 'n', 'd', 'o'],
+    spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'],
   };
   if (!actionKeys[d.k] || !exactKeys(d, actionKeys[d.k], ['t', 'k'])) return false;
   if (d.k === 'chat') return shortString(d.text, 512)
@@ -77,6 +78,8 @@ export function validClientMessage(d) {
   if (d.k === 'strike') return finite(d.x) && finite(d.z) && finite(d.yaw);
   if (d.k === 'mark') return validPingDirection(d.d);
   if (d.k === 'squad') return true;
+  if (d.k === 'ready') return true;
+  if (d.k === 'spawnpref') return d.pref === 'front' || d.pref === 'base';
   if (d.k === 'votekick') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
   if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
   if (d.k === 'reload') return true;
@@ -86,7 +89,7 @@ export function validClientMessage(d) {
 
 function validSnapshot(d) {
   if (!exactKeys(d, ['t', 'p', 'b', 'q', 'full', 'ack', 'wr', 'wh', 'c', 'm',
-      'tb', 'w', 'g', 'a', 'u', 'f', 'h', 'rm', 'o', 'ts'],
+      'tb', 'w', 'g', 'a', 'u', 'f', 'h', 'ct', 'rm', 'o', 'ts'],
       ['t', 'p', 'b', 'c', 'g'])) return false;
   if (!rows(d.p, 15, 10) || !rows(d.b, 10, 10)) return false;
   if (!d.p.every(r => Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30
@@ -122,6 +125,8 @@ function validSnapshot(d) {
         || !finite(d.h[5]) || d.h[5] < 0 || d.h[5] > 120))
       || (d.h.length === 8 && (!Number.isInteger(d.h[6]) || d.h[6] < 0 || d.h[6] > 10
         || !Number.isInteger(d.h[7]) || d.h[7] < 0 || d.h[7] > 10)))) return false;
+  if (d.ct !== null && d.ct !== undefined && (!finiteArray(d.ct, 2)
+      || (d.ct[0] !== 0 && d.ct[0] !== 1) || d.ct[1] < 0 || d.ct[1] > 820)) return false;
   if (d.rm !== undefined && (!isRecord(d.rm)
       || (d.rm.p !== undefined && (!Array.isArray(d.rm.p) || d.rm.p.length > 10 || !d.rm.p.every(finite)))
       || (d.rm.b !== undefined && (!Array.isArray(d.rm.b) || d.rm.b.length > 10 || !d.rm.b.every(finite)))))
@@ -139,11 +144,12 @@ function validEvent(d) {
     col: ['t', 'k', 'cells', 'wr', 'wh'],
     shot: ['t', 'k', 'sid', 'f', 'e', 'hit', 'hex', 'gun'],
     feed: ['t', 'k', 'html'], msg: ['t', 'k', 'text', 'color', 'team'],
-    hit: ['t', 'k', 'kill', 'tier'],
+    hit: ['t', 'k', 'kill', 'tier', 'head'],
     dmgdir: ['t', 'k', 'x', 'z'],
     chat: ['t', 'k', 'name', 'text', 'team', 'scope'],
     mark: ['t', 'k', 'id', 'name', 'team', 'x', 'y', 'z', 'kind'],
     squad: ['t', 'k', 'voters'],
+    ready: ['t', 'k', 'voters'],
     votekick: ['t', 'k', 'active', 'target', 'name', 'voters', 'needed', 'remaining'],
     spawn: ['t', 'k', 'x', 'y', 'z', 'yaw'], corr: ['t', 'k', 'x', 'y', 'z'],
     kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
@@ -171,7 +177,7 @@ function validEvent(d) {
     case 'feed': return shortString(d.html, 1200);
     case 'msg': return shortString(d.text, 500)
       && shortString(d.color, 32) && (d.team === undefined || team(d.team));
-    case 'hit': return typeof d.kill === 'boolean'
+    case 'hit': return typeof d.kill === 'boolean' && (d.head === undefined || d.head === 0 || d.head === 1)
       && (d.tier === null || d.tier === undefined || ['double', 'triple', 'multi'].includes(d.tier));
     case 'dmgdir': return finite(d.x) && finite(d.z);
     case 'chat': return shortString(d.name, 64)
@@ -185,6 +191,8 @@ function validEvent(d) {
     case 'squad': return Array.isArray(d.voters) && d.voters.length <= 10
       && d.voters.every(v => shortString(v, 16))
       && new Set(d.voters).size === d.voters.length;
+    case 'ready': return Array.isArray(d.voters) && d.voters.length <= 10
+      && d.voters.every(v => shortString(v, 16)) && new Set(d.voters).size === d.voters.length;
     case 'votekick': return d.active === false
       ? exactKeys(d, ['t', 'k', 'active'], ['t', 'k', 'active'])
       : d.active === true && Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000
@@ -197,7 +205,7 @@ function validEvent(d) {
     case 'corr': return [d.x, d.y, d.z].every(finite);
     case 'kick': return d.reason === 'integrity' || d.reason === 'vote';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
-      && d.rows.every(r => Array.isArray(r) && r.length === 8 && shortString(r[0], 16)
+      && d.rows.every(r => Array.isArray(r) && r.length === 13 && shortString(r[0], 16)
         && shortString(r[1], 64) && team(r[2]) && r.slice(3).every(finite));
     case 'end': return team(d.winner)
       && (d.story === undefined || validVoxelStoryMetrics(d.story));

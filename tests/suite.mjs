@@ -33,7 +33,7 @@ import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
 import { modeScoreLimit } from '../src/match-modes.js';
 import { PresentationSchedule } from '../src/presentation.js';
-import { reloadPitch, sfx, voxelSurface } from '../src/audio.js';
+import { reloadPitch, sfx, spatialVerticality, voxelSurface } from '../src/audio.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
@@ -43,7 +43,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
 import { CTF_SPAWN, FLAG_RETURN_TIME, ctfFrontlineAllowed, ctfObjectiveKind,
   modeMatchSeconds, regulationDecision, respawnWaveDelay,
   tacticalSpawnScore } from '../src/pacing.js';
-import { assistCreditors, CONTRIBUTION, rankContributionRows } from '../src/scoring.js';
+import { assistCreditors, CONTRIBUTION, contributionRow, rankContributionRows } from '../src/scoring.js';
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
 import { AIRSTRIKE_COST, availableStreakAbility, gainStreak,
@@ -61,6 +61,8 @@ import { FirstMinuteGuide, firstMinuteObjective } from '../src/first-minute.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
+import { autoSprint, contactCue, ctfEscalation, intensityCue, nextBotDifficulty,
+  normalizeSpecialties, topSpecialty, usefulVoxelAction } from '../src/combat-flow.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -73,6 +75,45 @@ const scene = () => new THREE.Scene();
 const dataHash = w => crypto.createHash('sha1')
   .update(Buffer.from(w.data.buffer, w.data.byteOffset, w.data.byteLength))
   .digest('hex').slice(0, 12);
+
+function combatFlowTests() {
+  group('combat flow: bounded pressure, escalation, and recognition');
+  ok('auto sprint requires a grounded forward commitment and preserves controlled strafing',
+    autoSprint({ forward: true, grounded: true, held: .25 })
+      && !autoSprint({ forward: true, grounded: true, held: .24 })
+      && !autoSprint({ forward: true, grounded: true, held: 1, strafe: true })
+      && autoSprint({ forward: true, grounded: true, shift: true, strafe: true }));
+  ok('contact cue only uses already credible public candidates and has cooldown-safe state',
+    contactCue({ alive: true, lastAction: 0 }, 12, [{ kind: 'intel', x: 4, z: 8 }])?.label === 'CONTACT REPORTED'
+      && contactCue({ alive: true, lastAction: 0, lastCue: 5 }, 12, [{ kind: 'intel', x: 4, z: 8 }]) === null);
+  ok('CTF escalation is symmetric, bounded, and reverts to ordinary return timing',
+    ctfEscalation({ progressAt: 0 }, 82).returnTime === 12
+      && ctfEscalation({ active: true, progressAt: 80 }, 81).frontlineBonus === 8
+      && !ctfEscalation({ active: true, progressAt: 0 }, 90, true).active
+      && ctfEscalation({}, 0).returnTime === 15);
+  ok('voxel recognition rejects meaningless edits and classifies only useful work',
+    usefulVoxelAction({ type: 'dig', changedPassability: true }) === 'BREACH OPENED'
+      && usefulVoxelAction({ type: 'build', bridgedGap: true }) === 'ROUTE BUILT'
+      && usefulVoxelAction({ type: 'build' }) === null);
+  const specialties = normalizeSpecialties({ smg: 12, terrain: -9, objective: 4e9 });
+  ok('sideways specialties migrate with finite bounds and expose one concise best discipline',
+    specialties.terrain === 0 && specialties.objective === 999999 && topSpecialty(specialties) === 'objective');
+  ok('intensity cues are one-shot thresholds rather than a permanent HUD layer',
+    intensityCue({ mode: 'tdm', green: 40, blue: 35 })?.id === 'final-ten'
+      && intensityCue({ mode: 'tdm', green: 40, blue: 35, fired: ['final-ten'] }) === null
+      && intensityCue({ mode: 'koth', remaining: 30 })?.id === 'last-thirty');
+  ok('between-round bot cognition moves at most one authored profile',
+    nextBotDifficulty('normal', { margin: 500, humanScore: 900, medianScore: 400 }) === 'hard'
+      && nextBotDifficulty('hard', { margin: 500, humanScore: 900, medianScore: 400 }) === 'hard'
+      && nextBotDifficulty('normal', { margin: -500, humanScore: 100, medianScore: 400 }) === 'easy');
+  ok('footstep verticality stays subtle and directionally distinct',
+    spatialVerticality(8, 10).vertical === 'above'
+      && spatialVerticality(-8, 10).vertical === 'below'
+      && spatialVerticality(0, 10).pitch === 1);
+  const row = contributionRow({ specialties: { sniper: 3, terrain: 2 } });
+  ok('authoritative contribution rows retain sideways specialty counts',
+    row.specialties.sniper === 3 && row.specialties.terrain === 2);
+}
 const colorHash = m => m
   ? crypto.createHash('sha1')
       .update(Buffer.from(Float32Array.from(m.geometry.attributes.color.array).buffer))
@@ -522,9 +563,18 @@ function multiplayerRuleTests() {
       && !validServerMessage({ t: 'e', k: 'died', rt: 90 }));
   ok('expanded contribution scoreboard rows pass the trust boundary',
     validServerMessage({ t: 'e', k: 'kd',
-      rows: [['p0', 'Player', 'green', 2, 1, 325, 1, 4]] })
+      rows: [['p0', 'Player', 'green', 2, 1, 325, 1, 4, 2, 0, 0, 4, 1]] })
       && !validServerMessage({ t: 'e', k: 'kd',
-        rows: [['p0', 'Player', 'green', 2, 1, 'lots', 1, 4]] }));
+        rows: [['p0', 'Player', 'green', 2, 1, 'lots', 1, 4, 2, 0, 0, 4, 1]] }));
+  ok('respawn preferences and intermission readiness are strict bounded actions',
+    validClientMessage({ t: 'a', k: 'spawnpref', pref: 'base' })
+      && validClientMessage({ t: 'a', k: 'ready' })
+      && !validClientMessage({ t: 'a', k: 'spawnpref', pref: 'enemy' })
+      && !validClientMessage({ t: 'a', k: 'ready', fast: true }));
+  ok('ready rosters and headshot feedback are bounded server events',
+    validServerMessage({ t: 'e', k: 'ready', voters: ['p0', 'p2'] })
+      && validServerMessage({ t: 'e', k: 'hit', kill: true, head: 1 })
+      && !validServerMessage({ t: 'e', k: 'hit', kill: true, head: 2 }));
   const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0, mode: 'ctf',
     me: 2, migrated: 1, reset: 1, spawn: [10, 20, 30, 0], log: [],
     r: { p: [], b: [] } };
@@ -833,6 +883,11 @@ function streakRuleTests() {
     validServerMessage(snapshot)
       && !validServerMessage({ ...snapshot, u: [[0, 701]] })
       && !validServerMessage({ ...snapshot, u: [[0, 500, 0, 0]] }));
+  ok('CTF pressure survives migration without accepting forged timer state',
+    validServerMessage({ ...snapshot, ct: [1, 820] })
+      && validServerMessage({ ...snapshot, ct: null })
+      && !validServerMessage({ ...snapshot, ct: [1, 821] })
+      && !validServerMessage({ ...snapshot, ct: [2, 10] }));
   ok('retired reward actions and events are rejected at the wire boundary',
     !validClientMessage({ t: 'a', k: 'overcharge', n: 1 })
       && !validServerMessage({ t: 'e', k: 'overcharge', owner: 2,
@@ -955,6 +1010,10 @@ function engagementFoundationTests() {
     clean.mode === 'ctf' && clean.map === 2 && clean.humans === 4
       && !('name' in clean) && !('chat' in clean) && !('roomCode' in clean)
       && !('x' in clean) && !('z' in clean));
+  ok('post-match continuation records intent without identity or room data',
+    JSON.stringify(sanitizeEngagementEvent('continuation', {
+      action: 'ready', name: 'Ada', roomCode: 'TEST', x: 20,
+    })) === JSON.stringify({ action: 'ready' }));
   ok('unknown event types are refused instead of accepting free-form data',
     sanitizeEngagementEvent('custom_event', { anything: 'goes' }) === null);
 
@@ -2047,6 +2106,7 @@ export async function run() {
   multiplayerRuleTests();
   botRuleTests();
   pacingRuleTests();
+  combatFlowTests();
   contributionRuleTests();
   kothRuleTests();
   streakRuleTests();

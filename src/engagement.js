@@ -51,11 +51,13 @@ const EVENT_FIELDS = Object.freeze({
   kill: ['cause'],
   disconnect: ['reason'],
   match_finish: ['outcome', 'won', 'duration', 'overtime', 'scoreMargin'],
+  continuation: ['action'],
 });
 
 const ENUMS = Object.freeze({
   action: new Set(['solo', 'host', 'join', 'quick', 'browse', 'browse_join', 'deploy',
     'shoot', 'dig', 'place', 'grenade', 'ping', 'objective', 'airstrike',
+    'ready', 'spawn_front', 'spawn_base', 'continue',
     'other']),
   mode: new Set(['ctf', 'tdm', 'koth', 'other']),
   network: new Set(['solo', 'host', 'client', 'other']),

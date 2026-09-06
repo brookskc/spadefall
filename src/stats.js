@@ -4,6 +4,7 @@
 // lives on this browser, same as everything else about this game.
 import { RECORD_FIELDS, updatePersonalBests } from './match-report.js';
 import { masteryProgress } from './mastery.js';
+import { normalizeSpecialties, topSpecialty } from './combat-flow.js';
 
 const KEY = 'tos.stats';
 
@@ -36,11 +37,12 @@ function load() {
       matches: raw.matches | 0, wins: raw.wins | 0,
       masteryPoints: Number.isFinite(masteryPoints) ? Math.max(0, Math.floor(masteryPoints)) : 0,
       gunColor: Number.isFinite(raw.gunColor) ? raw.gunColor : DEFAULT_HEX,
+      specialties: normalizeSpecialties(raw.specialties),
       records,
     };
   } catch {
     return { kills: 0, deaths: 0, matches: 0, wins: 0, masteryPoints: 0, gunColor: DEFAULT_HEX,
-      records: { ctf: {}, tdm: {}, koth: {} } };
+      specialties: normalizeSpecialties(), records: { ctf: {}, tdm: {}, koth: {} } };
   }
 }
 function save(s) {
@@ -52,7 +54,7 @@ function save(s) {
 let state = load();
 
 export const stats = {
-  get() { return { ...state, records: Object.fromEntries(
+  get() { return { ...state, specialties: { ...state.specialties }, records: Object.fromEntries(
     Object.entries(state.records).map(([mode, row]) => [mode, { ...row }])) }; },
   unlocked() { return GUN_COLORS.filter(c => state.kills >= c.kills); },
   addKill() { state.kills++; save(state); },
@@ -65,10 +67,17 @@ export const stats = {
     state.masteryPoints += Math.max(0, Math.floor(Number(row?.score) || 0));
     const update = updatePersonalBests(state.records, mode, row);
     state.records = update.records;
+    // Result rows are authoritative contribution summaries. Weapon/terrain
+    // callers may supply bounded actual-action counts; old saves simply
+    // migrate to zero without impacting power or matchmaking.
+    state.specialties = normalizeSpecialties(Object.fromEntries(Object.entries(state.specialties)
+      .map(([key, value]) => [key, value + Math.max(0, Math.floor(Number(row?.specialties?.[key]) || 0))])));
     save(state);
     const mastery = masteryProgress(state.masteryPoints);
+    const specialty = topSpecialty(state.specialties);
     return { ...update, mastery,
-      newMasteryTier: mastery.index > beforeMastery.index ? mastery.tier : null };
+      newMasteryTier: mastery.index > beforeMastery.index ? mastery.tier : null,
+      specialty: state.specialties[specialty] > 0 ? specialty : null };
   },
   mastery() { return masteryProgress(state.masteryPoints); },
   gunColor() { return state.gunColor; },

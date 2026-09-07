@@ -2,6 +2,9 @@ name = "spadefall-turn"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
+[vars]
+TURN_KEY_ID = "e8923038f4bb1529ea262e672ce30591"
+
 # TURN_API_TOKEN is deliberately absent: it is a secret, set once with
 #   wrangler secret put TURN_API_TOKEN
 # so it never lands in this file or in git.

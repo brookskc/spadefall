@@ -25,7 +25,7 @@ import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } f
 import { allowInbound, claimErrorKind, claimPeerChannel, Net, peerOptions, primeIce,
   probeErrorKind, PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce,
   shouldSend, slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
-import { handleRequest as handleTurnRequest, originAllowed,
+import turnWorker, { handleRequest as handleTurnRequest, originAllowed,
   validDiagnosticsEnvelope } from '../worker/src/index.js';
 import { WORLD_HASH_SEED, advanceWorldHash, impairPackets, snapshotDisposition,
   worldEventDisposition, worldLogHash } from '../src/network-sync.js';
@@ -2392,11 +2392,19 @@ async function turnWorkerTests() {
   await handleTurnRequest(request(), env, fetcher);
   ok('credentials are minted per request instead of shared across players', minted === 2);
 
+  const nativeFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = fetcher;
+    const runtimeResponse = await turnWorker.fetch(request(), env, { waitUntil() {} });
+    ok('the module handler does not mistake Cloudflare execution context for fetch',
+      runtimeResponse.status === 200 && minted === 3);
+  } finally { globalThis.fetch = nativeFetch; }
+
   const forbidden = await handleTurnRequest(new Request('https://turn.example/ice', {
     headers: { origin: 'https://attacker.test' },
   }), env, fetcher);
   ok('unexpected origins are rejected before rate limiting or minting',
-    forbidden.status === 403 && minted === 2 && limited === 2
+    forbidden.status === 403 && minted === 3 && limited === 3
       && !forbidden.headers.has('access-control-allow-origin'));
   const wrongPath = await handleTurnRequest(new Request('https://turn.example/nope', {
     headers: { origin: 'https://spadefall.io' },

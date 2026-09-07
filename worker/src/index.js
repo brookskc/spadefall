@@ -1,3 +1,4 @@
+/* global console */
 // index.js — mints short-lived Cloudflare TURN credentials for Spadefall.
 //
 // Why this exists: the TURN key's API token is a long-lived secret that can
@@ -176,11 +177,18 @@ export async function handleRequest(request, env, fetcher = fetch) {
   }
   try {
     return json(await mint(env, fetcher), 200, origin);
-  } catch {
+  } catch (error) {
+    console.error('TURN credential mint failed',
+      error instanceof Error ? error.message : 'unknown error');
     // The game plays on without a relay, so this is degraded connection
     // coverage rather than a game outage. Do not expose upstream details.
     return json({ error: 'credentials unavailable' }, 502, origin);
   }
 }
 
-export default { fetch: handleRequest };
+// Cloudflare invokes module handlers as (request, env, executionContext).
+// Keep the injectable fetcher on handleRequest for tests, but do not forward
+// the runtime's execution context into that slot.
+export default {
+  fetch(request, env) { return handleRequest(request, env); },
+};

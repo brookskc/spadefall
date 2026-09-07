@@ -12,6 +12,9 @@ export function acquireTarget(bot, profile, { THREE }) {
     if (!f.alive) continue;
     const d = bot.body.pos.distanceTo(f.body.pos);
     if (d >= profile.vision) continue;
+    // A flag carrier retains an already-close defender, but does not acquire
+    // a new long-range duel that would distract the run home.
+    if (bot.carrier && f !== bot.target && d > 18) continue;
     if (f !== bot.target) { // a target already being tracked stays tracked
       to.subVectors(f.body.pos, bot.body.pos).setY(0).normalize();
       if (d > 7 && bot.face.dot(to) < 0.26) continue; // outside the ~150° cone
@@ -28,7 +31,8 @@ export function acquireTarget(bot, profile, { THREE }) {
 
 // Shovel a single voxel (debris, edit log, network sync all handled inside).
 export function digVoxel(bot, x, y, z) {
-  if (bot.game.world.solid(x, y, z)) bot.game.digVoxel(bot, x, y, z);
+  if (bot.game.world.solid(x, y, z)) return bot.game.digVoxel(bot, x, y, z);
+  return false;
 }
 
 // Knee-high cover already standing between us and the foe?

@@ -33,7 +33,8 @@ import { assistCreditors, CONTRIBUTION, contributionRow,
   rankContributionRows } from './scoring.js';
 import { HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from './koth.js';
-import { AIRSTRIKE_COST, availableStreakAbility, gainStreak, spendStreak } from './streaks.js';
+import { AIRSTRIKE_COST, availableStreakAbility, chooseBotAirstrikeTarget,
+  gainStreak, predictBotAirstrikePoint, spendStreak, steerBotAirstrike } from './streaks.js';
 import { buildMatchReport } from './match-report.js';
 import { staySquadGroups, staySquadState,
   TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL,
@@ -112,6 +113,10 @@ export const MAX_HUMANS = Number.isInteger(capParam) ? Math.min(HUMAN_CAP, Math.
 // genuinely clear, unobstructed sightline across the map is legitimate
 // play here, not something to hide from them.
 const INTEREST_CLOSE_R = 8;
+// Spawn exposure is judged at practical sniper sightline distance. Keeping a
+// single value prevents CTF, KOTH, TDM, and protected-base fallbacks from
+// quietly drifting into different definitions of an unsafe deployment.
+const SPAWN_DANGER_LOS = 110;
 // Aim-angle plausibility: the max implied turn rate between two
 // consecutive ACCEPTED shots (angle changed / time elapsed) before a
 // report gets treated as not humanly plausible. 10*PI rad/s = 1800 deg/s
@@ -139,6 +144,8 @@ const AIRSTRIKE_TELEGRAPH_T = 3;
 // for the local, unvalidated visual — same circular-import reason as
 // AIRSTRIKE_TELEGRAPH_T. This copy is what the host actually enforces.
 const AIRSTRIKE_STEER_SPEED = 12;
+// Bot identities live outside the human roster-index space used on the wire.
+const BOT_STRIKE_OWNER_BASE = 1000000;
 const AIRSTRIKE_DRONE_ALTITUDE = 23;
 const AIRSTRIKE_DRONE_START = -78;
 const AIRSTRIKE_DRONE_END = 10;
@@ -735,11 +742,10 @@ export class Game {
     if (e === this.player) this.engagement?.contribution({
       points: earned, assists, objective,
     });
-    // Human streak rewards use the exact same contribution values as the
+    // All authoritative combatants earn the exact same contribution values as
     // scoreboard. Kills still matter, but assists and playing the objective
-    // now advance the meter too. Bots do not call rewards, so don't maintain
-    // a meter they can never spend.
-    if (e === this.player || e.isRemote) e._streak = gainStreak(e._streak, earned);
+    // now advance the meter too. Bots spend their host-side meter autonomously.
+    e._streak = gainStreak(e._streak, earned);
     this._scoreDirty = true;
     if (refresh) hud.statsRefresh(this);
   }
@@ -986,19 +992,37 @@ export class Game {
   _baseSpawnPoint(team) {
     const b = BASE[team];
     const dir = team === 'green' ? 1 : -1; // just outside the gate, facing the field
-    const foes = this.foesOf(team).filter(e => e.alive).map(e => e.body.pos);
-    let best = null, bestScore = -1;
-    for (let i = 0; i < 16; i++) {
+    const foeEntities = this.foesOf(team).filter(e => e.alive && e.body);
+    const foes = foeEntities.map(e => e.body.pos);
+    const allies = this.entities().filter(e => e?.alive && e.team === team && e.body)
+      .map(e => e.body.pos);
+    const recentDeaths = (this._recentDeaths ?? []).filter(d => d.team === team);
+    let best = null, bestScore = -Infinity;
+    for (let i = 0; i < 32; i++) {
       const x = b.x + dir * (4 + Math.random() * 16) + (Math.random() - 0.5) * 8;
       const z = b.z + (Math.random() - 0.5) * 36;
       const candidate = this._spawnSurface(x, z);
       if (!candidate) continue;
-      let nearest = 40;
-      for (const f of foes) nearest = Math.min(nearest,
-        Math.hypot(f.x - x, f.y - candidate.y, f.z - z));
-      if (nearest > bestScore) { bestScore = nearest; best = candidate; }
+      const eye = new THREE.Vector3(candidate.x, candidate.y + 1.4, candidate.z);
+      let visibleEnemies = 0;
+      for (const foe of foeEntities) {
+        const foeEye = foe.body.eye ? foe.body.eye()
+          : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
+        if (eye.distanceTo(foeEye) <= SPAWN_DANGER_LOS && this.losClear(eye, foeEye)) {
+          visibleEnemies++;
+          break;
+        }
+      }
+      const score = tacticalSpawnScore(candidate, {
+        enemies: foes, allies, visibleEnemies, recentDeaths, mode: this.gameMode,
+        objective: { x: SX / 2, z: SZ / 2 },
+      });
+      if (score > bestScore) { bestScore = score; best = candidate; }
     }
     if (best) return best;
+    // A fully camped base can make every strict candidate invalid. Preserve a
+    // deterministic protected deployment rather than returning no spawn; the
+    // normal spawn protection window gives the wiped team room to break out.
     const x = b.x + dir * 12, z = b.z;
     return { x, y: this.world.surface(Math.floor(x), Math.floor(z)) + 1.02, z };
   }
@@ -1021,7 +1045,7 @@ export class Game {
       return foes.some(foe => {
         const foeEye = foe.body.eye ? foe.body.eye()
           : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
-        return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+        return eye.distanceTo(foeEye) <= SPAWN_DANGER_LOS && this.losClear(eye, foeEye);
       }) ? 1 : 0;
     };
     // Carriers are never anchors: redeploying beside one makes the flag
@@ -1071,7 +1095,7 @@ export class Game {
       for (const foe of foes) {
         const foeEye = foe.body.eye ? foe.body.eye()
           : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
-        if (eye.distanceToSquared(foeEye) <= 65 * 65 && this.losClear(eye, foeEye)) {
+        if (eye.distanceToSquared(foeEye) <= SPAWN_DANGER_LOS ** 2 && this.losClear(eye, foeEye)) {
           visibleEnemies = 1;
           break;
         }
@@ -1124,7 +1148,7 @@ export class Game {
         return foes.some(foe => {
           const foeEye = foe.body.eye ? foe.body.eye()
             : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
-          return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+          return eye.distanceTo(foeEye) <= SPAWN_DANGER_LOS && this.losClear(eye, foeEye);
         }) ? 1 : 0;
       };
       const anchors = allies.filter(ally => tdmAnchorAllowed(ally, {
@@ -1172,7 +1196,7 @@ export class Game {
         return foes.some(foe => {
           const foeEye = foe.body.eye ? foe.body.eye()
             : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
-          return eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye);
+          return eye.distanceTo(foeEye) <= SPAWN_DANGER_LOS && this.losClear(eye, foeEye);
         }) ? 1 : 0;
       };
       const anchors = allies.filter(ally => kothAnchorAllowed(ally, {
@@ -1227,7 +1251,7 @@ export class Game {
       for (const foe of foes) {
         const foeEye = foe.body.eye ? foe.body.eye()
           : new THREE.Vector3(foe.body.pos.x, foe.body.pos.y + 1.4, foe.body.pos.z);
-        if (eye.distanceTo(foeEye) <= 65 && this.losClear(eye, foeEye))
+        if (eye.distanceTo(foeEye) <= SPAWN_DANGER_LOS && this.losClear(eye, foeEye))
           visibleEnemies++;
       }
       const score = tacticalSpawnScore(candidate, {
@@ -1550,6 +1574,23 @@ export class Game {
       this._botBrainCursor, 3);
     this._botBrainCursor = scheduled.cursor;
     this._botThinkSet = new Set(scheduled.ids);
+  }
+
+  _updateBotAirstrikes() {
+    if (!this._pendingStrikes) return;
+    const reserved = this._pendingStrikes.map(s => s.pos);
+    for (const bot of this.bots) {
+      if (!bot.alive || this.availableStreak(bot) !== 'airstrike'
+          || this._pendingStrikes.some(s => s.attacker === bot)) continue;
+      const foes = this.foesOf(bot.team).filter(e => e.alive).map(e =>
+        predictBotAirstrikePoint(e.body.pos, e.body.vel, 0.45, SX, SZ)).filter(Boolean);
+      const allies = this.entities().filter(e => e.alive && e.team === bot.team)
+        .filter(e => e !== bot).map(e => e.body.pos);
+      const target = chooseBotAirstrikeTarget(foes, allies, reserved);
+      if (!target) continue;
+      this._confirmAirstrike(bot, target.x, target.z, bot.heading > 0 ? 0 : Math.PI);
+      reserved.push(target);
+    }
   }
 
   botTelemetry() {
@@ -2144,9 +2185,10 @@ export class Game {
   }
 
   digVoxel(who, x, y, z) {
+    if (Number.isFinite(who?._editTokens) && who._editTokens < 1) return false;
     const v = this.world.get(x, y, z);
-    if (!v) return;
-    if (this._protectedVoxelReason(x, y, z)) return;
+    if (!v) return false;
+    if (this._protectedVoxelReason(x, y, z)) return false;
     this.applyEdit(x, y, z, 0, who);
     this.effects.blockBurst([{ x, y, z, v }]);
     if (who === this.player) {
@@ -2167,6 +2209,11 @@ export class Game {
       || v === BLOCK.BLUE || v === BLOCK.GREEN;
     this._recognizeVoxel(who, usefulVoxelAction({ type: 'dig',
       changedPassability: changedPassability && tactical }));
+    if (Number.isFinite(who?._editTokens)) {
+      who._editTokens = Math.max(0, who._editTokens - 1);
+      who._terrainEdits++;
+    }
+    return true;
   }
 
   playerDig(p, origin = null, dir = null) {
@@ -2205,6 +2252,7 @@ export class Game {
   // Shared placement rules for players and bots: cell must be empty, nobody
   // gets entombed, the builder's team color is used, inventory decremented.
   tryBuild(p, x, y, z) {
+    if (Number.isFinite(p?._editTokens) && p._editTokens < 1) return false;
     if (p.blocks <= 0 || this.world.get(x, y, z)) return false;
     const protectedReason = this._protectedBuildReason(x, y, z);
     if (protectedReason) {
@@ -2239,6 +2287,10 @@ export class Game {
     this._recognizeVoxel(p, usefulVoxelAction({ type: 'build',
       bridgedGap, tactical: recentCombat,
       blockedThreat: clearThreats.some(e => !this.losClear(e.body.eye(), pCenter)) }));
+    if (Number.isFinite(p?._editTokens)) {
+      p._editTokens = Math.max(0, p._editTokens - 1);
+      p._terrainEdits++;
+    }
     return true;
   }
 
@@ -2372,7 +2424,8 @@ export class Game {
     attacker._streak = spendStreak(attacker._streak, AIRSTRIKE_COST);
     const y = this.world.surface(Math.floor(x), Math.floor(z)) + 1;
     const id = this._nextStrikeId++;
-    const owner = attacker === this.player ? this._hostIdx : attacker.ridx;
+    const owner = attacker === this.player ? this._hostIdx
+      : attacker.isRemote ? attacker.ridx : BOT_STRIKE_OWNER_BASE + attacker.id;
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'telegraph',
       id, x, y, z, yaw, remaining: AIRSTRIKE_TELEGRAPH_T, owner });
     this._telegraph(x, y, z);
@@ -4727,6 +4780,21 @@ export class Game {
           s.pos.x = np.x; s.pos.z = np.z;
           s.pos.y = this.world.surface(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
         }
+        // A bot may guide only while it lives. It steers toward a bounded
+        // predicted pressure point; death stops guidance but never cancels
+        // the confirmed missile.
+        if (s.attacker?.id !== undefined && s.attacker.alive) {
+          const foes = this.foesOf(s.attacker.team).filter(e => e.alive).map(e =>
+            predictBotAirstrikePoint(e.body.pos, e.body.vel, 0.45, SX, SZ)).filter(Boolean);
+          const allies = this.entities().filter(e => e.alive && e.team === s.attacker.team)
+            .filter(e => e !== s.attacker).map(e => e.body.pos);
+          const target = chooseBotAirstrikeTarget(foes, allies, []);
+          const next = target && steerBotAirstrike(s.pos, target, AIRSTRIKE_STEER_SPEED * dt);
+          if (next) {
+            s.pos.x = next.x; s.pos.z = next.z;
+            s.pos.y = this.world.surface(Math.floor(next.x), Math.floor(next.z)) + 1;
+          }
+        }
         s.t -= dt;
         if (s.t <= 0) {
           this._airstrikeImpact(s.pos, s.attacker, s.id);
@@ -4740,6 +4808,7 @@ export class Game {
     if (this.player.alive) this.player.update(dt);
     else this.player.deathCam(dt);
     this._updateBotTactics(dt);
+    this._updateBotAirstrikes();
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);

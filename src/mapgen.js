@@ -849,17 +849,17 @@ function genCrown(world, seed) {
       // Four causeways: ramp up the skirt, bridge over the moat.
       const along = Math.max(Math.abs(x - CX), Math.abs(z - CZ));
       const perp = Math.min(Math.abs(x - CX), Math.abs(z - CZ));
-      if (perp < 3.5 && along > 4 && along < 44) {
+      if (perp < 5.5 && along > 4 && along < 44) {
         const t = clamp01((along - 16) / 24);
         const target = TOP * (1 - t) + Math.max(field, SEA + 1.5) * t;
-        const b = clamp01((3.5 - perp) / 1.5);           // 1 centerline → 0 edge
+        const b = clamp01((5.5 - perp) / 2.5);           // 1 centerline → 0 edge
         h = h * (1 - b) + target * b;
       }
       // North/south causeways have a short raised bridge span over the moat.
       // Leave the span's footprint low here, then lay ordinary stone voxels
       // after fillColumns so destroying them exposes a real, rebuildable gap.
       const span = (Math.abs(z - (CZ - 32)) <= 4 || Math.abs(z - (CZ + 32)) <= 4)
-        && Math.abs(x - CX) <= 2;
+        && Math.abs(x - CX) <= 4;
       if (span) h = Math.min(h, SEA - 1);
       height[at(x, z)] = Math.min(SY - 8, h);
     }
@@ -872,7 +872,7 @@ function genCrown(world, seed) {
   // their abutments and the east/west causeway fallbacks stay permanent.
   for (const spanZ of [CZ - 32, CZ + 32])
     for (let z = spanZ - 4; z <= spanZ + 4; z++)
-      for (let x = CX - 2; x <= CX + 2; x++)
+      for (let x = CX - 4; x <= CX + 4; x++)
         put(world, x, SEA + 8, z, BLOCK.STONE);
 
   // The ring fort: a broken stone circle on the crown, gates on the four

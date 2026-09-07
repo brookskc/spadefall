@@ -20,7 +20,13 @@ export function laned(bot, pos, context) {
   // stays in beyond ~35 units out (still spread crossing the field);
   // zero within 15 (already converged well before the wall's own
   // 9-unit radius comes into play).
-  const d = Math.hypot(v.x - bot.body.pos.x, v.z - bot.body.pos.z);
+  // In CTF, convergence is based on forward distance to the flag line. Using
+  // Euclidean distance made the lane offset count against itself: a flanker
+  // 44 blocks north of the stand remained "far away" forever and patrolled
+  // beside the bunker instead of entering its gate.
+  const d = bot.game.gameMode === 'ctf'
+    ? Math.abs(v.x - bot.body.pos.x)
+    : Math.hypot(v.x - bot.body.pos.x, v.z - bot.body.pos.z);
   const taper = Math.min(1, Math.max(0, (d - 15) / 20));
   let lane = bot.lane;
   if (bot.game.gameMode === 'ctf') {
@@ -147,7 +153,11 @@ export function goal(bot, context) {
     }
     return g.hill.pos;
   }
-  if (!own) { bot.role = 'attack'; return huntGoal(bot, context); }     // deathmatch: hunt
+  if (!own) {
+    bot.role = 'attack';
+    const target = huntGoal(bot, context);
+    return target;
+  }     // deathmatch: hunt
   // The host-side director assigns stable, mode-aware roles. The rank-based
   // fallback keeps old migrated bot rows safe until the first director tick.
   const botRank = rank(bot);

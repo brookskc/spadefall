@@ -80,6 +80,20 @@ export function botDifficultyKey(code) {
 const finitePoint = p => p && Number.isFinite(p.x) && Number.isFinite(p.z);
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2;
 
+export const BOT_LIFE_EDIT_BUDGET = 12;
+export const BOT_EDIT_REFILL_SECONDS = 8;
+// Terrain is an emergency tool, not ordinary navigation. A small token bucket
+// bounds bursts while replenishing slowly enough that a long-lived bot can
+// eventually escape changed terrain instead of becoming permanently inert.
+export function botTerrainEditAllowed(bot, { water = false, stuck = 0,
+  undermining = false, tacticalBuild = false } = {}) {
+  if (!bot || !Number.isFinite(bot._editTokens) || bot._editTokens < 1) return false;
+  return water || undermining || stuck >= 2 || tacticalBuild;
+}
+
+export const smgClosingIntent = (gunClass, distance, visible = true) =>
+  gunClass === 1 && visible && Number.isFinite(distance) && distance > 14;
+
 // Once line of sight breaks, aim and movement use this fading last-known
 // position rather than reading the live entity. The deterministic drift models
 // uncertainty while keeping replays and tests stable.
@@ -135,8 +149,11 @@ export function assignBotRoles(mode, bots, context = {}) {
   const used = new Set();
   if (context.ownFlagEmergency && finitePoint(context.ownFlag))
     for (const b of nearest(context.ownFlag).slice(0, 2)) set(b, 'recover', used);
-  if (finitePoint(context.friendlyCarrier))
-    set(nearest(context.friendlyCarrier, unassigned(used))[0], 'escort', used);
+  if (finitePoint(context.friendlyCarrier)) {
+    const escortCap = living.length >= 5 ? 2 : 1;
+    for (const b of nearest(context.friendlyCarrier, unassigned(used)).slice(0, escortCap))
+      set(b, 'escort', used);
+  }
   set(nearest(context.ownStand, unassigned(used))[0], 'defend', used);
   set(nearest(context.midfield, unassigned(used))[0], 'mid', used);
   const attackers = unassigned(used);

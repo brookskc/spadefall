@@ -44,8 +44,11 @@ import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
   impactSpeedForFallDistance, stepBreath } from '../src/environment.js';
 import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   botSeparation, botsForSquadOrder, botTargetScore,
-  botTelemetrySummary, chooseLocalRoute, hillPost, rememberedEnemyPosition,
+  botTelemetrySummary, botTerrainEditAllowed, BOT_LIFE_EDIT_BUDGET,
+  chooseLocalRoute, hillPost, rememberedEnemyPosition,
+  smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
+import { laned } from '../src/bot-navigation.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -57,7 +60,8 @@ import { assistCreditors, CONTRIBUTION, contributionRow, rankContributionRows } 
 import { HILL_ACTIVE_TIME, HILL_MOVE_WARNING, nextHillIndex,
   occupiedScoringTeam, stepHillCapture, stepHillRotation } from '../src/koth.js';
 import { AIRSTRIKE_COST, availableStreakAbility, gainStreak,
-  spendStreak } from '../src/streaks.js';
+  spendStreak, chooseBotAirstrikeTarget, predictBotAirstrikePoint,
+  steerBotAirstrike } from '../src/streaks.js';
 import { buildMatchReport, medalAwards, updatePersonalBests } from '../src/match-report.js';
 import { masteryProgress } from '../src/mastery.js';
 import { staySquadGroups, staySquadState, voteKickVotesNeeded,
@@ -299,6 +303,8 @@ function mapgenTests() {
   generateMap(crownSignature, 12345, 4);
   ok('CROWN keeps east/west fallbacks and symmetric editable north/south spans',
     crownSignature.get(128, SEA + 8, 96) === BLOCK.STONE
+      && crownSignature.get(124, SEA + 8, 96) === BLOCK.STONE
+      && crownSignature.get(132, SEA + 8, 160) === BLOCK.STONE
       && crownSignature.get(128, SEA + 8, 160) === BLOCK.STONE
       && crownSignature.surface(96, 128) >= SEA
       && crownSignature.surface(160, 128) >= SEA);
@@ -771,6 +777,25 @@ function botRuleTests() {
     Object.values(ctfRoles).filter(r => r === 'recover').length === 2
       && Object.values(ctfRoles).includes('escort')
       && Object.values(ctfRoles).includes('defend'));
+  const carrierRoles = assignBotRoles('ctf', squad, {
+    friendlyCarrier: { x: 32, z: 40 }, ownStand: { x: 10, z: 40 },
+    midfield: { x: 128, z: 128 },
+  });
+  ok('a full CTF squad assigns at most two escorts to a carrier run',
+    Object.values(carrierRoles).filter(r => r === 'escort').length === 2);
+  const editBot = { _editTokens: 0, _editBudget: BOT_LIFE_EDIT_BUDGET };
+  ok('bot terrain edits require a tactical gate and respect the burst bucket',
+    !botTerrainEditAllowed({ _editTokens: BOT_LIFE_EDIT_BUDGET })
+      && botTerrainEditAllowed({ _editTokens: 1 }, { stuck: 2 })
+      && !botTerrainEditAllowed(editBot, { water: true }));
+  ok('SMG closing intent activates only for visible out-of-range targets',
+    smgClosingIntent(1, 24, true) && !smgClosingIntent(1, 10, true)
+      && !smgClosingIntent(0, 24, true));
+  const ctfLaneBot = { lane: 44, tacticalRole: 'flank-right',
+    body: { pos: new THREE.Vector3(210, 0, 84) }, game: { gameMode: 'ctf' } };
+  const convergedLane = laned(ctfLaneBot, new THREE.Vector3(220, 0, 128), { THREE });
+  ok('CTF lateral lanes converge by forward distance at the enemy flag gate',
+    convergedLane.z === 128);
   const openCtfRoles = assignBotRoles('ctf', squad, {
     ownStand: { x: 10, z: 128 }, midfield: { x: 128, z: 128 },
   });
@@ -969,6 +994,10 @@ function pacingRuleTests() {
   ok('spawn scoring strongly prefers covered approaches', safe > exposed + 40);
   ok('spawn scoring rejects immediate enemy proximity',
     tacticalSpawnScore({ x: 0, z: 0 }, { enemies: [{ x: 8, z: 0 }] }) === -Infinity);
+  ok('spawn scoring rejects a recent-death long-range lane hotspot',
+    tacticalSpawnScore({ x: 30, z: 30 }, {
+      enemies: [{ x: 100, z: 30 }], recentDeaths: [{ x: 34, z: 30 }],
+    }) === -Infinity);
 
   ok('a regulation CTF lead waits for a live flag play to resolve',
     regulationDecision('ctf', { green: 2, blue: 1 }, { flagsLive: true }).overtime);
@@ -1087,6 +1116,16 @@ function streakRuleTests() {
   ok('the airstrike is the only reward and unlocks at 700 points',
     availableStreakAbility(AIRSTRIKE_COST - 1) === null
       && availableStreakAbility(AIRSTRIKE_COST) === 'airstrike');
+  const cluster = chooseBotAirstrikeTarget([
+    { x: 90, z: 100 }, { x: 96, z: 102 }, { x: 180, z: 180 },
+  ], [{ x: 92, z: 100 }]);
+  const guided = steerBotAirstrike({ x: 60, z: 100 }, { x: 96, z: 100 }, 12);
+  ok('bot airstrikes choose enemy clusters and obey bounded guidance',
+    cluster?.x === 90 && guided?.x === 72 && guided.z === 100
+      && chooseBotAirstrikeTarget([{ x: 40, z: 40 }], []) === null
+      && chooseBotAirstrikeTarget([{ x: 90, z: 100 }, { x: 96, z: 102 }], [],
+        [{ x: 92, z: 101 }]) === null
+      && predictBotAirstrikePoint({ x: 250, z: 2 }, { x: 20, z: -20 }, 0.75, 256, 256)?.x === 256);
   ok('spending the reward preserves legitimate overflow and rejects short meters',
     spendStreak(AIRSTRIKE_COST + 50, AIRSTRIKE_COST) === 50
       && spendStreak(AIRSTRIKE_COST, AIRSTRIKE_COST) === 0
@@ -1555,9 +1594,16 @@ function airstrikeDroneTests() {
     t: 'e', k: 'telegraph', id: 7, x: 100, y: 20, z: 120,
     yaw: 0, remaining: 3, owner: 2,
   }));
+  ok('a non-roster bot owner ID remains a strict valid strike identity', validServerMessage({
+    t: 'e', k: 'telegraph', id: 8, x: 100, y: 20, z: 120,
+    yaw: 0, remaining: 3, owner: 1000007,
+  }));
   const strikeSnapshot = { t: 's', p: [], b: [], c: [0, 0], g: [],
     a: [[7, qx(100), qy(20), qx(120), qa(0), 2500, 2]] };
   ok('active-strike snapshot rows pass validation', validServerMessage(strikeSnapshot));
+  ok('bot-owner active-strike rows pass the same strict protocol boundary', validServerMessage({
+    ...strikeSnapshot, a: [[8, qx(100), qy(20), qx(120), qa(0), 2500, 1000007]],
+  }));
   ok('invalid active-strike timers are rejected', !validServerMessage({
     ...strikeSnapshot, a: [[7, qx(100), qy(20), qx(120), qa(0), 9000, 2]],
   }));

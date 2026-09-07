@@ -11,7 +11,8 @@ import { sfx } from './audio.js';
 import { nextReloadCue } from './reload-timeline.js';
 import { teamHex } from './settings.js';
 import { resetEnvironmentalState } from './environment.js';
-import { botDifficulty, botSeparation, rememberedEnemyPosition } from './bot-rules.js';
+import { botDifficulty, botSeparation, botTerrainEditAllowed, rememberedEnemyPosition,
+  smgClosingIntent, BOT_EDIT_REFILL_SECONDS, BOT_LIFE_EDIT_BUDGET } from './bot-rules.js';
 import { clampToEnvelope, mapEnvelope } from './mapgen.js';
 import { goal as botGoal, hasOverhead, planLocalRoute } from './bot-navigation.js';
 import { acquireTarget, buildCover, digVoxel, hasCover } from './bot-combat.js';
@@ -53,7 +54,7 @@ const randomClass = () => GUN_CLASSES[Math.floor(Math.random() * GUN_CLASSES.len
 //     smg (almost always satisfied — rushes ahead of the pack readily).
 const CLASS_PROFILE = {
   0: { hold: 18, strafe: 14, retreatHealth: 35, closeRetreat: null, speedMul: 1.0, groupRange: 18, vision: 60 },
-  1: { hold: 999, strafe: 24, retreatHealth: 20, closeRetreat: null, speedMul: 1.12, groupRange: 40, vision: 46 },
+  1: { hold: 999, strafe: 24, retreatHealth: 20, closeRetreat: null, speedMul: 1.18, groupRange: 40, vision: 64, fireRange: 32 },
   5: { hold: 30, strafe: 8, retreatHealth: 45, closeRetreat: 14, speedMul: 0.92, groupRange: 8, vision: 90 },
 };
 
@@ -109,6 +110,9 @@ export class Bot {
     this.wetT = 0;             // grace timer: recently-in-water → keep seeking dry
     this.digT = 0;             // tunneling swing cooldown
     this.lastDig = -9;         // last shovel swing, game time
+    this._editBudget = BOT_LIFE_EDIT_BUDGET;
+    this._editTokens = this._editBudget;
+    this._terrainEdits = 0;
     this.blocks = 16;          // combat engineering inventory (cover + bridges)
     this._cover = [];          // recently self-built columns: {x,z,t} — don't shovel our own wall
     this.buildT = 0;           // cooldown between throwing up cover
@@ -159,6 +163,8 @@ export class Bot {
       return;
     }
     const g = this.game, b = this.body;
+    const editRefill = b.inWater ? 1 : 1 / BOT_EDIT_REFILL_SECONDS;
+    this._editTokens = Math.min(this._editBudget, this._editTokens + dt * editRefill);
     const profile = CLASS_PROFILE[this.gunClass];
     const onObjective = g.hill
       ? b.pos.distanceToSquared(g.hill.pos) <= (g.hill.r + 2) ** 2
@@ -252,7 +258,8 @@ export class Bot {
     // Responders, bridgelayers, and rim-climbers beeline on purpose (see the
     // comment above) — the new obstacle-routing below leaves them alone and
     // lets them walk (or dig) straight at their target, same as always.
-    const beeline = this.responding || bridging || rimAhead;
+    const beeline = this.responding || this.carrier
+      || bridging || rimAhead;
     const dest = beeline ? goal.clone() : goal.clone().add(
       b.inWater ? this.wander.clone().multiplyScalar(0.25) : this.wander);
 
@@ -322,6 +329,8 @@ export class Bot {
           const side = new THREE.Vector3(-toFoe.z, 0, toFoe.x).multiplyScalar(Math.sin(g.time * 1.7 + this.name.length) > 0 ? 1 : -1);
           dir.multiplyScalar(0.4).add(side.multiplyScalar(0.6)).normalize();
         }
+        if (!this.carrier && smgClosingIntent(this.gunClass, foeD, this.targetVisible))
+          dir.lerp(toFoe, 0.82).normalize();
       }
     }
 
@@ -353,10 +362,11 @@ export class Bot {
       // has no idea which direction that actually is, and could easily
       // point away from home as readily as toward it. Aggressively
       // getting the flag home means staying on that line even wounded,
-      // not abandoning it to flee blind. The cover-building right after
-      // still helps a carrier survive the run, so that part stays.
+      // not abandoning it to flee blind. Carriers also skip the generic
+      // stop-and-build behavior: the objective must keep moving.
       if (!this.carrier) dir.set(-toFoe.x - this.heading * 0.5, 0, -toFoe.z).normalize();
-      if (b.onGround && this.blocks >= 3 && this.buildT <= 0 && !hasCover(this, toFoe))
+      if (!this.carrier && b.onGround && this.blocks >= 3
+          && this.buildT <= 0 && !hasCover(this, toFoe))
         buildCover(this, toFoe, COMBAT_CONTEXT);
     }
 
@@ -384,7 +394,8 @@ export class Bot {
     // team-colored masonry overhead, which the collapse system can drop on us.
     // A retreating bot never holds: the wall it just threw up is for falling
     // back BEHIND, not for standing next to.
-    const coverHold = this.coverT > 0 && this.target && this.retreatT <= 0 && !hasOverhead(this, NAV_CONTEXT);
+    const coverHold = !this.carrier && this.coverT > 0 && this.target
+      && this.retreatT <= 0 && !hasOverhead(this, NAV_CONTEXT);
     if (coverHold) dir.multiplyScalar(0.15);
     // Holding a ranged firing line: plant the feet while crouch-firing.
     const holdingLine = this.target && !this.carrier && foeD > profile.hold
@@ -466,8 +477,10 @@ export class Bot {
     // (undermining and swimming are the deliberate exceptions — those ARE
     // the fight).
     const activelyFiring = this.target && this.aimT > reactT && !undermining && !b.inWater;
-    if (!activelyFiring && !ownCover
-        && (!this.target || b.inWater || this.stuck >= 1 || undermining)
+    const canEdit = botTerrainEditAllowed(this, { water: b.inWater || !!this.exit,
+      stuck: this.stuck, undermining });
+    if (!activelyFiring && canEdit && !ownCover
+        && (!this.target || b.inWater || this.stuck >= 2 || undermining)
         && (dist > 2 || b.inWater || this.exit || undermining)
         && this.digT <= 0 && (lo || hi) && (b.onGround || b.inWater)) {
       this.digT = 0.32;
@@ -483,6 +496,11 @@ export class Bot {
       } else {
         digVoxel(this, tx, fy, tz); digVoxel(this, tx, fy + 1, tz);      // wall face or lip
       }
+    }
+    if (!canEdit && (lo || hi) && this.routeT <= 0) {
+      const side = this.id % 2 ? 1 : -1;
+      this.wander.set(-dir.z * side * 10, 0, dir.x * side * 10);
+      this.wanderT = Math.max(this.wanderT, 1.2);
     }
     const digging = g.time - this.lastDig < 0.9;
 
@@ -546,8 +564,9 @@ export class Bot {
     // part of its class identity (smg presses in, sniper repositions with
     // more deliberation).
     const speed = (b.inWater ? (digging ? 1.4 : 3.2)
-      : this.target ? 5.0 * profile.speedMul // close to patrol pace — a fight is not a standing trade
+      : this.target && !this.carrier ? 5.0 * profile.speedMul // close to patrol pace — a fight is not a standing trade
       : digging || bridging ? 2.2  // shovel/plank pace: never outrun the tool
+      : this.carrier ? 7.0         // objective run: no combat orbit/wander
       : this.responding ? 6.2      // urgency: our flag is on the ground
       : 6.0) * (cautious ? 0.45 : 1);
     // Local squad spacing: blend away from allies inside shoulder-to-shoulder
@@ -646,7 +665,8 @@ export class Bot {
       const spec = TOOLS[this.gunClass];
       this.reloading = spec.reload; this.reloadStage = 1;
       sfx.at('reloadStart', b.pos, spec.key);
-    } else if (this.target && targetPoint && this.aimT > reactT && this.cooldown <= 0) {
+    } else if (this.target && targetPoint && this.aimT > reactT
+        && this.cooldown <= 0 && foeD <= (profile.fireRange ?? Infinity)) {
       if (this.ammo <= 0) {
         const spec = TOOLS[this.gunClass];
         this.reloading = spec.reload; this.reloadStage = 1;
@@ -764,6 +784,8 @@ export class Bot {
     this.sampleT = 0.4;
     this.digT = 0;
     this.lastDig = -9;
+    this._editTokens = this._editBudget;
+    this._terrainEdits = 0;
     this.blocks = 16;
     this.bridgeT = 0;
     this.lastBridge = -9;

@@ -346,7 +346,11 @@ export function tacticalSpawnScore(candidate, {
   const action = Math.abs(actionDistance - idealAction) * 0.7;
   const cohesion = Math.abs(nearestAlly - 12) * 0.35;
   const crowding = nearestAlly < 3 ? 25 : 0;
-  const hotspot = recentDeaths.some(d => distance2d(candidate, d) < 16) ? 80 : 0;
+  // A death lane remains dangerous longer than a direct enemy sample: it may
+  // be held by a sniper beyond immediate visibility. Reject its core rather
+  // than merely allowing action-distance scoring to win it back.
+  if (recentDeaths.some(d => distance2d(candidate, d) < 24)) return -Infinity;
+  const hotspot = recentDeaths.some(d => distance2d(candidate, d) < 34) ? 110 : 0;
   // A mild pull toward the next KOTH approach lane, never onto the point.
   const upcomingDistance = upcomingObjective ? distance2d(candidate, upcomingObjective) : 0;
   const upcoming = upcomingObjective && upcomingDistance >= 22

@@ -30,8 +30,12 @@ export function laned(bot, pos, context) {
   const taper = Math.min(1, Math.max(0, (d - 15) / 20));
   let lane = bot.lane;
   if (bot.game.gameMode === 'ctf') {
-    if (bot.tacticalRole === 'flank-left') lane = -44;
-    else if (bot.tacticalRole === 'flank-right') lane = 44;
+    // Keep a broad crossing front without sending flankers beyond the
+    // navigable approaches on the narrower authored bases.  They still
+    // converge by forward distance below; this is a policy width, not a map
+    // route or hidden waypoint.
+    if (bot.tacticalRole === 'flank-left') lane = -32;
+    else if (bot.tacticalRole === 'flank-right') lane = 32;
     else if (bot.tacticalRole === 'attack') lane = 0;
   }
   v.z += lane * taper;

@@ -796,6 +796,10 @@ function botRuleTests() {
   const convergedLane = laned(ctfLaneBot, new THREE.Vector3(220, 0, 128), { THREE });
   ok('CTF lateral lanes converge by forward distance at the enemy flag gate',
     convergedLane.z === 128);
+  const broadLane = laned({ ...ctfLaneBot, body: { pos: new THREE.Vector3(160, 0, 128) } },
+    new THREE.Vector3(220, 0, 128), { THREE });
+  ok('CTF flanks remain inside the broad authored approach before convergence',
+    broadLane.z === 160);
   const openCtfRoles = assignBotRoles('ctf', squad, {
     ownStand: { x: 10, z: 128 }, midfield: { x: 128, z: 128 },
   });

@@ -566,7 +566,7 @@ export class Bot {
     const speed = (b.inWater ? (digging ? 1.4 : 3.2)
       : this.target && !this.carrier ? 5.0 * profile.speedMul // close to patrol pace — a fight is not a standing trade
       : digging || bridging ? 2.2  // shovel/plank pace: never outrun the tool
-      : this.carrier ? 7.0         // objective run: no combat orbit/wander
+      : this.carrier ? 7.8         // objective run: match a player's sprint pace
       : this.responding ? 6.2      // urgency: our flag is on the ground
       : 6.0) * (cautious ? 0.45 : 1);
     // Local squad spacing: blend away from allies inside shoulder-to-shoulder

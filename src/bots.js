@@ -158,6 +158,7 @@ export class Bot {
     // so reusing them here cannot leak a later frame's coordinates.
     this._eye = new THREE.Vector3();
     this._targetEye = new THREE.Vector3();
+    this._targetDir = new THREE.Vector3();
     this._dest = new THREE.Vector3();
     this._dir = new THREE.Vector3();
     this._toFoe = new THREE.Vector3();

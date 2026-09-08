@@ -5,8 +5,8 @@ import { botTargetScore } from './bot-rules.js';
 
 // The flag thief gets no psychic outline: he is seen by the same eyes as
 // everyone else — in front of you, or close enough to hear.
-export function acquireTarget(bot, profile, { THREE }) {
-  const to = new THREE.Vector3();
+export function acquireTarget(bot, profile) {
+  const to = bot._targetDir;
   let best = null, bestScore = Infinity;
   for (const f of bot.game.foesOf(bot.team)) {
     if (!f.alive) continue;
@@ -24,7 +24,9 @@ export function acquireTarget(bot, profile, { THREE }) {
     // instead of restarting the fight on whoever's a step closer.
     const score = botTargetScore(d, f.health, f.carrier, f === bot.target);
     if (score >= bestScore) continue;
-    if (bot.game.losClear(bot.body.eye(), f.body.eye())) { best = f; bestScore = score; }
+    if (bot.game.losClear(bot.body.eye(bot._eye), f.body.eye(bot._targetEye))) {
+      best = f; bestScore = score;
+    }
   }
   return best;
 }

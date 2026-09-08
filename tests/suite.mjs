@@ -51,6 +51,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
 import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint,
   laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
 import { Bot } from '../src/bots.js';
+import { acquireTarget } from '../src/bot-combat.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -749,6 +750,38 @@ function botRuleTests() {
     botTargetScore(20, 100, false, true) < botTargetScore(18, 100, false, false));
   ok('an enemy flag carrier can still override target stickiness',
     botTargetScore(28, 100, true, false) < botTargetScore(20, 100, false, true));
+
+  const targetDir = new THREE.Vector3();
+  const botEye = new THREE.Vector3();
+  const targetEye = new THREE.Vector3();
+  const botEyeArgs = [], foeEyeArgs = [];
+  const makeTargetBody = (x, z, eyeArgs) => ({
+    pos: new THREE.Vector3(x, 0, z),
+    eye(out) { eyeArgs.push(out); return out.set(this.pos.x, 1.6, this.pos.z); },
+  });
+  const farFoe = { alive: true, health: 100, carrier: false,
+    body: makeTargetBody(12, 0, foeEyeArgs) };
+  const nearFoe = { alive: true, health: 100, carrier: false,
+    body: makeTargetBody(8, 0, foeEyeArgs) };
+  const targetBot = {
+    team: 'green', carrier: false, target: null,
+    face: new THREE.Vector3(1, 0, 0),
+    _targetDir: targetDir, _eye: botEye, _targetEye: targetEye,
+    body: {
+      pos: new THREE.Vector3(0, 0, 0),
+      eye(out) { botEyeArgs.push(out); return out.set(0, 1.6, 0); },
+    },
+    game: {
+      foesOf() { return [farFoe, nearFoe]; },
+      losClear() { return true; },
+    },
+  };
+  const acquired = acquireTarget(targetBot, { vision: 40 });
+  ok('target acquisition reuses owned eye outputs and keeps nearest selection',
+    acquired === nearFoe
+      && botEyeArgs.length === 2 && botEyeArgs.every(out => out === botEye)
+      && foeEyeArgs.length === 2 && foeEyeArgs.every(out => out === targetEye)
+      && targetDir.x === 1 && targetDir.y === 0 && targetDir.z === 0);
 
   const sep = botSeparation({ x: 10, z: 10 }, [
     { id: 2, x: 11, z: 10, alive: true },

@@ -421,6 +421,7 @@ export class Game {
     this.navRevision = 0;                // invalidates bot route snapshots after edits
     this._audioTarget = new THREE.Vector3();
     this._audioDirection = new THREE.Vector3();
+    this._losDirection = new THREE.Vector3();
     this._audioOccluded = pos => this._isSoundOccluded(pos);
     this._botTacticsT = 0;
     this._botBrainCursor = 0;
@@ -1331,7 +1332,7 @@ export class Game {
   }
 
   losClear(a, b) {
-    const dir = new THREE.Vector3().subVectors(b, a);
+    const dir = this._losDirection.subVectors(b, a);
     const d = dir.length();
     return !this.world.raycast(a, dir.normalize(), d);
   }

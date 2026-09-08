@@ -48,7 +48,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { laned } from '../src/bot-navigation.js';
+import { crownRouteWaypoint, laned } from '../src/bot-navigation.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -825,6 +825,22 @@ function botRuleTests() {
     Object.values(openCtfRoles).includes('flank-left')
       && Object.values(openCtfRoles).includes('flank-right')
       && Object.values(openCtfRoles).includes('attack'));
+  ok('CROWN routes an outside approach onto its nearest causeway',
+    JSON.stringify(crownRouteWaypoint({ x: 52, z: 176 }, { x: 128, z: 128 }, 4))
+      === JSON.stringify({ x: 88, z: 128 })
+      && JSON.stringify(crownRouteWaypoint({ x: 204, z: 96 }, { x: 128, z: 128 }, 4))
+        === JSON.stringify({ x: 168, z: 128 }));
+  ok('CROWN advances from the outer causeway to the open ring gate',
+    JSON.stringify(crownRouteWaypoint({ x: 89, z: 128 }, { x: 128, z: 128 }, 4))
+      === JSON.stringify({ x: 116, z: 128 }));
+  ok('CROWN crosses its interior before using the target-side causeway',
+    JSON.stringify(crownRouteWaypoint({ x: 128, z: 128 }, { x: 128, z: 88 }, 4))
+      === JSON.stringify({ x: 128, z: 116 })
+      && JSON.stringify(crownRouteWaypoint({ x: 128, z: 117 }, { x: 128, z: 60 }, 4))
+        === JSON.stringify({ x: 128, z: 88 }));
+  ok('CROWN leaves same-side field travel and other maps untouched',
+    crownRouteWaypoint({ x: 52, z: 128 }, { x: 80, z: 160 }, 4) === null
+      && crownRouteWaypoint({ x: 52, z: 128 }, { x: 128, z: 128 }, 3) === null);
   const kothRoles = assignBotRoles('koth', squad, { hill: { x: 60, z: 45 } });
   ok('KOTH director creates an anchor, contesters, and flanking pressure',
     Object.values(kothRoles).filter(r => r === 'anchor').length === 1

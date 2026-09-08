@@ -4,6 +4,67 @@
 import { CTF_CLOSE_SUPPORT_RANGE, CTF_FINAL_APPROACH_RANGE, chooseLocalRoute,
   ctfFinalApproachPolicy, hillPost } from './bot-rules.js';
 
+const CROWN_INDEX = 4;
+const CROWN_CENTER = 128;
+const CROWN_INNER_GATE = 12;
+const CROWN_OUTER_GATE = 40;
+const CROWN_GATE_REACHED = 4;
+
+const planarDistance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+const crownCardinal = point => {
+  const dx = point.x - CROWN_CENTER, dz = point.z - CROWN_CENTER;
+  if (Math.abs(dx) >= Math.abs(dz)) return dx < 0 ? 'west' : 'east';
+  return dz < 0 ? 'north' : 'south';
+};
+const crownGate = (direction, radius) => ({
+  x: CROWN_CENTER + (direction === 'west' ? -radius : direction === 'east' ? radius : 0),
+  z: CROWN_CENTER + (direction === 'north' ? -radius : direction === 'south' ? radius : 0),
+});
+
+// Crown's moat and ring fort are intentional topology, not generic local
+// obstacles. A four-block feeler cannot discover a gate around either one,
+// so provide only the next authored checkpoint. The ordinary local planner
+// and combat movement still own every step between these points.
+export function crownRouteWaypoint(position, target, mapIndex = 0) {
+  if (mapIndex !== CROWN_INDEX || !position || !target
+      || ![position.x, position.z, target.x, target.z].every(Number.isFinite)) return null;
+  const center = { x: CROWN_CENTER, z: CROWN_CENTER };
+  const currentRadius = planarDistance(position, center);
+  const targetRadius = planarDistance(target, center);
+  const currentDirection = crownCardinal(position);
+  const targetDirection = crownCardinal(target);
+
+  if (currentRadius > CROWN_OUTER_GATE - 2) {
+    // Two points already outside on the same side do not cross the moat.
+    // This also releases a bot that has just finished exiting a causeway.
+    if (targetRadius > CROWN_OUTER_GATE - 2 && currentDirection === targetDirection)
+      return null;
+    const outer = crownGate(currentDirection, CROWN_OUTER_GATE);
+    if (planarDistance(position, outer) > CROWN_GATE_REACHED) return outer;
+    return crownGate(currentDirection, CROWN_INNER_GATE);
+  }
+
+  // In the moat/skirt, finish the current radial causeway before choosing a
+  // different exit. This prevents diagonal shortcuts through the water.
+  if (currentRadius > CROWN_INNER_GATE + 2) {
+    const inner = crownGate(currentDirection, CROWN_INNER_GATE);
+    if (planarDistance(position, inner) > CROWN_GATE_REACHED) return inner;
+  }
+
+  if (targetRadius <= 18) return null; // already through the ring gate
+  const innerExit = crownGate(targetDirection, CROWN_INNER_GATE);
+  if (planarDistance(position, innerExit) > CROWN_GATE_REACHED) return innerExit;
+  const outerExit = crownGate(targetDirection, CROWN_OUTER_GATE);
+  return planarDistance(position, outerExit) > CROWN_GATE_REACHED ? outerExit : null;
+}
+
+export function authoredRouteGoal(bot, target, context) {
+  const waypoint = crownRouteWaypoint(bot?.body?.pos, target, bot?.game?.mapIndex);
+  if (!waypoint) return target;
+  return new context.THREE.Vector3(waypoint.x,
+    bot.game.world.surface(Math.floor(waypoint.x), Math.floor(waypoint.z)), waypoint.z);
+}
+
 // Perpendicular offset so a team advances on a broad front instead of
 // single file down the middle of the map.
 export function laned(bot, pos, context) {

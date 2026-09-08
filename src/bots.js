@@ -14,7 +14,8 @@ import { resetEnvironmentalState } from './environment.js';
 import { botDifficulty, botSeparation, botTerrainEditAllowed, rememberedEnemyPosition,
   smgClosingIntent, BOT_EDIT_REFILL_SECONDS, BOT_LIFE_EDIT_BUDGET } from './bot-rules.js';
 import { clampToEnvelope, mapEnvelope } from './mapgen.js';
-import { goal as botGoal, hasOverhead, planLocalRoute } from './bot-navigation.js';
+import { authoredRouteGoal, goal as botGoal, hasOverhead,
+  planLocalRoute } from './bot-navigation.js';
 import { acquireTarget, buildCover, digVoxel, hasCover } from './bot-combat.js';
 
 const NAMES = {
@@ -226,7 +227,7 @@ export class Bot {
         targetPoint.y + this.target.body.half.h - EYE_INSET, targetPoint.z) : null;
 
     // --- movement ---
-    const goal = this.cachedGoal ?? this.goal();
+    const goal = authoredRouteGoal(this, this.cachedGoal ?? this.goal(), NAV_CONTEXT);
     this.wanderT -= dt;
     this.patrolT -= dt; // patrol waypoints go stale even if never reached
     if (this.wanderT <= 0) {

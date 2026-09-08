@@ -1,6 +1,6 @@
 // world.js — the voxel world: storage, chunked meshing, raycasting, editing.
 import * as THREE from 'three';
-import { gfxPreset } from './settings.js';
+import { atmosphereCadence, gfxPreset } from './settings.js';
 
 export const SX = 256, SY = 64, SZ = 256;   // world dimensions in voxels
 export const SEA = 20;                       // water plane height
@@ -211,6 +211,13 @@ export class VoxelWorld {
     this.data = new Uint8Array(SX * SY * SZ);
     /** @type {Set<number>} Columns changed during the current edit batch. */
     this._editedColumns = new Set();
+    // Ambient animation is presentation-only. Keep one deadline instead of
+    // scheduling another timer: the main loop remains the single source of
+    // time, while water/ambience work runs at the selected graphics cadence.
+    this._skyCadence = atmosphereCadence();
+    this._skyLastTime = null;
+    this._skyNextTime = 0;
+    this._skyForceUpdate = true;
     /** @type {((x: number, z: number) => void) | undefined} */
     this.onEdit = undefined;
     // Monotonic terrain mutation marker. Presentation caches use this to
@@ -334,6 +341,12 @@ export class VoxelWorld {
 
   applyGraphics(level) {
     const preset = gfxPreset(level);
+    // Apply the passed tier synchronously. Do not wait for storage to catch
+    // up: the next main-loop call must repaint atmosphere at the new cadence.
+    this._skyCadence = atmosphereCadence(level);
+    this._skyLastTime = null;
+    this._skyNextTime = 0;
+    this._skyForceUpdate = true;
     this.ambienceMax = Math.min(this.ambienceCapacity, preset.ambience);
     this.configureAtmosphere(this._atmosphereMapIndex ?? 0);
     if (!preset.foam && this.foam) {
@@ -658,8 +671,18 @@ export class VoxelWorld {
     }
   }
 
-  // Per-frame sky life: water ripples, clouds drift and wrap past the map.
+  // Cadenced sky life: water ripples, clouds drift and wrap past the map.
   animateSky(t) {
+    if (!Number.isFinite(t)) return false;
+    // First call and a live graphics change are always immediate. A clock
+    // rewind also refreshes immediately and re-anchors the deadline; large
+    // forward jumps do one due update only (never a catch-up loop).
+    const due = this._skyForceUpdate || this._skyLastTime === null
+      || t < this._skyLastTime || t >= this._skyNextTime;
+    if (!due) return false;
+    this._skyForceUpdate = false;
+    this._skyLastTime = t;
+    this._skyNextTime = t + this._skyCadence;
     const attr = this.water.geometry.attributes.position;
     const colors = this.water.geometry.attributes.color;
     const base = this._waterBase;
@@ -688,5 +711,6 @@ export class VoxelWorld {
     for (const cl of this.clouds.children)
       cl.position.x = ((cl.userData.x0 + t * cl.userData.speed)
         % (SX + CLOUD_MARGIN * 2)) - CLOUD_MARGIN;
+    return true;
   }
 }

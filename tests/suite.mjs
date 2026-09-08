@@ -83,6 +83,7 @@ import { MAX_REWIND_SECONDS, observeSnapshotRtt, recordPose,
   rewindSecondsForRtt, samplePose } from '../src/lag-compensation.js';
 import { createResumeToken, reservationMatches, validResumeToken } from '../src/reconnect.js';
 import { FirstSessionGraphicsBenchmark, automaticGraphicsLevel } from '../src/performance-auto.js';
+import { atmosphereCadence } from '../src/settings.js';
 import { ProductionTelemetry, errorFingerprint, sanitizeTelemetryEvent,
   telemetryEnvelope } from '../src/telemetry.js';
 import { chooseSpawn } from '../src/spawn-controller.js';
@@ -2523,6 +2524,41 @@ function productionReadinessTests() {
       && clock.event[0] === 'end' && clock.event[1] === 'green');
 }
 
+function atmosphereCadenceTests() {
+  group('atmosphere animation cadence');
+  ok('graphics tiers expose the intended ambient update budgets',
+    Math.abs(atmosphereCadence('high') - 1 / 30) < 1e-12
+      && Math.abs(atmosphereCadence('medium') - 1 / 24) < 1e-12
+      && Math.abs(atmosphereCadence('low') - 1 / 15) < 1e-12);
+
+  const w = new VoxelWorld(scene());
+  const pos = w.water.geometry.attributes.position;
+  const colors = w.water.geometry.attributes.color;
+  ok('the first sky call updates immediately', w.animateSky(10) === true);
+  const afterFirstPosition = pos.version, afterFirstColors = colors.version;
+  ok('sky work is suppressed before its next cadence deadline',
+    w.animateSky(10.01) === false
+      && pos.version === afterFirstPosition && colors.version === afterFirstColors);
+  const beforeDuePosition = pos.version, beforeDueColors = colors.version;
+  ok('sky work resumes on the due tick',
+    w.animateSky(10 + 1 / 30) === true
+      && pos.version > beforeDuePosition && colors.version > beforeDueColors);
+  const beforeRewindPosition = pos.version, beforeRewindColors = colors.version;
+  ok('a time rewind safely re-anchors and refreshes atmosphere',
+    w.animateSky(2) === true
+      && pos.version > beforeRewindPosition && colors.version > beforeRewindColors);
+  w.applyGraphics('low');
+  const beforeLivePosition = pos.version, beforeLiveColors = colors.version;
+  ok('a live graphics-tier change applies cadence immediately',
+    w.animateSky(2.001) === true
+      && pos.version > beforeLivePosition && colors.version > beforeLiveColors);
+  const beforeLowEarlyPosition = pos.version, beforeLowEarlyColors = colors.version;
+  ok('the live low-tier cadence suppresses an early follow-up tick',
+    w.animateSky(2.01) === false
+      && pos.version === beforeLowEarlyPosition && colors.version === beforeLowEarlyColors);
+  w.dispose();
+}
+
 function combatNetworkContinuityTests() {
   group('latency compensation and reconnect continuity');
   ok('combat history cadence is capped at 30Hz with an accumulator',
@@ -2650,6 +2686,7 @@ export async function run() {
   securityPhaseTests();
   releasePhaseTests();
   productionReadinessTests();
+  atmosphereCadenceTests();
   audioPaletteTests();
   mapgenTests();
   raycastTests();

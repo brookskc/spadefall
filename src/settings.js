@@ -21,12 +21,16 @@
 // visible. This is a competitive PVP game — a lower graphics tier should
 // never mean seeing less of the map than someone on a higher one.
 const GFX_PRESETS = {
+  // Atmosphere is intentionally cadence-limited: these effects are ambient
+  // decoration, not gameplay state, so updating them at display refresh is
+  // wasted CPU/GPU work. Keep High at 30 Hz, with progressively cheaper
+  // tiers for weaker hardware while leaving terrain/player visibility alone.
   low:    { pixelRatio: 1,   antialias: false, tracers: 16, flashes: 16, debris: 80,
-    ambience: 24, foam: false, spray: 0, casings: 0 },
+    ambience: 24, atmosphereHz: 15, foam: false, spray: 0, casings: 0 },
   medium: { pixelRatio: 1.5, antialias: true,  tracers: 32, flashes: 32, debris: 180,
-    ambience: 72, foam: true, spray: 0, casings: 16 },
+    ambience: 72, atmosphereHz: 24, foam: true, spray: 0, casings: 16 },
   high:   { pixelRatio: 2,   antialias: true,  tracers: 48, flashes: 48, debris: 320,
-    ambience: 144, foam: true, spray: 32, casings: 32 },
+    ambience: 144, atmosphereHz: 30, foam: true, spray: 32, casings: 32 },
 };
 
 export function getGfxLevel() {
@@ -78,6 +82,12 @@ export function saveAutomaticGfxLevel(level, version) {
 
 export function gfxPreset(level = getGfxLevel()) {
   return GFX_PRESETS[level];
+}
+
+/** Seconds between ambient water/sky updates for a graphics tier. */
+export function atmosphereCadence(level = getGfxLevel()) {
+  const hz = gfxPreset(level).atmosphereHz;
+  return 1 / Math.max(1, hz || 30);
 }
 
 export function getShowFps() {

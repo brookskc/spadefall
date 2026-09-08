@@ -153,6 +153,23 @@ export class Bot {
     this.retreatCd = 0;
     this.route = new THREE.Vector3(); // short committed detour around an obstacle
     this._routeGoal = new THREE.Vector3(); // authored waypoint scratch; not retained
+    // Per-frame vector scratch. Every consumer of these vectors is synchronous
+    // (LOS, fire, grenade launch, and cover placement copy/read immediately),
+    // so reusing them here cannot leak a later frame's coordinates.
+    this._eye = new THREE.Vector3();
+    this._targetEye = new THREE.Vector3();
+    this._dest = new THREE.Vector3();
+    this._dir = new THREE.Vector3();
+    this._toFoe = new THREE.Vector3();
+    this._strafe = new THREE.Vector3();
+    this._duckEye = new THREE.Vector3();
+    this._standEye = new THREE.Vector3();
+    this._lob = new THREE.Vector3();
+    this._shotDir = new THREE.Vector3();
+    this._aimAt = new THREE.Vector3();
+    this._aim = new THREE.Vector3();
+    this._want = new THREE.Vector3();
+    this._headingDir = new THREE.Vector3();
     this._separation = { x: 0, z: 0 };
     this.routeT = 0;
     this.nades = 1;            // one frag per life
@@ -256,7 +273,7 @@ export class Bot {
     const targetPoint = this.target
       ? (this.targetVisible ? this.target.body.pos : recalled) : null;
     const targetEye = targetPoint && this.target
-      ? new THREE.Vector3(targetPoint.x,
+      ? this._targetEye.set(targetPoint.x,
         targetPoint.y + this.target.body.half.h - EYE_INSET, targetPoint.z) : null;
 
     // --- movement ---
@@ -300,8 +317,9 @@ export class Bot {
     // authored wall. Responders and committed bridge/rim climbs retain their
     // established beeline behavior.
     const beeline = this.responding || bridging || rimAhead;
-    const dest = this.carrier || beeline ? goal.clone() : goal.clone().add(
-      b.inWater ? this.wander.clone().multiplyScalar(0.25) : this.wander);
+    const dest = this._dest.copy(goal);
+    if (!(this.carrier || beeline))
+      b.inWater ? dest.addScaledVector(this.wander, 0.25) : dest.add(this.wander);
 
     // Dry-land seeking: swimming or wading the shelf, steer for the nearest
     // dry column — cheap exit first, goal-ward as the tiebreak. A creek that
@@ -350,7 +368,7 @@ export class Bot {
       }
       if (exit) dest.set(exit[0] + 0.5, g.world.surface(exit[0], exit[1]), exit[1] + 0.5);
     } else this.exit = null;
-    const dir = new THREE.Vector3(dest.x - b.pos.x, 0, dest.z - b.pos.z);
+    const dir = this._dir.set(dest.x - b.pos.x, 0, dest.z - b.pos.z);
     const dist = dir.length();
     if (dist > 1.2) dir.normalize();
 
@@ -364,17 +382,17 @@ export class Bot {
       // a tower we can't see through — walk to the column and let the shovel
       // and gravity argue with his footing. No aim required: the head never
       // settles on a target it can't see, so gating on aimT would forbid this.
-      if (!this.carrier && !g.losClear(b.eye(), targetEye) &&
+      if (!this.carrier && !g.losClear(b.eye(this._eye), targetEye) &&
           targetPoint.y > b.pos.y + 3 && foeD < 14) {
         undermining = true;
         dir.subVectors(targetPoint, b.pos).setY(0).normalize();
       } else if (this.aimT > 0.3) {
-        toFoe = new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize();
+        toFoe = this._toFoe.subVectors(targetPoint, b.pos).setY(0).normalize();
         // A flag carrier's movement vector belongs to the run home. They can
         // return fire, but must not orbit an incidental target and carry the
         // objective sideways away from the stand.
         if (!this.carrier && foeD < profile.strafe) {
-          const side = new THREE.Vector3(-toFoe.z, 0, toFoe.x).multiplyScalar(Math.sin(g.time * 1.7 + this.name.length) > 0 ? 1 : -1);
+          const side = this._strafe.set(-toFoe.z, 0, toFoe.x).multiplyScalar(Math.sin(g.time * 1.7 + this.name.length) > 0 ? 1 : -1);
           dir.multiplyScalar(0.4).add(side.multiplyScalar(0.6)).normalize();
         }
         if (!this.carrier && smgClosingIntent(this.gunClass, foeD, this.targetVisible))
@@ -434,7 +452,7 @@ export class Bot {
     else if (this.role === 'defend' && !this.target && this.blocks >= 6 &&
         this.buildT <= 0 && b.onGround && !b.inWater) {
       if (b.pos.distanceTo(g.standOf(this.team)) < 12) {
-        buildCover(this, new THREE.Vector3(this.heading, 0, 0), COMBAT_CONTEXT);
+        buildCover(this, this._headingDir.set(this.heading, 0, 0), COMBAT_CONTEXT);
         this.coverT = 0; // fortifying, not fighting — keep patrolling
       }
     }
@@ -680,8 +698,8 @@ export class Bot {
     if (rangeDuck) {
       // Don't duck blind behind our own knee wall: if the crouched eye can't
       // see the foe but the standing eye can, stand and shoot over it.
-      const duckEye = new THREE.Vector3(b.pos.x, b.pos.y + CROUCH_HEIGHT - EYE_INSET, b.pos.z);
-      const standEye = new THREE.Vector3(b.pos.x, b.pos.y + STAND_HEIGHT - EYE_INSET, b.pos.z);
+      const duckEye = this._duckEye.set(b.pos.x, b.pos.y + CROUCH_HEIGHT - EYE_INSET, b.pos.z);
+      const standEye = this._standEye.set(b.pos.x, b.pos.y + STAND_HEIGHT - EYE_INSET, b.pos.z);
       if (!g.losClear(duckEye, targetEye) &&
           g.losClear(standEye, targetEye)) rangeDuck = false;
     }
@@ -695,11 +713,11 @@ export class Bot {
     this.nadeT -= dt;
     if (this.target && targetPoint && this.nades > 0 && this.nadeT <= 0 && !b.inWater &&
         foeD > 10 && foeD < 28 && Math.random() < dt * 0.25 &&
-        g.losClear(b.eye(), targetEye)) {
-      const lob = new THREE.Vector3().subVectors(targetPoint, b.pos).normalize();
+        g.losClear(b.eye(this._eye), targetEye)) {
+      const lob = this._lob.subVectors(targetPoint, b.pos).normalize();
       lob.y += 0.45; lob.normalize();
       this.nades--; this.nadeT = 7;
-      g.throwGrenade(this, b.eye(), lob, 11 + foeD * 0.15);
+      g.throwGrenade(this, b.eye(this._eye), lob, 11 + foeD * 0.15);
     }
 
     // --- shooting ---
@@ -725,8 +743,8 @@ export class Bot {
         sfx.at('reloadStart', b.pos, spec.key);
       }
       else {
-        const from = b.eye();
-        const toFoe = new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize();
+        const from = b.eye(this._eye);
+        const toFoe = this._shotDir.subVectors(targetPoint, b.pos).setY(0).normalize();
         // The muzzle only speaks once the head has turned on target — and
         // opening shots go wide before the aim settles. No 180° no-scopes.
         if (this.face.dot(toFoe) > 0.87 && g.losClear(from, targetEye)) {
@@ -756,9 +774,9 @@ export class Bot {
           // aim precisely at the head by default" into bots aimbot-sniping
           // every fight. Headshots now come from spread landing high, the
           // way they should, not from being the default aim point.
-          const aimAt = new THREE.Vector3(targetPoint.x,
+          const aimAt = this._aimAt.set(targetPoint.x,
             targetPoint.y + this.target.body.half.h * 0.5, targetPoint.z);
-          const aim = new THREE.Vector3().subVectors(aimAt, from).normalize();
+          const aim = this._aim.subVectors(aimAt, from).normalize();
           const held = Math.min(1, (this.aimT - reactT) / 1.0); // 0 fresh -> 1 well-aimed
           // Fresh-shot end widened 1.8 -> 3.2: the very first shot right as
           // reactT clears was still tight enough to land often against a
@@ -777,9 +795,9 @@ export class Bot {
     // --- presentation: eyes track the fight, but heads take time to turn ---
     const pg = this.parts.group;
     pg.position.copy(b.pos);
-    const want = this.target && targetPoint
-      ? new THREE.Vector3().subVectors(targetPoint, b.pos).setY(0).normalize()
-      : dir;
+    const want = this._want;
+    if (this.target && targetPoint) want.subVectors(targetPoint, b.pos).setY(0).normalize();
+    else want.copy(dir);
     if (want.lengthSq() > 0.01) {
       const ang = this.face.angleTo(want);
       if (ang > 1e-3) this.face.lerp(want, Math.min(1, 7 * dt / ang)).normalize();

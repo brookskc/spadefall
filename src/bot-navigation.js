@@ -3,12 +3,112 @@
 // navigation algorithms and receive the small world-policy context they need.
 import { CTF_CLOSE_SUPPORT_RANGE, CTF_FINAL_APPROACH_RANGE, chooseLocalRoute,
   ctfFinalApproachPolicy, hillPost } from './bot-rules.js';
+import { pinefallRavineCenter } from './mapgen.js';
 
 const CROWN_INDEX = 4;
 const CROWN_CENTER = 128;
 const CROWN_INNER_GATE = 12;
 const CROWN_OUTER_GATE = 40;
 const CROWN_GATE_REACHED = 4;
+
+const CTF_MIDFIELD = 128;
+const CTF_REACHED = 4;
+const CTF_ROUTE_X_EAST = Object.freeze([
+  Object.freeze([92, 116, 140, 164]),
+  Object.freeze([86, 105, 145, 170]),
+  Object.freeze([110, 122, 134, 146]),
+]);
+const CTF_ROUTE_X_WEST = Object.freeze(CTF_ROUTE_X_EAST.map(route =>
+  Object.freeze(route.slice().reverse())));
+let cachedBeachheadSeed = null;
+let cachedBeachheadZ = null;
+
+// The three CTF maps each have one authored feature that a short-range
+// obstacle probe cannot infer reliably: the two Greenbelt hedgerow gaps, the
+// Beachhead trench, and Pinefall's protected ford. Keep these routes as a
+// small pure policy rather than baking them into the local planner. A route
+// is deliberately a sequence of x checkpoints: the carrier commits to one
+// checkpoint at a time, then the ordinary planner owns the short movement
+// between checkpoints.
+const validPlanarPoint = p => p && Number.isFinite(p.x) && Number.isFinite(p.z);
+
+// This is the same value-noise cell used by mapgen's Beachhead generator.
+// Only one integer cell is needed for the trench's seed-derived z, so avoid
+// constructing a 4096-cell grid on every bot think.
+function beachheadTrenchZ(seed = 1979) {
+  seed = Number.isFinite(seed) ? Math.trunc(seed) : 1979;
+  if (seed === cachedBeachheadSeed) return cachedBeachheadZ;
+  const row = ((seed % 13) + 13) % 13;
+  const wanted = (row << 6) | 7;
+  let state = seed | 0;
+  let value = 0;
+  for (let i = 0; i <= wanted; i++) {
+    state = (state + 0x6D2B79F5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    value = ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  cachedBeachheadSeed = seed;
+  cachedBeachheadZ = CTF_MIDFIELD + 20 + Math.floor(value * 12);
+  return cachedBeachheadZ;
+}
+
+function nextRouteCheckpoint(position, routeX, routeZ, homeWest, out = null) {
+  for (const x of routeX) {
+    const ahead = homeWest ? position.x > x + CTF_REACHED
+      : position.x < x - CTF_REACHED;
+    if (ahead) {
+      if (out) { out.x = x; out.z = routeZ; return out; }
+      return { x, z: routeZ };
+    }
+  }
+  return null;
+}
+
+/**
+ * Return the next authored CTF carrier checkpoint, or null when the carrier
+ * is on the unobstructed home-side approach. The path is mirrored in x for
+ * the two teams; both teams use the same safe lateral lane on a given seed.
+ * This function intentionally returns x/z only. authoredRouteGoal projects
+ * that point to the current world surface, so it remains robust to edits and
+ * terrain-height variation.
+ *
+ * The object form is accepted as a convenience for diagnostics and pure
+ * tests; the positional form keeps this helper inexpensive in the hot loop.
+ */
+export function ctfCarrierWaypoint(position, home, mapIndex = 0, team = 'green', seed = 1979,
+  out = null) {
+  if (position?.position && home === undefined) {
+    ({ position, home, mapIndex = 0, team = 'green', seed = 1979 } = position);
+  }
+  if (![0, 1, 2].includes(mapIndex) || !validPlanarPoint(position)
+      || !validPlanarPoint(home) || !['green', 'blue'].includes(team)) return null;
+  const homeWest = home.x < CTF_MIDFIELD
+    || (home.x === CTF_MIDFIELD && team === 'green');
+  // A seeded north/south choice keeps runs from becoming one fixed lane while
+  // remaining symmetric: swapping teams mirrors x, not the authored terrain.
+  const laneZ = (((Number.isFinite(seed) ? Math.trunc(seed) : 1979) & 1) === 0)
+    ? CTF_MIDFIELD + 48 : CTF_MIDFIELD - 48;
+  let routeZ;
+  if (mapIndex === 0) {
+    // Open gap region is z<88 or z>168; x checkpoints straddle both belts.
+    routeZ = laneZ;
+  } else if (mapIndex === 1) {
+    // The covered trench runs x=92..166. These points enter, cross, and exit
+    // it with a little margin so exact surface height is never part of policy.
+    routeZ = beachheadTrenchZ(seed);
+  } else {
+    // Pinefall's low protected ford is eight blocks off the seeded ravine
+    // center. Approach and leave it on the same z; this also permits the
+    // existing bridge/rim logic to take over if players edit the ford.
+    routeZ = pinefallRavineCenter(seed, CTF_MIDFIELD) + 8;
+  }
+  return nextRouteCheckpoint(position,
+    (homeWest ? CTF_ROUTE_X_WEST : CTF_ROUTE_X_EAST)[mapIndex], routeZ, homeWest, out);
+}
+
+// Descriptive alias for callers that prefer the longer policy name.
+export const ctfCarrierRouteWaypoint = ctfCarrierWaypoint;
 
 const planarDistance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const crownCardinal = point => {
@@ -59,7 +159,9 @@ export function crownRouteWaypoint(position, target, mapIndex = 0) {
 }
 
 export function authoredRouteGoal(bot, target, context, out = null) {
-  const waypoint = crownRouteWaypoint(bot?.body?.pos, target, bot?.game?.mapIndex);
+  const waypoint = bot?.carrier && bot?.game?.gameMode === 'ctf'
+    ? ctfCarrierWaypoint(bot.body.pos, target, bot.game.mapIndex, bot.team, bot.game.seed, out)
+    : crownRouteWaypoint(bot?.body?.pos, target, bot?.game?.mapIndex);
   if (!waypoint) {
     if (!out) return target;
     return out.copy ? out.copy(target) : Object.assign(out, target);

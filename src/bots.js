@@ -263,9 +263,13 @@ export class Bot {
     // Responders, bridgelayers, and rim-climbers beeline on purpose (see the
     // comment above) — the new obstacle-routing below leaves them alone and
     // lets them walk (or dig) straight at their target, same as always.
-    const beeline = this.responding || this.carrier
-      || bridging || rimAhead;
-    const dest = beeline ? goal.clone() : goal.clone().add(
+    // Carriers have an authored checkpoint goal. Keep the direct objective
+    // vector (including while under fire), but let the local obstacle planner
+    // choose a short detour between checkpoints instead of beelining into an
+    // authored wall. Responders and committed bridge/rim climbs retain their
+    // established beeline behavior.
+    const beeline = this.responding || bridging || rimAhead;
+    const dest = this.carrier || beeline ? goal.clone() : goal.clone().add(
       b.inWater ? this.wander.clone().multiplyScalar(0.25) : this.wander);
 
     // Dry-land seeking: swimming or wading the shelf, steer for the nearest
@@ -434,8 +438,14 @@ export class Bot {
     // keep going straight at their target on purpose — this only touches the
     // ordinary "walking somewhere and a wall is in the way" case.
     this.routeT = Math.max(0, this.routeT - dt);
-    const routeEligible = !beeline && !this.target && !b.inWater && this.wetT <= 0
-      && !undermining && dir.lengthSq() > 0.01;
+    // A carrier is safe to route while returning fire because combat steering
+    // above deliberately never replaces its home vector. Other bots retain
+    // the old no-target gate, so target pursuit and every non-CTF mode remain
+    // unchanged. Water, active rim/bridge commitments, and engineering work
+    // still own the movement decision for carriers as well.
+    const routeEligible = !beeline && !b.inWater && this.wetT <= 0
+      && !undermining && dir.lengthSq() > 0.01
+      && (this.carrier || !this.target);
     const navChanged = this.navRevision !== (g.navRevision ?? 0);
     if (navChanged) {
       this.navRevision = g.navRevision ?? 0;

@@ -71,16 +71,21 @@ try {
           && !/404 \(Not Found\)|net::ERR_NETWORK_ACCESS_DENIED/.test(message.text()))
         faults.push(message.text());
     });
-    // Do not let visual rAF race the fixed-step driver below.
-    await page.addInitScript(() => { window.requestAnimationFrame = () => 0; });
+    // Install deterministic randomness before any game module executes. Doing
+    // this inside page.evaluate() is too late: auto-start has already created
+    // most bots, so their classes, cooldowns, lanes, and individual traits
+    // would differ between otherwise identical simulation runs.
+    // Do not let visual rAF race the fixed-step driver below either.
+    await page.addInitScript(seed => {
+      let state = seed >>> 0;
+      Math.random = () => ((state = (Math.imul(state, 1664525) + 1013904223) >>> 0)
+        / 0x100000000);
+      window.requestAnimationFrame = () => 0;
+    }, scenario.seed);
     await page.goto(`${origin}/?auto=1&map=${scenario.map}&mode=${scenario.mode}`,
       { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__game?.world);
     const row = await page.evaluate(({ scenario, seconds, step }) => {
-      // Seed every game-side random decision, including bot class and patrol
-      // noise.  The LCG is simple, reproducible and local to this test page.
-      let state = scenario.seed >>> 0;
-      Math.random = () => ((state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 0x100000000);
       const g = window.__game;
       g.mode = 'solo';
       g.gameMode = scenario.mode;
@@ -95,7 +100,7 @@ try {
       g.player.vmRoot.visible = false;
       g.bots.push(g._newBot('green'));
       const m = { deaths: 0, spawnDeaths: 0, edits: 0, digs: 0, builds: 0,
-        stuck: 0, contacts: [], reengage: [], deathsByClass: {}, killsByClass: {},
+        stuck: 0, contacts: [], firstDeathAt: null, reengage: [], deathsByClass: {}, killsByClass: {},
         pickups: 0, returns: 0, captures: 0, flagTransitions: 0, hillOccupied: 0,
         hillContested: 0, strikes: 0, impacts: 0, strikeKills: 0, errors: [],
         ctfRuns: [] };
@@ -119,10 +124,13 @@ try {
       const startRun = (flagTeam, carrier) => {
         if (!carrier?.body) return null;
         const home = g.standOf(carrier.team);
+        const startHomeDistance = distance(carrier.body.pos, home);
         const run = { id: nextRunId++, flagTeam, carrierId: carrier.id, carrierTeam: carrier.team,
           startedAt: g.time - beganAt, startPosition: point(carrier.body.pos),
-          homePosition: point(home), closestHomeDistance: distance(carrier.body.pos, home),
+          homePosition: point(home), startHomeDistance, closestHomeDistance: startHomeDistance,
           closestHomeAt: g.time - beganAt, escortSeconds: 0, closestEscortDistance: null,
+          timeToFirstEscort: null, lastProgressAt: g.time - beganAt,
+          noProgressDuration: 0, maxNoProgressDuration: 0,
           obstructionSamples: [], stuckSamples: [], approachedHome: false,
           ownFlagStateAtApproach: null, returnAssociation: null, captureAssociation: null,
           outcome: null, endedAt: null, duration: null };
@@ -137,7 +145,11 @@ try {
         if (homeDistance != null && homeDistance < run.closestHomeDistance) {
           run.closestHomeDistance = homeDistance;
           run.closestHomeAt = g.time - beganAt;
+          run.lastProgressAt = g.time - beganAt;
         }
+        const now = g.time - beganAt;
+        run.noProgressDuration = Math.max(0, now - run.lastProgressAt);
+        run.maxNoProgressDuration = Math.max(run.maxNoProgressDuration, run.noProgressDuration);
         if (!run.approachedHome && homeDistance != null && homeDistance <= 16) {
           run.approachedHome = true;
           run.ownFlagStateAtApproach = g.flags?.[run.carrierTeam]?.state ?? null;
@@ -147,7 +159,10 @@ try {
         if (escortDistance != null) {
           run.closestEscortDistance = run.closestEscortDistance == null
             ? escortDistance : Math.min(run.closestEscortDistance, escortDistance);
-          if (escortDistance <= 12) run.escortSeconds += dt;
+          if (escortDistance <= 12) {
+            run.escortSeconds += dt;
+            if (run.timeToFirstEscort == null) run.timeToFirstEscort = now - run.startedAt;
+          }
         }
         // These are bounded, sparse snapshots: enough to diagnose a bad route
         // without dumping every 50ms physics tick into normal CI output.
@@ -164,6 +179,7 @@ try {
       g.onDeath = (victim, killer) => {
         if (victim?.id !== undefined) {
           m.deaths++;
+          if (m.firstDeathAt == null) m.firstDeathAt = g.time;
           // A protected spawn lasts at most three seconds (and drains faster
           // once moving); count only deaths in that actual safety window.
           if (g.time - (victim._spawnedAt ?? -Infinity) <= 3) m.spawnDeaths++;
@@ -281,7 +297,12 @@ try {
       return { ...scenario, elapsed: g.matchElapsed, score: g.captures, over: g.over,
         ...m, contacts: m.contacts.length,
         pendingStrikes,
-        firstContact: m.contacts.length ? m.contacts[0] - beganAt : null,
+        // Long-range fire can produce a real firefight before opposing bodies
+        // come within the 30-block proximity sampler. Treat the first bot
+        // death as contact too, so a productive sniper opening is not reported
+        // as more than a minute of inactivity.
+        firstContact: m.contacts.length || m.firstDeathAt != null
+          ? Math.min(m.contacts[0] ?? Infinity, m.firstDeathAt ?? Infinity) - beganAt : null,
         reengageMedian: percentile(sorted(m.reengage), .5), reengageP90: percentile(sorted(m.reengage), .9),
         botLives: g.bots.length, botKd: kd, ctfRuns: m.ctfRuns,
         editsPerMatch: m.edits, telemetry: g.botTelemetry(), faults: window.__spadefallDiagnostics?.faults ?? [] };
@@ -340,7 +361,10 @@ try {
   assert.ok(ctfRuns.every(run => Number.isInteger(run.id) && run.carrierId != null
     && ['green', 'blue'].includes(run.flagTeam) && ['green', 'blue'].includes(run.carrierTeam)
     && Number.isFinite(run.startedAt) && Number.isFinite(run.duration)
-    && Number.isFinite(run.closestHomeDistance) && run.startPosition && run.homePosition
+    && Number.isFinite(run.closestHomeDistance) && Number.isFinite(run.startHomeDistance)
+    && Number.isFinite(run.maxNoProgressDuration)
+    && (run.timeToFirstEscort == null || Number.isFinite(run.timeToFirstEscort))
+    && run.startPosition && run.homePosition
     && ['capture', 'death_drop', 'drop', 'other'].includes(run.outcome)
     && Array.isArray(run.stuckSamples) && Array.isArray(run.obstructionSamples)),
   `invalid CTF telemetry ${JSON.stringify(ctfRuns)}`);
@@ -349,6 +373,11 @@ try {
   assert.ok(report.spawnDeathRate < .15, `spawn deaths ${report.spawnDeathRate.toFixed(3)}`);
   assert.ok(report.averageEdits < 1000, `terrain edits ${report.averageEdits.toFixed(1)}/round`);
   assert.ok(report.worstFirstContact <= 90, `first contact ${report.worstFirstContact.toFixed(1)}s`);
+  if (seconds >= 600 && byMode.ctf.rounds && ctfRuns.length) {
+    const progressed = ctfRuns.filter(run => run.startHomeDistance - run.closestHomeDistance >= 16);
+    assert.ok(progressed.length >= Math.max(1, Math.ceil(ctfRuns.length * 0.5)),
+      `CTF carriers made insufficient homeward progress ${progressed.length}/${ctfRuns.length}`);
+  }
   if (byMode.koth.rounds) assert.ok(byMode.koth.hillOccupied >= 60,
     'KOTH bots rarely reached an objective');
   assert.equal(aggregate.impacts + aggregate.pendingStrikes, aggregate.strikes,

@@ -48,7 +48,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { crownRouteWaypoint, laned } from '../src/bot-navigation.js';
+import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint, laned } from '../src/bot-navigation.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -856,6 +856,39 @@ function botRuleTests() {
   ok('CROWN leaves same-side field travel and other maps untouched',
     crownRouteWaypoint({ x: 52, z: 128 }, { x: 80, z: 160 }, 4) === null
       && crownRouteWaypoint({ x: 52, z: 128 }, { x: 128, z: 128 }, 3) === null);
+  const ctfRouteSeed = 0x1a2b3c4d;
+  const ctfRouteProgress = (mapIndex, team) => {
+    const home = team === 'green' ? { x: 36, z: 128 } : { x: 220, z: 128 };
+    let position = team === 'green' ? { x: 220, z: 128 } : { x: 36, z: 128 };
+    const points = [];
+    for (let i = 0; i < 8; i++) {
+      const point = ctfCarrierWaypoint(position, home, mapIndex, team, ctfRouteSeed);
+      if (!point) break;
+      points.push(point);
+      position = { x: point.x + (team === 'green' ? 1 : -1), z: point.z };
+    }
+    return points;
+  };
+  ok('CTF carrier routes cover both teams on every authored CTF map',
+    [0, 1, 2].every(mapIndex => ['green', 'blue'].every(team => {
+      const points = ctfRouteProgress(mapIndex, team);
+      const westbound = team === 'green';
+      return points.length >= 3 && points.every((point, i) => Number.isFinite(point.x)
+        && Number.isFinite(point.z) && (i === 0 || (westbound
+          ? point.x < points[i - 1].x : point.x > points[i - 1].x)));
+    })));
+  ok('CTF carrier routes use authored crossing lanes and release after the obstacle',
+    ctfRouteProgress(0, 'green').every(point => point.z < 88 || point.z > 168)
+      && ctfCarrierWaypoint({ x: 70, z: 80 }, { x: 36, z: 128 }, 0, 'green', ctfRouteSeed) === null
+      && ctfCarrierWaypoint({ x: 70, z: 128 }, { x: 36, z: 128 }, 1, 'green', ctfRouteSeed) === null);
+  ok('CTF authored routing stays isolated from non-carriers and other modes',
+    ctfCarrierWaypoint({ x: 220, z: 128 }, { x: 36, z: 128 }, 4, 'green', ctfRouteSeed) === null
+      && authoredRouteGoal({ carrier: false, body: { pos: { x: 220, z: 128 } },
+        game: { gameMode: 'ctf', mapIndex: 0 } }, new THREE.Vector3(36, 0, 128), { THREE })
+        .equals(new THREE.Vector3(36, 0, 128))
+      && authoredRouteGoal({ carrier: true, body: { pos: { x: 220, z: 128 } },
+        game: { gameMode: 'tdm', mapIndex: 0 } }, new THREE.Vector3(36, 0, 128), { THREE })
+        .equals(new THREE.Vector3(36, 0, 128)));
   const kothRoles = assignBotRoles('koth', squad, { hill: { x: 60, z: 45 } });
   ok('KOTH director creates an anchor, contesters, and flanking pressure',
     Object.values(kothRoles).filter(r => r === 'anchor').length === 1

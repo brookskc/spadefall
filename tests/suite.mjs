@@ -15,14 +15,14 @@ import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, applySoldierGraphics, disposeObject, makeMq9Drone, makeSoldier,
   placeShadow, setCrouch, setSoldierTool, triggerSoldierFire,
   triggerSoldierHit } from '../src/entities.js';
-import { Game, airstrikeDronePose, combatHistoryDue, mergeSnapshot, qx, qy, qa, relativeBearing,
+import { Game, airstrikeDronePose, combatHistoryDue, hostHeartbeatMessage, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
   createMovementBudget, parseSpawnRow, protectedBuildReason, spawnRow, teamSizeForMode,
   validateMovementReport } from '../src/multiplayer.js';
 import { PROTOCOL_VERSION, validClientMessage, validPong, validServerMessage } from '../src/protocol.js';
-import { allowInbound, claimErrorKind, claimPeerChannel, Net, peerOptions, primeIce,
+import { allowInbound, claimErrorKind, claimPeerChannel, ICE_FAILURE_CACHE_MS, Net, peerOptions, primeIce,
   probeErrorKind, PUBLIC_PAGES, PUBLIC_ROOMS, PUBLIC_SLOTS, publicPageSlots, resetIce,
   shouldSend, slotCode, usableIceServers, wireBytes, withinWireBudget } from '../src/net.js';
 import turnWorker, { handleRequest as handleTurnRequest, originAllowed,
@@ -2280,6 +2280,11 @@ function networkSyncTests() {
 
   ok('wire-byte accounting measures UTF-8 payloads',
     wireBytes({ t: 'e', text: 'voxel ★' }) > 20);
+  ok('only welcome and snapshot packets count as host heartbeat traffic',
+    hostHeartbeatMessage({ t: 'w' }) && hostHeartbeatMessage({ t: 's' })
+      && !hostHeartbeatMessage({ t: 'r' }) && !hostHeartbeatMessage({ t: 'e' })
+      && !hostHeartbeatMessage({ t: 'full' }) && !hostHeartbeatMessage({ t: 'version' })
+      && !hostHeartbeatMessage({ t: 'sync' }));
   const net = new Net();
   let sent = 0;
   net.conns = new Map([['p', { open: true, dataChannel: { bufferedAmount: 32 }, send: () => sent++ }]]);
@@ -2289,6 +2294,15 @@ function networkSyncTests() {
     sent === 1 && stats.sentPackets === 1 && stats.sentBytes > 0
       && Math.abs(stats.sentBytesPerSecond - stats.sentBytes) < 0.001
       && stats.peakBuffered === 32);
+  const throwingNet = new Net();
+  throwingNet.conns = new Map([['p', { open: true, send: () => { throw new Error('closed'); } }]]);
+  let threw = false, sendResult;
+  try { sendResult = throwingNet.sendTo('p', { t: 'e', k: 'hit' }); }
+  catch { threw = true; }
+  const throwingStats = throwingNet.stats();
+  ok('synchronous WebRTC send races fail quietly without false packet telemetry',
+    sendResult === false && !threw && throwingStats.sendErrors === 1
+      && throwingStats.sentPackets === 0);
   ok('bounded world-sync payload passes the server trust boundary',
     validServerMessage({ t: 'sync', seed: 1, map: 0, log, wr: log.length,
       wh: worldLogHash(log) }));
@@ -2467,6 +2481,21 @@ async function iceConfigTests() {
   const refused = async () => ({ ok: false, json: async () => ({}) });
   ok('a non-200 from the credential worker yields no servers',
     (await primeIce({ endpoint: 'https://ice.test/ice', fetch: refused, now: 1000 })).length === 0);
+  resetIce();
+  let failedCalls = 0;
+  const failedStub = async () => { failedCalls++; return { ok: false, json: async () => ({}) }; };
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: failedStub, now: 2000 });
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: failedStub,
+    now: 2000 + ICE_FAILURE_CACHE_MS - 1 });
+  ok('TURN failures use a short negative cache', failedCalls === 1);
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: failedStub,
+    now: 2000 + ICE_FAILURE_CACHE_MS });
+  ok('TURN failure cache retries after its expiry', failedCalls === 2);
+  resetIce();
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: failedStub, now: 3000 });
+  resetIce();
+  await primeIce({ endpoint: 'https://ice.test/ice', fetch: failedStub, now: 3001 });
+  ok('resetIce clears the TURN failure cache', failedCalls === 4);
   resetIce();
 
   // Regression: probes share one guest peer, so every probe's handler sees

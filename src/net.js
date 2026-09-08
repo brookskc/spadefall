@@ -46,8 +46,9 @@ export const EVENT_MESSAGE_BYTES = 128 * 1024;
 // own relay configuration. Tests can still inject an endpoint into primeIce.
 const ICE_ENDPOINT = 'https://spadefall-turn.spadefall.workers.dev/ice';
 const ICE_CACHE_MS = 60 * 60 * 1000;
+export const ICE_FAILURE_CACHE_MS = 30 * 1000;
 const ICE_FETCH_TIMEOUT_MS = 4000;
-let iceServers = null, iceExpiresAt = 0, icePending = null;
+let iceServers = null, iceExpiresAt = 0, iceFailureExpiresAt = 0, icePending = null;
 
 // Validate what the credential service returned before handing it to
 // RTCPeerConnection, which throws on a malformed entry. Cloudflare returns an
@@ -103,7 +104,9 @@ export function resumeToken() {
   }
 }
 
-export function resetIce() { iceServers = null; iceExpiresAt = 0; icePending = null; }
+export function resetIce() {
+  iceServers = null; iceExpiresAt = 0; iceFailureExpiresAt = 0; icePending = null;
+}
 
 // Fetch relay credentials once and cache them. Never throws: every failure
 // path — offline, CORS, a 502 from the Worker — resolves to an empty list and
@@ -114,6 +117,7 @@ export function primeIce(opts = {}) {
   const now = opts.now ?? Date.now();
   const timeoutMs = Math.max(1, Number(opts.timeoutMs) || ICE_FETCH_TIMEOUT_MS);
   if (!doFetch || !endpoint) return Promise.resolve([]);
+  if (now < iceFailureExpiresAt) return Promise.resolve([]);
   if (iceServers && now < iceExpiresAt) return Promise.resolve(iceServers);
   // Never hand a new peer an expired credential when its refresh fails.
   if (iceServers) { iceServers = null; iceExpiresAt = 0; }
@@ -124,11 +128,20 @@ export function primeIce(opts = {}) {
     try {
       const res = await doFetch(endpoint, { headers: { accept: 'application/json' },
         cache: 'no-store', credentials: 'omit', signal: controller?.signal });
-      if (!res.ok) return [];
+      if (!res.ok) {
+        iceFailureExpiresAt = now + ICE_FAILURE_CACHE_MS;
+        return [];
+      }
       const clean = usableIceServers(await res.json());
-      if (clean.length) { iceServers = clean; iceExpiresAt = now + ICE_CACHE_MS; }
+      if (clean.length) {
+        iceServers = clean; iceExpiresAt = now + ICE_CACHE_MS;
+        iceFailureExpiresAt = 0;
+      } else iceFailureExpiresAt = now + ICE_FAILURE_CACHE_MS;
       return clean;
-    } catch { return []; } finally {
+    } catch {
+      iceFailureExpiresAt = now + ICE_FAILURE_CACHE_MS;
+      return [];
+    } finally {
       if (timer) clearTimeout(timer);
       icePending = null;
     }
@@ -251,7 +264,7 @@ export class Net {
       startedAt: typeof performance !== 'undefined' ? performance.now() : Date.now(),
       sentPackets: 0, sentBytes: 0, recvPackets: 0, recvBytes: 0,
       droppedState: 0, droppedInbound: 0, droppedOversize: 0,
-      duplicateChannels: 0, peakBuffered: 0,
+      duplicateChannels: 0, sendErrors: 0, peakBuffered: 0,
     };
   }
 
@@ -280,9 +293,14 @@ export class Net {
       if (conn?.open && obj?.t === 's') this.telemetry.droppedState++;
       return false;
     }
-    conn.send(obj);
-    this._record('sent', obj, conn, bytes);
-    return true;
+    try {
+      conn.send(obj);
+      this._record('sent', obj, conn, bytes);
+      return true;
+    } catch {
+      this.telemetry.sendErrors++;
+      return false;
+    }
   }
 
   // Replay anything that arrived before handlers existed. Call right after

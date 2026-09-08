@@ -69,6 +69,13 @@ import { advanceMatchClock } from './match-lifecycle.js';
 
 export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
 
+// Only authoritative welcome and snapshot packets prove that the host is
+// still advancing the live match. Roster, event, repair, and version traffic
+// can remain valid while snapshots are stalled, so they must not quiet the
+// client's snapshot-silence watchdog.
+export const hostHeartbeatMessage = message =>
+  message?.t === 'w' || message?.t === 's';
+
 // Keep authoritative combat history on a fixed 30Hz cadence instead of tying
 // its sample count to the render refresh rate. The boolean is deliberately
 // pure so cadence changes can be regression-tested without constructing Game.
@@ -4319,8 +4326,10 @@ export class Game {
 
   clientOnData(d) {
     if (!validServerMessage(d)) return;
-    this.lastRecv = performance.now(); // host heartbeat (snapshots beat at 15Hz)
-    this._unstableShown = false; // the link's talking again — clear the warning flag
+    if (hostHeartbeatMessage(d)) {
+      this.lastRecv = performance.now(); // welcome/snapshots are the host heartbeat
+      this._unstableShown = false; // the link's talking again — clear the warning flag
+    }
     if (d.t === 'full') return this.onFull?.();
     if (d.t === 'version') return this.onVersion?.(d.v);
     if (d.t === 'r') return this._applyRoster(d);

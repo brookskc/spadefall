@@ -471,6 +471,7 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
     `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
   game.onKicked = reason => rejectClientSession(n, reason === 'vote'
     ? 'players in that room voted to remove you'
+    : reason === 'resumed' ? 'this soldier was resumed in another tab'
     : 'connection closed after sustained invalid gameplay input');
   console.debug(`[mig] rejoined migrated room ${code} as client`);
   game.clientOnData(welcome); // migrated welcome: world and kit kept as-is
@@ -560,6 +561,7 @@ function adoptJoin(n, code) {
     `game version mismatch — refresh this page (room protocol ${v}, yours ${PROTOCOL_VERSION})`);
   game.onKicked = reason => rejectClientSession(n, reason === 'vote'
     ? 'players in that room voted to remove you'
+    : reason === 'resumed' ? 'this soldier was resumed in another tab'
     : 'connection closed after sustained invalid gameplay input');
   n.handlers.onError = e => {
     reportConnectionFailure('welcome', e);

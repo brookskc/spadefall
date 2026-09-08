@@ -89,6 +89,71 @@ try {
   await Promise.all(pages.slice(1).map(page => page.waitForFunction(expected =>
     window.__game?._rosterP?.size === expected, count, { timeout: 15_000 })));
 
+  // A duplicate browser tab carrying a live soldier's resume token must
+  // rebind that seat instead of creating a second remote. The old page is
+  // retired by an explicit kick, so it must not enter migration.
+  const hostRemoteCount = await host.evaluate(() => window.__game.remote.size);
+  const retired = pages[1];
+  const originalIdentity = await retired.evaluate(() => ({
+    id: window.__game.myId, idx: window.__game.myIdx,
+    token: sessionStorage.getItem('spadefall.resume'),
+  }));
+  assert.ok(originalIdentity.token, 'live guest has a resume token');
+  const openOverlap = async (token, label) => {
+    const page = await browser.newPage();
+    await page.addInitScript(({ token: value, name }) => {
+      sessionStorage.setItem('spadefall.resume', value);
+      localStorage.setItem('tos.gfx', 'low');
+      localStorage.setItem('tos.callsign', `OVERLAP${name}`);
+    }, { token, name: label });
+    page.on('pageerror', error => faults.push(`${label}: ${error.message}`));
+    page.on('response', response => {
+      const path = new URL(response.url()).pathname;
+      if (response.status() >= 400 && path !== '/favicon.ico' && !path.endsWith('.map'))
+        faults.push(`${label}: ${response.status()} ${path}`);
+    });
+    await page.goto(`${base}&mp=join`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__game?.myIdx != null,
+      null, { timeout: 30_000 });
+    return page;
+  };
+  const assertOverlap = async (page, oldId, expectedIdx, label) => {
+    const identity = await page.evaluate(() => ({
+      id: window.__game.myId, idx: window.__game.myIdx,
+    }));
+    assert.equal(identity.idx, expectedIdx, `${label} preserved roster index`);
+    assert.notEqual(identity.id, oldId, `${label} received a new peer id`);
+    await host.waitForFunction(({ oldId: stale, id, idx, count: expected }) => {
+      const game = window.__game;
+      const rows = [...game.remote.entries()].filter(([, player]) => player.ridx === idx);
+      return game.remote.size === expected && rows.length === 1 && rows[0][0] === id
+        && !game.net.conns.has(stale) && game._reconnectReservations.size === 0;
+    }, { oldId, id: identity.id, idx: expectedIdx, count: hostRemoteCount },
+    { timeout: 30_000 });
+    return identity;
+  };
+  const overlapOne = await openOverlap(originalIdentity.token, 'overlap1');
+  const overlapIdentity = await assertOverlap(overlapOne, originalIdentity.id,
+    originalIdentity.idx, 'first overlap');
+  await new Promise(resolve => setTimeout(resolve, 1_100));
+  await retired.waitForFunction(() => window.__game?.mode === 'solo'
+    && window.__game?.net == null && /resumed/i.test(
+      document.getElementById('lobbyStatus')?.textContent ?? ''),
+  null, { timeout: 10_000 });
+  await retired.close();
+
+  // Repeat after a full second: the replacement itself must remain the one
+  // live seat, with no delayed reservation or stale connection resurrection.
+  const overlapTwo = await openOverlap(originalIdentity.token, 'overlap2');
+  await assertOverlap(overlapTwo, overlapIdentity.id, originalIdentity.idx, 'second overlap');
+  await new Promise(resolve => setTimeout(resolve, 1_100));
+  await overlapOne.waitForFunction(() => window.__game?.mode === 'solo'
+    && window.__game?.net == null && /resumed/i.test(
+      document.getElementById('lobbyStatus')?.textContent ?? ''),
+  null, { timeout: 10_000 });
+  await overlapOne.close();
+  pages[1] = overlapTwo;
+
   // Let snapshots, input uplinks, bots, collision, and HUD all run together.
   const until = Date.now() + seconds * 1000;
   while (Date.now() < until) {

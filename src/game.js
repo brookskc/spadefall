@@ -3380,7 +3380,31 @@ export class Game {
         if (firstWelcome) this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
         return;
       }
-      if (this.remote.has(id)) return; // duplicate hello (channel re-announce)
+      // A live browser can open a replacement channel before its old channel
+      // has closed. The resume token is the stable seat identity in that
+      // overlap window; never turn a replacement into a second seat.
+      const resume = validResumeToken(d.resume) ? d.resume : null;
+      const active = resume
+        ? [...this.remote.values()].find(p => p._resumeToken === resume)
+        : null;
+      if (active) {
+        if (active._noReconnect || active._disconnecting) {
+          this.net.sendTo(id, { t: 'e', k: 'kick', reason: 'integrity' });
+          const conn = this.net.conns.get(id);
+          setTimeout(() => {
+            if (this.net.conns.get(id) !== conn) return;
+            try { conn?.close(); } catch { /* already closed */ }
+          }, 250);
+          return;
+        }
+        if (active.id === id)
+          return this._hostSendWelcome(id, active, active.yaw + Math.PI / 2);
+        return this._hostRebindActivePlayer(id, active);
+      }
+      // A same-id replacement must still prove ownership of the stable seat
+      // token.  Without that, a peer id that became reusable after a broker
+      // flap could inherit an active soldier merely by repeating its id.
+      if (this.remote.has(id)) return;
       return this._hostAddPlayer(id, d.name, d.team, d.resume);
     }
     const p = this.remote.get(id);
@@ -3678,6 +3702,52 @@ export class Game {
         .map(b => [b.id, b.name, b.team]) };
   }
 
+  _hostSendWelcome(id, p, yaw = null) {
+    this.net.sendTo(id, { t: 'w', id, team: p.team, seed: this.seed,
+      map: this.mapIndex, log: this.editLog, mode: this.gameMode, me: p.ridx,
+      life: p._life,
+      tb: this.teamBalanceEnabled() ? 1 : 0,
+      wr: this.editLog.length, wh: this._worldHash >>> 0,
+      spawn: spawnRow(p.body, yaw ?? (p.team === 'green' ? 0 : Math.PI)),
+      r: this._rosterMsg() });
+  }
+
+  _hostRebindActivePlayer(id, p) {
+    const oldId = p.id;
+    if (oldId === id) return this._hostSendWelcome(id, p, p.yaw + Math.PI / 2);
+    const oldConn = this.net.conns.get(oldId);
+    const migration = this._migRoster?.get(oldId);
+    this.net.sendTo(oldId, { t: 'e', k: 'kick', reason: 'resumed' });
+    this.remote.delete(oldId);
+    if (this.net.conns.get(oldId) === oldConn) this.net.conns.delete(oldId);
+    if (migration && this._migRoster) {
+      this._migRoster.delete(oldId);
+      migration.rejoined = true;
+      migration.acknowledged = false;
+      this._migRoster.set(id, migration);
+    }
+    p.id = id;
+    p._lastActionSeq = 0;
+    p._movementBudget = null;
+    p._lastPosT = null;
+    p._airMove = null;
+    p._fallPeakY = null;
+    p._remoteSupported = true;
+    p._pingTs = undefined;
+    p._rttSeconds = undefined;
+    this.remote.set(id, p);
+    if (this._voteKick?.id === oldId) this._voteKick.id = id;
+    this._hostSendWelcome(id, p, p.yaw + Math.PI / 2);
+    if (this._voteKick) this.net.sendTo(id,
+      { t: 'e', k: 'votekick', ...this.voteKickState() });
+    this.net.broadcast(this._rosterMsg());
+    this._broadcastScoreboard(true);
+    setTimeout(() => {
+      try { oldConn?.close(); } catch { /* already closed */ }
+    }, 250);
+    return p;
+  }
+
   _hostAddPlayer(id, rawName, teamPref, resume = null) {
     if (this.remote.size + this._reconnectReservations.size + 1 >= this._humanCap()) { // room full — turn them away politely
       this.net.sendTo(id, { t: 'full' });
@@ -3703,12 +3773,7 @@ export class Game {
     this.remote.set(id, proxy);
     this._kdRow(proxy); // scoreboard seat from the moment they join
     this._removeBot(team);
-    this.net.sendTo(id, { t: 'w', id, team, seed: this.seed, map: this.mapIndex,
-      log: this.editLog, mode: this.gameMode, me: proxy.ridx,
-      life: proxy._life,
-      tb: this.teamBalanceEnabled() ? 1 : 0,
-      wr: this.editLog.length, wh: this._worldHash >>> 0,
-      spawn: spawnRow(proxy.body, proxy.team === 'green' ? 0 : Math.PI), r: this._rosterMsg() });
+    this._hostSendWelcome(id, proxy);
     if (this._voteKick) this.net.sendTo(id,
       { t: 'e', k: 'votekick', ...this.voteKickState() });
     if (this.over) {
@@ -3798,12 +3863,7 @@ export class Game {
     if (!p.alive && Number.isFinite(respawnLeft)) this.respawnTimers.set(p, respawnLeft);
     this._recordCombatPose(p);
 
-    this.net.sendTo(id, { t: 'w', id, team: p.team, seed: this.seed, map: this.mapIndex,
-      log: this.editLog, mode: this.gameMode, me: p.ridx,
-      life: p._life,
-      tb: this.teamBalanceEnabled() ? 1 : 0,
-      wr: this.editLog.length, wh: this._worldHash >>> 0,
-      spawn: spawnRow(p.body, p.yaw + Math.PI / 2), r: this._rosterMsg() });
+    this._hostSendWelcome(id, p, p.yaw + Math.PI / 2);
     this.net.broadcast(this._rosterMsg());
     this._broadcastScoreboard(true);
     this.feed(`${nameSpan(p)} reclaimed their soldier`);

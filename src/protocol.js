@@ -210,7 +210,7 @@ function validEvent(d) {
     case 'spawn': return [d.x, d.y, d.z].every(finite) && (d.yaw === undefined || finite(d.yaw))
       && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6;
     case 'corr': return [d.x, d.y, d.z].every(finite);
-    case 'kick': return d.reason === 'integrity' || d.reason === 'vote';
+    case 'kick': return d.reason === 'integrity' || d.reason === 'vote' || d.reason === 'resumed';
     case 'kd': return Array.isArray(d.rows) && d.rows.length <= 20
       && d.rows.every(r => Array.isArray(r) && r.length === 13 && shortString(r[0], 16)
         && shortString(r[1], 64) && team(r[2]) && r.slice(3).every(finite));

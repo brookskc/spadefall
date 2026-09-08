@@ -1417,6 +1417,7 @@ function socialProgressionTests() {
       && !validServerMessage({ t: 'e', k: 'votekick', active: false, target: 3 }));
   ok('vote removals use a bounded explicit reason',
     validServerMessage({ t: 'e', k: 'kick', reason: 'vote' })
+      && validServerMessage({ t: 'e', k: 'kick', reason: 'resumed' })
       && !validServerMessage({ t: 'e', k: 'kick', reason: 'host-dislikes-you' }));
   ok('callsigns normalize consistently and reject obvious decorated profanity',
     normalizeCallsign('  Àce!!  Unit  ') === 'Ace Unit'

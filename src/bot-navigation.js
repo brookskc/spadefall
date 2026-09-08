@@ -41,6 +41,25 @@ let cachedBeachheadZ = null;
 // between checkpoints.
 const validPlanarPoint = p => p && Number.isFinite(p.x) && Number.isFinite(p.z);
 
+// A bot merely passing the flag is not useful cover for the final pickup: the
+// director may send it back to midfield or defense on the next tactics tick.
+// Count human teammates (whose intent cannot be inferred) and bots explicitly
+// assigned to escort, so a staged runner leaves with support that will follow.
+export function ctfApproachSupportDistance(runner, teammates, bots = []) {
+  const origin = runner?.body?.pos ?? runner;
+  if (!validPlanarPoint(origin) || !Array.isArray(teammates)) return Infinity;
+  let nearest = Infinity;
+  for (const teammate of teammates) {
+    if (!teammate || teammate === runner || teammate.alive === false) continue;
+    const position = teammate.body?.pos ?? teammate;
+    if (!validPlanarPoint(position)) continue;
+    if (bots.includes(teammate) && teammate.tacticalRole !== 'escort') continue;
+    nearest = Math.min(nearest,
+      Math.hypot(position.x - origin.x, position.z - origin.z));
+  }
+  return nearest;
+}
+
 // This is the same value-noise cell used by mapgen's Beachhead generator.
 // Only one integer cell is needed for the trench's seed-derived z, so avoid
 // constructing a 4096-cell grid on every bot think.
@@ -386,9 +405,7 @@ export function goal(bot, context) {
     return laned(bot, new context.THREE.Vector3(context.SX / 2, g.world.surface(context.SX / 2, context.SZ / 2), context.SZ / 2), context);
   const enemyFlag = g.flags[g.enemyOf(bot.team)];
   if (enemyFlag.state === 'dropped') return enemyFlag.pos;         // grab the loose flag
-  const supportDistance = g.teamOf(bot.team).filter(entity => entity !== bot && entity.alive)
-    .reduce((nearest, entity) => Math.min(nearest,
-      Math.hypot(entity.body.pos.x - bot.body.pos.x, entity.body.pos.z - bot.body.pos.z)), Infinity);
+  const supportDistance = ctfApproachSupportDistance(bot, g.teamOf(bot.team), g.bots);
   const distanceToFlag = Math.hypot(enemyFlag.home.x - bot.body.pos.x,
     enemyFlag.home.z - bot.body.pos.z);
   if (distanceToFlag > CTF_FINAL_APPROACH_RANGE) bot.ctfStageAt = -Infinity;

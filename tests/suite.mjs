@@ -48,8 +48,8 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint,
-  laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
+import { authoredRouteGoal, crownRouteWaypoint, ctfApproachSupportDistance,
+  ctfCarrierWaypoint, laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
 import { Bot } from '../src/bots.js';
 import { acquireTarget } from '../src/bot-combat.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
@@ -860,6 +860,18 @@ function botRuleTests() {
   ok('a staged CTF runner cannot consume its own escort slot',
     stagedRoles[squad[4].id] === 'attack'
       && Object.values(stagedRoles).filter(role => role === 'escort').length === 2);
+  const runner = { alive: true, body: { pos: new THREE.Vector3(100, 0, 100) } };
+  const passingBot = { alive: true, tacticalRole: 'attack',
+    body: { pos: new THREE.Vector3(102, 0, 100) } };
+  const assignedEscort = { alive: true, tacticalRole: 'escort',
+    body: { pos: new THREE.Vector3(110, 0, 100) } };
+  const humanSupport = { alive: true, body: { pos: new THREE.Vector3(106, 0, 100) } };
+  ok('CTF staging ignores passing bots but accepts assigned escorts',
+    ctfApproachSupportDistance(runner, [runner, passingBot, assignedEscort],
+      [runner, passingBot, assignedEscort]) === 10);
+  ok('nearby human teammates still count as final-approach support',
+    ctfApproachSupportDistance(runner, [runner, passingBot, assignedEscort, humanSupport],
+      [runner, passingBot, assignedEscort]) === 6);
   const ctfLaneBot = { lane: 44, tacticalRole: 'flank-right',
     body: { pos: new THREE.Vector3(210, 0, 84) }, game: { gameMode: 'ctf' } };
   const convergedLane = laned(ctfLaneBot, new THREE.Vector3(220, 0, 128), { THREE });

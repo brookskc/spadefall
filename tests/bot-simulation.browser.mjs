@@ -48,6 +48,8 @@ const browser = await chromium.launch({ headless: true,
     '--disable-backgrounding-occluded-windows', '--mute-audio'] });
 const rows = [];
 const browserFaults = [];
+const validDiagnosticPoint = point => point
+  && [point.x, point.y, point.z].every(Number.isFinite);
 
 try {
   for (const scenario of cases) {
@@ -103,7 +105,7 @@ try {
         stuck: 0, contacts: [], firstDeathAt: null, reengage: [], deathsByClass: {}, killsByClass: {},
         pickups: 0, returns: 0, captures: 0, flagTransitions: 0, hillOccupied: 0,
         hillContested: 0, strikes: 0, impacts: 0, strikeKills: 0, errors: [],
-        ctfRuns: [], ctfApproach: {
+        ctfRuns: [], navStuckSamples: [], ctfApproach: {
           green: { entries48: 0, entries24: 0, first48At: null, first24At: null },
           blue: { entries48: 0, entries24: 0, first48At: null, first24At: null },
           approachSamples: [],
@@ -320,7 +322,17 @@ try {
       const sample = () => {
         sampleCtfApproach();
         const alive = g.bots.filter(b => b.alive);
-        for (const b of alive) m.stuck += b.telemetry?.stuckRecoveries ?? 0;
+        for (const b of alive) {
+          const recoveries = b.telemetry?.stuckRecoveries ?? 0;
+          m.stuck += recoveries;
+          // Keep a small location trace for map-specific navigation audits.
+          // This is emitted only in verbose reports and does not affect bot
+          // decisions, timing, or the normal compact CI report.
+          if (recoveries > 0 && m.navStuckSamples.length < 24)
+            m.navStuckSamples.push({ t: g.time - beganAt, id: b.id, team: b.team,
+              role: roleName(b), recoveries, targetVisible: !!b.targetVisible,
+              position: point(b.body?.pos), goal: point(b.cachedGoal) });
+        }
         // telemetry is cumulative; reset after each sample to avoid multiplying it.
         for (const b of alive) if (b.telemetry) b.telemetry.stuckRecoveries = 0;
         let contact = false;
@@ -443,6 +455,14 @@ try {
     process.env.SPADE_BOT_SIM_VERBOSE ? { ...report, cases: rows } : report));
   assert.deepEqual(browserFaults, [], browserFaults.join('\n'));
   assert.ok(rows.every(r => !r.errors.length && !r.faults.length), JSON.stringify(rows.filter(r => r.errors.length || r.faults.length)));
+  assert.ok(rows.every(row => Array.isArray(row.navStuckSamples)
+    && row.navStuckSamples.length <= 24
+    && row.navStuckSamples.every(sample => Number.isFinite(sample.t)
+      && Number.isInteger(sample.id) && ['green', 'blue'].includes(sample.team)
+      && typeof sample.role === 'string' && Number.isInteger(sample.recoveries)
+      && sample.recoveries > 0 && validDiagnosticPoint(sample.position)
+      && (sample.goal == null || validDiagnosticPoint(sample.goal)))),
+  'invalid bounded navigation-stall telemetry');
   const ctfRows = rows.filter(row => row.mode === 'ctf');
   assert.ok(ctfRows.every(row => {
     const approach = row.ctfApproach;

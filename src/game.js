@@ -422,6 +422,8 @@ export class Game {
     this._audioTarget = new THREE.Vector3();
     this._audioDirection = new THREE.Vector3();
     this._losDirection = new THREE.Vector3();
+    this._interestEye = new THREE.Vector3();
+    this._interestTarget = new THREE.Vector3();
     this._audioOccluded = pos => this._isSoundOccluded(pos);
     this._botTacticsT = 0;
     this._botBrainCursor = 0;
@@ -1348,7 +1350,7 @@ export class Game {
   // height can clip through low terrain lips that wouldn't actually
   // block a real sightline at eye/torso height.
   _perceives(eye, body) {
-    const target = body.pos.clone().add(new THREE.Vector3(0, 0.9, 0));
+    const target = this._interestTarget.set(body.pos.x, body.pos.y + 0.9, body.pos.z);
     if (eye.distanceTo(target) <= INTEREST_CLOSE_R) return true;
     return this.losClear(eye, target);
   }
@@ -4268,7 +4270,7 @@ export class Game {
       if (pingTs !== undefined) out.ts = pingTs;
       out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
       const viewer = this.remote.get(id);
-      const eye = viewer?.body.eye();
+      const eye = viewer?.body.eye(this._interestEye);
       for (const key of ['p', 'b']) {
         const cur = new Set();
         out[key] = [];

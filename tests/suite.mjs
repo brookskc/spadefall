@@ -1767,6 +1767,37 @@ function damageDirectionTests() {
 }
 
 // ---------------------------------------------------------------------------
+function snapshotInterestTests() {
+  group('snapshot interest filtering: allocation-safe visibility');
+  const game = Object.create(Game.prototype);
+  game._interestTarget = new THREE.Vector3();
+  game._losDirection = new THREE.Vector3();
+  let blocked = false, raycasts = 0;
+  game.world = {
+    raycast() {
+      raycasts++;
+      return blocked ? { x: 0, y: 0, z: 0 } : null;
+    },
+  };
+  const eye = new THREE.Vector3(4, 6, 8);
+  const eyeBefore = eye.clone();
+  const nearby = { pos: new THREE.Vector3(5, 5, 8) };
+  const nearbyBefore = nearby.pos.clone();
+  ok('close-range perception remains true without a terrain raycast',
+    game._perceives(eye, nearby) && raycasts === 0);
+  ok('interest checks do not mutate the viewer eye or target body position',
+    eye.equals(eyeBefore) && nearby.pos.equals(nearbyBefore));
+
+  const distant = { pos: new THREE.Vector3(100, 5, 8) };
+  const distantBefore = distant.pos.clone();
+  ok('a distant clear sightline remains perceptible', game._perceives(eye, distant));
+  blocked = true;
+  ok('a distant blocked sightline remains hidden', !game._perceives(eye, distant));
+  ok('long-range visibility uses terrain LOS and preserves its inputs',
+    raycasts === 2 && eye.equals(eyeBefore) && distant.pos.equals(distantBefore));
+}
+
+// ---------------------------------------------------------------------------
 function airstrikeDroneTests() {
   group('airstrike MQ-9: model and flight path');
   const startEast = airstrikeDronePose(100, 20, 120, 0, 3);
@@ -2896,6 +2927,7 @@ export async function run() {
   stayAsSquadTests();
   teamBalanceTests();
   damageDirectionTests();
+  snapshotInterestTests();
   airstrikeDroneTests();
   soldierModelTests();
   bodyTests();

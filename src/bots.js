@@ -92,6 +92,11 @@ export class Bot {
     this._spawnedAt = game.time;
     resetEnvironmentalState(this);
     this.carrier = false;
+    // Carrier state is written by the authoritative CTF controller rather
+    // than by Bot itself. Keep the last state we observed so a pickup, drop,
+    // capture, or migrated carrier cannot carry a pre-transition navigation
+    // decision into its next update.
+    this._carrierState = false;
     this.heading = team === 'blue' ? -1 : 1; // general advance direction
     this.state = 'advance';
     this.target = null;        // enemy entity currently engaged
@@ -158,7 +163,32 @@ export class Bot {
   // calls at the orchestration boundary makes update()'s sequencing explicit.
   goal() { return botGoal(this, NAV_CONTEXT); }
 
+  _syncCarrierNavigation() {
+    const carrier = !!this.carrier;
+    if (carrier === this._carrierState) return false;
+    this._carrierState = carrier;
+
+    // Carrier status changes the objective from the current role/target to the
+    // authored homeward CTF route (or back to ordinary play). Cached goals,
+    // local detours, and patrol wobble are all derived from the old objective
+    // and must not survive that transition for even one physics frame.
+    this.cachedGoal = null;
+    this.route.set(0, 0, 0);
+    this.routeT = 0;
+    this.patrol = null;
+    this.patrolT = 0;
+    this.wander.set(0, 0, 0);
+    this.wanderT = 0;
+    this.responding = false;
+    this.ctfStageAt = -Infinity;
+    return true;
+  }
+
   update(dt) {
+    // The game and migration restore paths assign .carrier directly. Observe
+    // that write at the single Bot update boundary before any alive/navigation
+    // branch can consume stale route state.
+    this._syncCarrierNavigation();
     if (!this.alive) { // corpse: tumble where it fell, then vanish
       if (this.deadT >= 0 && this.deadT <= 1.4) {
         this.deadT += dt;
@@ -787,6 +817,8 @@ export class Bot {
     this.body.vel.set(0, 0, 0);
     this.health = 100;
     this.alive = true;
+    this.carrier = false;
+    this._carrierState = false;
     this._spawnedAt = this.game.time;
     this.protT = 3; // same spawn protection humans get
     this.gunClass = randomClass(); // rerolled each life, same as a human choosing

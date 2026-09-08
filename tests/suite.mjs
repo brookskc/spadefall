@@ -49,6 +49,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
 import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint, laned } from '../src/bot-navigation.js';
+import { Bot } from '../src/bots.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -889,6 +890,52 @@ function botRuleTests() {
       && authoredRouteGoal({ carrier: true, body: { pos: { x: 220, z: 128 } },
         game: { gameMode: 'tdm', mapIndex: 0 } }, new THREE.Vector3(36, 0, 128), { THREE })
         .equals(new THREE.Vector3(36, 0, 128)));
+  const transitionBot = Object.create(Bot.prototype);
+  transitionBot.carrier = false;
+  transitionBot._carrierState = false;
+  transitionBot.alive = false;
+  transitionBot.deadT = -1;
+  transitionBot.cachedGoal = new THREE.Vector3(220, 20, 128);
+  transitionBot.route = new THREE.Vector3(1, 0, 0);
+  transitionBot.routeT = 0.8;
+  transitionBot.patrol = new THREE.Vector3(220, 20, 128);
+  transitionBot.patrolT = 12;
+  transitionBot.wander = new THREE.Vector3(8, 0, 0);
+  transitionBot.wanderT = 2;
+  transitionBot.responding = true;
+  transitionBot.ctfStageAt = 10;
+  transitionBot.carrier = true;
+  transitionBot.update(1 / 60);
+  transitionBot.game = {
+    gameMode: 'ctf', mapIndex: 0, seed: ctfRouteSeed,
+    standOf: () => new THREE.Vector3(36, 20, 128),
+    world: { surface: () => 20 },
+  };
+  transitionBot.team = 'green';
+  transitionBot.body = { pos: new THREE.Vector3(220, 20, 128) };
+  const firstCarrierGoal = authoredRouteGoal(transitionBot, transitionBot.goal(), { THREE });
+  ok('CTF carrier transition invalidates stale navigation before the first carrier update',
+    transitionBot.cachedGoal === null && transitionBot.routeT === 0
+      && transitionBot.route.lengthSq() === 0 && transitionBot.patrol === null
+      && transitionBot.wander.lengthSq() === 0 && !transitionBot.responding
+      && transitionBot.ctfStageAt === -Infinity
+      && firstCarrierGoal.x < transitionBot.body.pos.x && firstCarrierGoal.z !== 128);
+  transitionBot.cachedGoal = new THREE.Vector3(36, 20, 128);
+  transitionBot.route.set(1, 0, 0);
+  transitionBot.routeT = 0.5;
+  transitionBot.carrier = false;
+  transitionBot.update(1 / 60);
+  ok('CTF carrier drop/capture transition also invalidates the homeward route',
+    transitionBot._carrierState === false && transitionBot.cachedGoal === null
+      && transitionBot.routeT === 0 && transitionBot.route.lengthSq() === 0);
+  const ordinaryGoal = new THREE.Vector3(80, 20, 128);
+  transitionBot.cachedGoal = ordinaryGoal;
+  transitionBot.route.set(0, 0, 1);
+  transitionBot.routeT = 0.5;
+  transitionBot.update(1 / 60);
+  ok('unchanged carrier state does not invalidate ordinary bot navigation',
+    transitionBot.cachedGoal === ordinaryGoal && transitionBot.routeT === 0.5
+      && transitionBot.route.z === 1);
   const kothRoles = assignBotRoles('koth', squad, { hill: { x: 60, z: 45 } });
   ok('KOTH director creates an anchor, contesters, and flanking pressure',
     Object.values(kothRoles).filter(r => r === 'anchor').length === 1

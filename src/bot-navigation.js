@@ -1,7 +1,8 @@
 // bot-navigation.js — goal selection, patrol routing, and obstacle planning.
 // The Bot class owns the per-frame orchestration; these helpers own the
 // navigation algorithms and receive the small world-policy context they need.
-import { chooseLocalRoute, hillPost } from './bot-rules.js';
+import { CTF_CLOSE_SUPPORT_RANGE, CTF_FINAL_APPROACH_RANGE, chooseLocalRoute,
+  ctfFinalApproachPolicy, hillPost } from './bot-rules.js';
 
 // Perpendicular offset so a team advances on a broad front instead of
 // single file down the middle of the map.
@@ -170,13 +171,20 @@ export function goal(bot, context) {
   if (bot.role === 'escort') {
     const carrier = g.entities().find(e => e !== bot && e.alive
       && e.team === bot.team && e.carrier);
-    if (carrier) {
+    const stagingRunner = !carrier ? g.bots.filter(e => e !== bot && e.alive
+      && e.team === bot.team && !e.carrier && Number.isFinite(e.ctfStageAt))
+      .sort((a, b) => a.ctfStageAt - b.ctfStageAt || a.id - b.id)[0] : null;
+    const runner = carrier ?? stagingRunner;
+    if (runner) {
       const home = g.standOf(bot.team);
-      const toward = home.clone().sub(carrier.body.pos).setY(0);
+      const toward = (carrier ? home : g.standOf(g.enemyOf(bot.team))).clone()
+        .sub(runner.body.pos).setY(0);
       if (toward.lengthSq() > 0.01) toward.normalize();
       const side = new context.THREE.Vector3(-toward.z, 0, toward.x)
         .multiplyScalar(bot.id % 2 ? 2.5 : -2.5);
-      return carrier.body.pos.clone().addScaledVector(toward, 4).add(side);
+      // Before pickup, close to the runner's shoulder; once it has the flag,
+      // screen several blocks ahead on the route home.
+      return runner.body.pos.clone().addScaledVector(toward, carrier ? 4 : 1.5).add(side);
     }
   }
   if (bot.role === 'defend') return laned(bot, g.standOf(bot.team), context);
@@ -184,6 +192,31 @@ export function goal(bot, context) {
     return laned(bot, new context.THREE.Vector3(context.SX / 2, g.world.surface(context.SX / 2, context.SZ / 2), context.SZ / 2), context);
   const enemyFlag = g.flags[g.enemyOf(bot.team)];
   if (enemyFlag.state === 'dropped') return enemyFlag.pos;         // grab the loose flag
+  const supportDistance = g.entities().filter(entity => entity !== bot
+    && entity.alive && entity.team === bot.team)
+    .reduce((nearest, entity) => Math.min(nearest,
+      Math.hypot(entity.body.pos.x - bot.body.pos.x, entity.body.pos.z - bot.body.pos.z)), Infinity);
+  const distanceToFlag = Math.hypot(enemyFlag.home.x - bot.body.pos.x,
+    enemyFlag.home.z - bot.body.pos.z);
+  if (distanceToFlag > CTF_FINAL_APPROACH_RANGE) bot.ctfStageAt = -Infinity;
+  const stagedSeconds = Number.isFinite(bot.ctfStageAt) ? g.time - bot.ctfStageAt : 0;
+  const approach = ctfFinalApproachPolicy({
+    distanceToFlag,
+    nearestSupportDistance: supportDistance, stagedSeconds,
+    escalation: g._ctfEscalation?.active,
+  });
+  if (approach === 'stage') {
+    if (!Number.isFinite(bot.ctfStageAt)) bot.ctfStageAt = g.time;
+    // Hold just outside the stand instead of repeatedly brushing the pickup
+    // radius. This is a local formation position, not a scripted route, and
+    // combat steering can still take priority when an enemy is visible.
+    const away = bot.body.pos.clone().sub(enemyFlag.home).setY(0);
+    if (away.lengthSq() < 0.01) away.set(-bot.heading, 0, 0);
+    away.normalize().multiplyScalar(CTF_FINAL_APPROACH_RANGE - 4);
+    return enemyFlag.home.clone().add(away);
+  }
+  if (supportDistance <= CTF_CLOSE_SUPPORT_RANGE || stagedSeconds === 0)
+    bot.ctfStageAt = -Infinity;
   return laned(bot, g.standOf(g.enemyOf(bot.team)), context);             // storm their base
 }
 

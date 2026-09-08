@@ -94,6 +94,27 @@ export function botTerrainEditAllowed(bot, { water = false, stuck = 0,
 export const smgClosingIntent = (gunClass, distance, visible = true) =>
   gunClass === 1 && visible && Number.isFinite(distance) && distance > 14;
 
+// A final flag pickup is the one place a broad "someone is in the area"
+// grouping rule is not enough: the carrier is immediately exposed leaving the
+// stand.  Stage briefly for a teammate who can actually cover that exit, then
+// fall back to an ordinary advance so a split team cannot wait forever.
+export const CTF_FINAL_APPROACH_RANGE = 24;
+export const CTF_CLOSE_SUPPORT_RANGE = 14;
+export const CTF_STAGE_FALLBACK_SECONDS = 12;
+/** @param {{ distanceToFlag?: number, nearestSupportDistance?: number,
+ * stagedSeconds?: number, escalation?: boolean }} context */
+export function ctfFinalApproachPolicy({ distanceToFlag, nearestSupportDistance,
+  stagedSeconds = 0, escalation = false } = {}) {
+  if (!Number.isFinite(distanceToFlag) || distanceToFlag > CTF_FINAL_APPROACH_RANGE)
+    return 'advance';
+  if (Number.isFinite(nearestSupportDistance)
+      && nearestSupportDistance <= CTF_CLOSE_SUPPORT_RANGE)
+    return 'advance';
+  if (escalation || (Number.isFinite(stagedSeconds)
+      && stagedSeconds >= CTF_STAGE_FALLBACK_SECONDS)) return 'advance';
+  return 'stage';
+}
+
 // Once line of sight breaks, aim and movement use this fading last-known
 // position rather than reading the live entity. The deterministic drift models
 // uncertainty while keeping replays and tests stable.
@@ -150,6 +171,10 @@ export function assignBotRoles(mode, bots, context = {}) {
   if (context.ownFlagEmergency && finitePoint(context.ownFlag))
     for (const b of nearest(context.ownFlag).slice(0, 2)) set(b, 'recover', used);
   if (finitePoint(context.friendlyCarrier)) {
+    // A pre-pickup staging runner is not technically a carrier yet. Reserve
+    // its explicit id so it cannot be selected as its own zero-distance
+    // escort; its existing attack role keeps it committed to the flag.
+    if (Number.isInteger(context.friendlyCarrierId)) used.add(context.friendlyCarrierId);
     const escortCap = living.length >= 5 ? 2 : 1;
     for (const b of nearest(context.friendlyCarrier, unassigned(used)).slice(0, escortCap))
       set(b, 'escort', used);

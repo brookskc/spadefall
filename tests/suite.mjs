@@ -45,7 +45,7 @@ import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
 import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   botSeparation, botsForSquadOrder, botTargetScore,
   botTelemetrySummary, botTerrainEditAllowed, BOT_LIFE_EDIT_BUDGET,
-  chooseLocalRoute, hillPost, rememberedEnemyPosition,
+  chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
 import { laned } from '../src/bot-navigation.js';
@@ -791,6 +791,24 @@ function botRuleTests() {
   ok('SMG closing intent activates only for visible out-of-range targets',
     smgClosingIntent(1, 24, true) && !smgClosingIntent(1, 10, true)
       && !smgClosingIntent(0, 24, true));
+  ok('CTF final approach stages a lone bot until close support arrives',
+    ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: 30,
+      stagedSeconds: 3 }) === 'stage');
+  ok('CTF final approach advances with a genuinely close escort',
+    ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: 10,
+      stagedSeconds: 0 }) === 'advance');
+  ok('CTF final approach has an escalation-safe bounded fallback',
+    ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: 30,
+      stagedSeconds: 12 }) === 'advance'
+      && ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: 30,
+        stagedSeconds: 0, escalation: true }) === 'advance');
+  const stagedRoles = assignBotRoles('ctf', squad, {
+    friendlyCarrier: { x: squad[4].x, z: squad[4].z }, friendlyCarrierId: squad[4].id,
+    ownStand: { x: 10, z: 40 }, midfield: { x: 128, z: 128 },
+  });
+  ok('a staged CTF runner cannot consume its own escort slot',
+    stagedRoles[squad[4].id] === 'attack'
+      && Object.values(stagedRoles).filter(role => role === 'escort').length === 2);
   const ctfLaneBot = { lane: 44, tacticalRole: 'flank-right',
     body: { pos: new THREE.Vector3(210, 0, 84) }, game: { gameMode: 'ctf' } };
   const convergedLane = laned(ctfLaneBot, new THREE.Vector3(220, 0, 128), { THREE });

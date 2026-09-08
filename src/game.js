@@ -41,7 +41,7 @@ import { staySquadGroups, staySquadState,
   VOTE_KICK_COOLDOWN, VOTE_KICK_DURATION, voteKickVotesNeeded } from './social.js';
 import { sanitizeCallsign } from './callsign.js';
 import { assignBotRoles, botsForSquadOrder, botDifficultyCode, botDifficultyKey,
-  botTelemetrySummary, scheduleBotBrains } from './bot-rules.js';
+  botTelemetrySummary, ctfFinalApproachPolicy, scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
   worldEventDisposition, worldLogHash } from './network-sync.js';
 import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -1542,13 +1542,23 @@ export class Game {
         }));
         const ownFlag = this.flags?.[team];
         const friendlyCarrier = this.entities().find(e => e.alive && e.team === team && e.carrier);
+        // Before taking a home flag, a lone bot advertises its short staging
+        // position to the director. The existing escort allocation then pulls
+        // close cover in while still reserving recovery and one defender.
+        const stagingRunner = !friendlyCarrier && ownFlag?.state === 'home'
+          && this.flags?.[this.enemyOf(team)]?.state === 'home'
+          ? this.bots.filter(b => b.alive && b.team === team && !b.carrier
+            && Number.isFinite(b.ctfStageAt)).sort((a, b) => a.ctfStageAt - b.ctfStageAt || a.id - b.id)[0]
+          : null;
+        const friendlySupportTarget = friendlyCarrier?.body?.pos ?? stagingRunner?.body?.pos;
         const flagPoint = ownFlag?.state === 'carried'
           ? this.standOf(team).clone().lerp(this.standOf(this.enemyOf(team)), 0.5)
           : ownFlag?.state === 'dropped' ? ownFlag.pos : ownFlag?.home;
         const roles = assignBotRoles(this.gameMode, teamBots, {
           ownFlagEmergency: ownFlag && ownFlag.state !== 'home',
           ownFlag: flagPoint,
-          friendlyCarrier: friendlyCarrier?.body?.pos,
+          friendlyCarrier: friendlySupportTarget,
+          friendlyCarrierId: stagingRunner?.id,
           ownStand: this.flags?.[team]?.home ?? this.standOf(team),
           midfield: { x: SX / 2, z: SZ / 2 },
           hill: this.hill?.pos,
@@ -2656,10 +2666,27 @@ export class Game {
       const interaction = ctfFlagInteraction(e, ownFlag, enemyFlag,
         (entity, point) => entity.body.pos.distanceTo(point));
 
-      if (interaction === 'pickup') {
+      // A bot near a home flag stages for close cover rather than converting a
+      // teammate merely somewhere on the enemy half into imaginary support.
+      // Humans and recovery of a dropped flag keep the ordinary interaction.
+      let pickupAllowed = true;
+      if (interaction === 'pickup' && e instanceof Bot && enemyFlag.state === 'home') {
+        const nearestSupportDistance = this.entities().filter(ally => ally !== e
+          && ally.alive && ally.team === e.team).reduce((nearest, ally) => Math.min(nearest,
+          Math.hypot(ally.body.pos.x - e.body.pos.x, ally.body.pos.z - e.body.pos.z)), Infinity);
+        const stagedSeconds = Number.isFinite(e.ctfStageAt) ? this.time - e.ctfStageAt : 0;
+        pickupAllowed = ctfFinalApproachPolicy({
+          distanceToFlag: e.body.pos.distanceTo(enemyFlag.home), nearestSupportDistance,
+          stagedSeconds, escalation: this._ctfEscalation.active,
+        }) === 'advance';
+        if (!pickupAllowed && !Number.isFinite(e.ctfStageAt)) e.ctfStageAt = this.time;
+      }
+
+      if (interaction === 'pickup' && pickupAllowed) {
         enemyFlag.state = 'carried';
         enemyFlag.carrier = e;
         e.carrier = true;
+        e.ctfStageAt = -Infinity;
         this._ctfProgressAt = this.time;
         this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
         sfx.pickup();
@@ -3268,9 +3295,16 @@ export class Game {
         // at promotion under this very peer id — what they need is a
         // welcome, not a respawn. Seed/map ride along so a stale replica
         // can catch the mismatch and rebuild instead of fighting it.
-        this._migRoster.delete(id);
         const p = this.remote.get(id);
         if (!p) return; // lapsed entry — fall through would double-spawn
+        if (validResumeToken(d.resume)) p._resumeToken = d.resume;
+        // Keep the reservation through the migration grace window. Under
+        // full-room load the first WebRTC channel can flap even after the
+        // client receives its welcome; a retry must still recover this exact
+        // seat instead of entering as a brand-new player.
+        const firstWelcome = !mig.rejoined;
+        mig.rejoined = true;
+        mig.acknowledged = false;
         const reset = !!p._migrationRespawn;
         if (reset) {
           p.respawn(null, false);
@@ -3283,7 +3317,7 @@ export class Game {
           wr: this.editLog.length, wh: this._worldHash >>> 0,
           spawn: spawnRow(p.body, p.yaw + Math.PI / 2), reset: reset ? 1 : 0,
           r: this._rosterMsg() });
-        this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
+        if (firstWelcome) this.feed(`${nameSpan(p)} rejoined ${p.team.toUpperCase()}`);
         return;
       }
       if (this.remote.has(id)) return; // duplicate hello (channel re-announce)
@@ -3291,6 +3325,11 @@ export class Game {
     }
     const p = this.remote.get(id);
     if (!p) return;
+    // A valid state packet proves the migration welcome was adopted. Retain
+    // the record until the grace window closes so a just-opened WebRTC
+    // channel can flap and retry without changing this player's identity.
+    const migration = this._migRoster?.get(id);
+    if (d.t === 's' && migration?.rejoined) migration.acknowledged = true;
     // A reliable channel preserves order in one direction, not across the
     // host->client respawn and client->host uplink directions. Late packets
     // from the corpse's life are normal under load; ignore them rather than
@@ -3568,7 +3607,15 @@ export class Game {
   _rosterMsg() {
     const p = [[this._hostIdx, this.player.name, this.player.team, 'HOST']];
     for (const pr of this.remote.values()) p.push([pr.ridx, pr.name, pr.team, pr.id]);
-    return { t: 'r', p, b: this.bots.map(b => [b.id, b.name, b.team]) };
+    // A reconnect reservation is still a human seat. Its cover bot runs the
+    // body on the host, but peers must retain the original roster identity so
+    // an election during the grace window can hand that same seat back to the
+    // returning player instead of admitting them as a newcomer.
+    for (const { player } of this._reconnectReservations.values())
+      p.push([player.ridx, player.name, player.team, player.id]);
+    return { t: 'r', p,
+      b: this.bots.filter(b => !Number.isInteger(b._humanRidx))
+        .map(b => [b.id, b.name, b.team]) };
   }
 
   _hostAddPlayer(id, rawName, teamPref, resume = null) {
@@ -3853,7 +3900,10 @@ export class Game {
       // no channel, so hostOnLeave can never fire for it, and it would stand
       // in the world forever holding a roster seat and a slot against
       // MAX_HUMANS. Retire them the same way a normal leave does.
-      const stale = [...(this._migRoster?.keys() ?? [])];
+      const stale = [...(this._migRoster?.entries() ?? [])]
+        .filter(([id, migration]) => !migration.acknowledged
+          || !this.net?.conns?.get(id)?.open)
+        .map(([id]) => id);
       this._migRoster = null;
       if (this.mode !== 'host') return;
       for (const id of stale) {
@@ -3905,6 +3955,22 @@ export class Game {
   hostOnLeave(id) {
     const p = this.remote.get(id);
     if (!p) return;
+    const migration = this._migRoster?.get(id);
+    if (migration) {
+      // A survivor's first post-handoff channel can flap while the full room
+      // is reconnecting. Preserve the reconstructed seat for another knock;
+      // the grace-window cleanup retires it if no live acknowledged channel
+      // ultimately settles. As with an ordinary disconnect, never let a
+      // missing player hold the flag hostage.
+      migration.rejoined = false;
+      migration.acknowledged = false;
+      if (p.carrier && this.flags) {
+        p.carrier = false;
+        this.flags[this.enemyOf(p.team)].drop(p.body.pos.clone());
+      }
+      this.feed(`${nameSpan(p)} reconnecting after host migration`);
+      return;
+    }
     if (p.carrier && this.flags) {
       p.carrier = false;
       this.flags[this.enemyOf(p.team)].drop(p.body.pos.clone());
@@ -3976,12 +4042,27 @@ export class Game {
         p.nades, p.ammo[p.gunClass], Math.max(0, Math.round((p._reloadUntil - this.time) * 1000)),
         p.gunClass]);
     }
+    // Cover bots occupy their reserved HUMAN row while the owner reconnects.
+    // That preserves the full state needed for host migration without drawing
+    // a duplicate bot avatar or losing the peer id that owns this seat.
+    for (const b of this.bots) {
+      if (!Number.isInteger(b._humanRidx)) continue;
+      P.push([b._humanRidx, ...pos(b.body.pos), qa(b.parts.group.rotation.y),
+        Math.round(b.health), b.alive ? 1 : 0, 0, b.gunClass, b.blocks,
+        b.crouched ? 1 : 0, b.nades, b.ammo,
+        Math.max(0, Math.round(b.reloading * 1000)), b.gunClass]);
+    }
+    const B = [];
+    for (const b of this.bots) {
+      if (Number.isInteger(b._humanRidx)) continue;
+      B.push([b.id, ...pos(b.body.pos), qa(b.parts.group.rotation.y),
+        Math.round(b.health), b.alive ? 1 : 0, b.carrier ? 1 : 0,
+        b.parts.crouched ? 1 : 0, botDifficultyCode(b.difficulty?.key)]);
+    }
     return {
       t: 's',
       p: P,
-      b: this.bots.map(b => [b.id, ...pos(b.body.pos), qa(b.parts.group.rotation.y),
-        Math.round(b.health), b.alive ? 1 : 0, b.carrier ? 1 : 0,
-        b.parts.crouched ? 1 : 0, botDifficultyCode(b.difficulty?.key)]),
+      b: B,
         // Crouch and cognitive profile both survive client reconstruction and
         // host migration. Neither changes bot health, damage, or weapon stats.
       f: this.flags && {
@@ -4047,7 +4128,10 @@ export class Game {
     // this.remote/this.bots for every row on every connection.
     const byIdx = { p: new Map([[this._hostIdx, this.player]]), b: new Map() };
     for (const p of this.remote.values()) byIdx.p.set(p.ridx, p);
-    for (const b of this.bots) byIdx.b.set(b.id, b);
+    for (const b of this.bots) {
+      if (Number.isInteger(b._humanRidx)) byIdx.p.set(b._humanRidx, b);
+      else byIdx.b.set(b.id, b);
+    }
     for (const [id, conn] of this.net.conns) {
       if (!conn.open) continue;
       if (conn.dataChannel?.bufferedAmount > 64 * 1024) continue;
@@ -4214,6 +4298,17 @@ export class Game {
         this._lastSnapshotSeq = null;
         if (d.wh !== undefined && (d.wh >>> 0) !== (this._worldHash >>> 0))
           this._applyWorldSync(d);
+        // Interest management may have hidden our old body from the promoted
+        // replica. Its reset flag supplies the authoritative safe redeploy;
+        // apply it on the migrated path where that flag is actually sent.
+        if (d.reset) {
+          const spawn = parseSpawnRow(d.spawn);
+          if (spawn) {
+            this.player.respawn({ x: spawn.x, y: spawn.y, z: spawn.z });
+            this.player.yaw = spawn.yaw;
+            this.player.pitch = 0;
+          }
+        }
         this.onWelcome?.();
       } else {
         this.rebuild(d.seed, d.map ?? 0);
@@ -4227,18 +4322,6 @@ export class Game {
           this.player.body.vel.set(0, 0, 0);
           this.player.yaw = spawn.yaw;
           this.player.pitch = 0;
-        }
-        // The promoted host could not know an out-of-sight survivor's exact
-        // state without defeating interest management. In that case it marks
-        // the welcome as a controlled redeploy and both sides converge on the
-        // supplied spawn immediately instead of fighting correction packets.
-        if (d.reset) {
-          const spawn = parseSpawnRow(d.spawn);
-          if (spawn) {
-            this.player.respawn({ x: spawn.x, y: spawn.y, z: spawn.z });
-            this.player.yaw = spawn.yaw;
-            this.player.pitch = 0;
-          }
         }
         this._replayEdits(d.log);
         if (d.wh !== undefined && (d.wh >>> 0) !== (this._worldHash >>> 0))

@@ -118,15 +118,144 @@ try {
     && window.__game.kd.get('p' + idx)?.score >= 777, { idx: before.idx, score: count },
   { timeout: 15_000 });
 
-  const health = await Promise.all(pages.map(page => page.evaluate(() => ({
+  // Make one visible, authoritative world change before the baton pass. The
+  // scan picks a deterministic topmost solid voxel outside every protected
+  // area instead of hard-coding a map coordinate that authored terrain might
+  // later occupy. It exercises the replicated edit log used for migration and
+  // late joins without disturbing a stand, spawn, or the base foundation.
+  const migrationState = await host.evaluate(() => {
+    const game = window.__game;
+    let edit = null;
+    for (let x = 72; x <= 184 && !edit; x += 4) for (let z = 72; z <= 184; z += 4) {
+      const y = game.world.surface(x, z);
+      if (y <= 1 || !game.world.solid(x, y, z) || game.world.solid(x, y + 1, z)) continue;
+      if (game._protectedVoxelReason(x, y, z)) continue;
+      if (game.applyEdit(x, y, z, 0)) { edit = { x, y, z }; break; }
+    }
+    if (!edit) throw new Error('no safe editable terrain voxel found');
+    game.captures.green = 13;
+    game.captures.blue = 8;
+    return { edit, score: { green: game.captures.green, blue: game.captures.blue } };
+  });
+  await Promise.all(pages.slice(1).map(page => page.waitForFunction(state => {
+    const game = window.__game;
+    return game?.captures?.green === state.score.green && game.captures.blue === state.score.blue
+      && game.world?.get(state.edit.x, state.edit.y, state.edit.z) === 0;
+  }, migrationState, { timeout: 30_000 })));
+
+  const originalHostHealth = await host.evaluate(() => ({
+    faults: window.__spadefallDiagnostics?.faults ?? [], net: window.__net?.stats?.(),
+  }));
+  const survivors = pages.slice(1);
+  // A reload briefly removes its old channel before reclaiming the reserved
+  // soldier. Do not pull the host out from under a guest that has seen the
+  // score/edit but has not yet received the final post-reclaim roster.
+  await Promise.all(survivors.map(page => page.waitForFunction(expected =>
+    window.__game?._rosterP?.size === expected, count, { timeout: 30_000 })));
+  const survivorIdentity = await Promise.all(survivors.map(page => page.evaluate(() => ({
+    id: window.__game.myId, idx: window.__game.myIdx,
+  }))));
+  await host.close(); // Exercise main.js/Net's real host-drop election path.
+
+  const promotedIndex = await Promise.any(survivors.map((page, index) => page
+    .waitForFunction(() => window.__game?.mode === 'host' && window.__game?.migGen === 1,
+      null, { timeout: 90_000 }).then(() => index)));
+  const migratedHost = survivors[promotedIndex];
+  const migratedClients = survivors.filter((_, index) => index !== promotedIndex);
+  await Promise.all(migratedClients.map(page => page.waitForFunction(() =>
+    window.__game?.mode === 'client' && window.__game?.migGen === 1 && window.__net?.conn?.open,
+  null, { timeout: 90_000 })));
+  await Promise.all(survivors.map(page => page.waitForFunction(expected => {
+    const game = window.__game;
+    return game?.mode === 'host'
+      ? game._rosterMsg().p.length === expected
+      : game?._rosterP?.size === expected;
+  }, count - 1, { timeout: 30_000 })));
+  await Promise.all(survivors.map(page => page.waitForFunction(state => {
+    const game = window.__game;
+    return game?.captures?.green === state.score.green
+      && game?.captures?.blue === state.score.blue
+      && game?.world?.get(state.edit.x, state.edit.y, state.edit.z) === 0;
+  }, migrationState, { timeout: 30_000 })));
+  const migrationHealth = await Promise.all(survivors.map(page => page.evaluate(() => ({
+    mode: window.__game?.mode, generation: window.__game?.migGen,
+    remotes: window.__game?.remote?.size, roster: window.__game?._rosterP?.size,
+    authoritativeRoster: window.__game?._rosterMsg?.().p.length,
+    id: window.__game?.myId, idx: window.__game?.myIdx,
+    score: window.__game?.captures,
+    faults: window.__spadefallDiagnostics?.faults ?? [],
+  }))));
+  assert.equal(migrationHealth.filter(row => row.mode === 'host').length, 1,
+    'exactly one survivor became the migrated host');
+  // The elected peer deliberately adopts the transport id `HOST`; its stable
+  // roster index is the player identity that must survive the handoff.
+  assert.ok(migrationHealth.every((row, index) => row.idx === survivorIdentity[index].idx),
+    `migration changed survivor identity ${JSON.stringify({ survivorIdentity, migrationHealth })}`);
+  assert.ok(migrationHealth.every(row => row.generation === 1),
+    `migration generation mismatch ${JSON.stringify(migrationHealth)}`);
+  assert.ok(migrationHealth.every(row => row.score.green === migrationState.score.green
+    && row.score.blue === migrationState.score.blue),
+  `migration score mismatch ${JSON.stringify(migrationHealth)}`);
+  assert.ok(migrationHealth.every(row => row.mode === 'host'
+    ? row.authoritativeRoster === count - 1 : row.roster === count - 1),
+  `migration roster mismatch ${JSON.stringify(migrationHealth)}`);
+  assert.equal(migrationHealth[promotedIndex].remotes, count - 2,
+    'migrated host retained every other survivor');
+  // Migration constructs new Net instances, so compare traffic with counters
+  // captured after adoption rather than with the retired room's totals.
+  const migratedPacketCounts = await Promise.all(survivors.map(page => page.evaluate(() =>
+    window.__net?.stats?.().recvPackets ?? 0)));
+  await migratedHost.evaluate(() => window.__game.net.broadcast({
+    t: 'e', k: 'msg', text: 'MIGRATION HEARTBEAT', color: '#fff',
+  }));
+  await Promise.all(migratedClients.map(page => {
+    const index = survivors.indexOf(page);
+    return page.waitForFunction(beforePackets =>
+      (window.__net?.stats?.().recvPackets ?? 0) > beforePackets,
+    migratedPacketCounts[index], { timeout: 20_000 });
+  }));
+  await migratedHost.waitForFunction(beforePackets =>
+    (window.__net?.stats?.().recvPackets ?? 0) > beforePackets,
+  migratedPacketCounts[promotedIndex], { timeout: 20_000 });
+
+  // A newcomer must receive the promoted host's migrated edit log and score,
+  // not just a live snapshot from its own fresh map.
+  const late = await browser.newPage();
+  pages.push(late);
+  await late.addInitScript(() => {
+    localStorage.setItem('tos.gfx', 'low');
+    localStorage.setItem('tos.callsign', 'LATEJOIN');
+  });
+  late.on('pageerror', error => faults.push(`late: ${error.message}`));
+  late.on('response', response => {
+    const path = new URL(response.url()).pathname;
+    if (response.status() >= 400 && path !== '/favicon.ico' && !path.endsWith('.map'))
+      faults.push(`late: ${response.status()} ${path}`);
+  });
+  const migratedBase = base.replace('code=LOAD', 'code=LOAD-M1');
+  await late.goto(`${migratedBase}&mp=join`, { waitUntil: 'domcontentloaded' });
+  await late.waitForFunction(() => window.__game?.myIdx != null, null, { timeout: 45_000 });
+  await late.waitForFunction(state => window.__game?.captures?.green === state.score.green
+    && window.__game.captures.blue === state.score.blue
+    && window.__game.world?.get(state.edit.x, state.edit.y, state.edit.z) === 0,
+  migrationState, { timeout: 30_000 });
+  await migratedHost.waitForFunction(expected => window.__game?.remote?.size === expected,
+    count - 1, { timeout: 30_000 });
+  await late.waitForFunction(expected => window.__game?._rosterP?.size === expected,
+    count, { timeout: 30_000 });
+
+  const health = await Promise.all(survivors.concat(late).map(page => page.evaluate(() => ({
     faults: window.__spadefallDiagnostics?.faults ?? [],
     mode: window.__game?.mode,
     net: window.__net?.stats?.(),
   }))));
+  assert.ok(originalHostHealth.net?.recvPackets > 0,
+    'the original host received real guest traffic before migration');
   assert.ok(health.every(row => row.net?.recvPackets > 0 || row.mode === 'host'));
   assert.deepEqual(faults, [], faults.join('\n'));
-  assert.ok(health.every(row => row.faults.length === 0), JSON.stringify(health));
-  console.log(`full-room browsers: ${count} players, ${seconds}s traffic, reload reclaim passed`);
+  assert.ok(originalHostHealth.faults.length === 0 && health.every(row => row.faults.length === 0),
+    JSON.stringify({ originalHostHealth, health }));
+  console.log(`full-room browsers: ${count} players, ${seconds}s traffic, reload reclaim, migration, late join passed`);
 } catch (error) {
   const states = [];
   for (let i = 0; i < pages.length; i++) {

@@ -88,8 +88,67 @@ try {
       const m = { deaths: 0, spawnDeaths: 0, edits: 0, digs: 0, builds: 0,
         stuck: 0, contacts: [], reengage: [], deathsByClass: {}, killsByClass: {},
         pickups: 0, returns: 0, captures: 0, flagTransitions: 0, hillOccupied: 0,
-        hillContested: 0, strikes: 0, impacts: 0, strikeKills: 0, errors: [] };
+        hillContested: 0, strikes: 0, impacts: 0, strikeKills: 0, errors: [],
+        ctfRuns: [] };
       const awaitingContact = new Map();
+      // Keep this deliberately test-local.  Flag methods remain unmodified so
+      // the bot room follows precisely the same authority path as production.
+      const activeRun = new Map();
+      const pendingReturn = new Map();
+      let nextRunId = 1;
+      const point = p => p ? { x: p.x, y: p.y, z: p.z } : null;
+      const distance = (a, b) => a && b ? Math.hypot(a.x - b.x, a.z - b.z) : null;
+      const finishRun = (run, outcome, extra = {}) => {
+        if (!run || run.outcome) return;
+        run.outcome = outcome;
+        run.endedAt = g.time - beganAt;
+        run.duration = run.endedAt - run.startedAt;
+        Object.assign(run, extra);
+        activeRun.delete(run.flagTeam);
+        if (outcome === 'death_drop' || outcome === 'drop') pendingReturn.set(run.flagTeam, run);
+      };
+      const startRun = (flagTeam, carrier) => {
+        if (!carrier?.body) return null;
+        const home = g.standOf(carrier.team);
+        const run = { id: nextRunId++, flagTeam, carrierId: carrier.id, carrierTeam: carrier.team,
+          startedAt: g.time - beganAt, startPosition: point(carrier.body.pos),
+          homePosition: point(home), closestHomeDistance: distance(carrier.body.pos, home),
+          closestHomeAt: g.time - beganAt, escortSeconds: 0, closestEscortDistance: null,
+          obstructionSamples: [], stuckSamples: [], approachedHome: false,
+          ownFlagStateAtApproach: null, returnAssociation: null, captureAssociation: null,
+          outcome: null, endedAt: null, duration: null };
+        m.ctfRuns.push(run);
+        activeRun.set(flagTeam, run);
+        return run;
+      };
+      const sampleCarrier = (run, carrier, dt) => {
+        if (!run || !carrier?.body?.pos || !carrier.alive) return;
+        const home = g.standOf(run.carrierTeam);
+        const homeDistance = distance(carrier.body.pos, home);
+        if (homeDistance != null && homeDistance < run.closestHomeDistance) {
+          run.closestHomeDistance = homeDistance;
+          run.closestHomeAt = g.time - beganAt;
+        }
+        if (!run.approachedHome && homeDistance != null && homeDistance <= 16) {
+          run.approachedHome = true;
+          run.ownFlagStateAtApproach = g.flags?.[run.carrierTeam]?.state ?? null;
+        }
+        const escorts = g.bots.filter(bot => bot !== carrier && bot.alive && bot.team === run.carrierTeam);
+        const escortDistance = escorts.length ? Math.min(...escorts.map(bot => distance(bot.body.pos, carrier.body.pos))) : null;
+        if (escortDistance != null) {
+          run.closestEscortDistance = run.closestEscortDistance == null
+            ? escortDistance : Math.min(run.closestEscortDistance, escortDistance);
+          if (escortDistance <= 12) run.escortSeconds += dt;
+        }
+        // These are bounded, sparse snapshots: enough to diagnose a bad route
+        // without dumping every 50ms physics tick into normal CI output.
+        if (run.stuckSamples.length < 12 && (carrier.stuck > 0 || carrier.telemetry?.stuckRecoveries > 0))
+          run.stuckSamples.push({ t: g.time - beganAt, stuck: carrier.stuck ?? 0,
+            recoveries: carrier.telemetry?.stuckRecoveries ?? 0, position: point(carrier.body.pos) });
+        if (run.obstructionSamples.length < 12 && carrier.routeT > 0)
+          run.obstructionSamples.push({ t: g.time - beganAt, routeT: carrier.routeT,
+            route: point(carrier.route), position: point(carrier.body.pos) });
+      };
       const className = gun => gun === 0 ? 'rifle' : gun === 1 ? 'smg'
         : gun === 5 ? 'sniper' : 'unknown';
       const oldDeath = g.onDeath.bind(g);
@@ -105,6 +164,13 @@ try {
           if (killer?.id !== undefined) {
             const kk = className(killer.gunClass);
             m.killsByClass[kk] = (m.killsByClass[kk] ?? 0) + 1;
+          }
+          if (victim.carrier && g.flags) {
+            const flagTeam = g.enemyOf(victim.team);
+            const run = activeRun.get(flagTeam);
+            finishRun(run, 'death_drop', { deathCause: victim._deathCause ?? null,
+              terminalPosition: point(victim.body.pos), ownFlagStateAtTerminal: g.flags[victim.team]?.state ?? null,
+              dropPosition: point(victim.body.pos) });
           }
           awaitingContact.set(victim.id, g.time);
         }
@@ -123,15 +189,46 @@ try {
       const oldFlags = g._updateFlags.bind(g);
       g._updateFlags = dt => {
         const before = Object.fromEntries(Object.entries(g.flags).map(([team, f]) => [team, f.state]));
+        const carriersBefore = Object.fromEntries(Object.entries(g.flags).map(([team, f]) => [team, f.carrier]));
+        const returnersBefore = Object.fromEntries(Object.entries(g.flags).map(([team, f]) => {
+          const nearby = g.bots.filter(bot => bot.alive && bot.team === team)
+            .map(bot => ({ bot, d: distance(bot.body.pos, f.pos) }))
+            .filter(row => row.d != null && row.d <= 3).sort((a, b) => a.d - b.d);
+          return [team, nearby[0]?.bot ?? null];
+        }));
+        const capturesBefore = { ...g.captures };
         const scoreBefore = (g.captures.green ?? 0) + (g.captures.blue ?? 0);
         oldFlags(dt);
         m.captures += Math.max(0,
           (g.captures.green ?? 0) + (g.captures.blue ?? 0) - scoreBefore);
         for (const [team, f] of Object.entries(g.flags)) if (f.state !== before[team]) {
           m.flagTransitions++;
-          if (before[team] !== 'carried' && f.state === 'carried') m.pickups++;
-          if (before[team] === 'dropped' && f.state === 'home') m.returns++;
+          if (before[team] !== 'carried' && f.state === 'carried') {
+            m.pickups++;
+            startRun(team, f.carrier);
+          }
+          if (before[team] === 'dropped' && f.state === 'home') {
+            m.returns++;
+            const run = pendingReturn.get(team);
+            if (run) {
+              run.returnAssociation = { returnedAt: g.time - beganAt,
+                returnedBy: returnersBefore[team]?.id ?? null };
+              pendingReturn.delete(team);
+            }
+          }
+          if (before[team] === 'carried' && f.state === 'dropped')
+            finishRun(activeRun.get(team), 'drop', { terminalPosition: point(f.pos) });
+          if (before[team] === 'carried' && f.state === 'home') {
+            const carrier = carriersBefore[team];
+            const run = activeRun.get(team);
+            const captured = carrier && (g.captures[carrier.team] ?? 0) > (capturesBefore[carrier.team] ?? 0);
+            finishRun(run, captured ? 'capture' : 'other', { terminalPosition: point(f.pos),
+              ownFlagStateAtTerminal: carrier ? g.flags[carrier.team]?.state ?? null : null,
+              captureAssociation: captured ? { capturedAt: g.time - beganAt, team: carrier.team,
+                carrierId: carrier.id } : null });
+          }
         }
+        for (const [team, run] of activeRun) sampleCarrier(run, g.flags[team]?.carrier, dt);
       };
       const oldHill = g._updateHill.bind(g);
       g._updateHill = dt => { oldHill(dt); const h = g.hill; if (h?.contested) m.hillContested += dt;
@@ -160,6 +257,9 @@ try {
         if (g.time - beganAt >= sampleAt) { sample(); sampleAt += 1; }
         if (g.over) break;
       }
+      for (const [team, run] of activeRun)
+        finishRun(run, 'other', { terminalPosition: point(g.flags[team]?.carrier?.body?.pos),
+          ownFlagStateAtTerminal: g.flags[run.carrierTeam]?.state ?? null, simulationEnded: true });
       const sorted = values => values.slice().sort((a, b) => a - b);
       const percentile = (values, p) => values.length ? values[Math.min(values.length - 1,
         Math.floor((values.length - 1) * p))] : null;
@@ -168,11 +268,13 @@ try {
         const bot = botById.get(Number(key.slice(1)));
         return { name: r.name, class: bot?.gunClass ?? null, k: r.k, d: r.d };
       });
+      const pendingStrikes = g._pendingStrikes.filter(s => s.attacker?.id !== undefined).length;
       return { ...scenario, elapsed: g.matchElapsed, score: g.captures, over: g.over,
         ...m, contacts: m.contacts.length,
+        pendingStrikes,
         firstContact: m.contacts.length ? m.contacts[0] - beganAt : null,
         reengageMedian: percentile(sorted(m.reengage), .5), reengageP90: percentile(sorted(m.reengage), .9),
-        botLives: g.bots.length, botKd: kd,
+        botLives: g.bots.length, botKd: kd, ctfRuns: m.ctfRuns,
         editsPerMatch: m.edits, telemetry: g.botTelemetry(), faults: window.__spadefallDiagnostics?.faults ?? [] };
     }, { scenario, seconds, step });
     row.browserFaults = faults;
@@ -186,12 +288,14 @@ try {
   }
   const blank = () => ({ rounds: 0, deaths: 0, spawnDeaths: 0, edits: 0,
     stuck: 0, contacts: 0, hillOccupied: 0, hillContested: 0, strikes: 0,
-    impacts: 0, pickups: 0, returns: 0, captures: 0, killsByClass: {}, deathsByClass: {} });
+    impacts: 0, pendingStrikes: 0, pickups: 0, returns: 0, captures: 0,
+    killsByClass: {}, deathsByClass: {} });
   const add = (a, r) => {
     a.rounds++; a.deaths += r.deaths; a.spawnDeaths += r.spawnDeaths;
     a.edits += r.edits; a.stuck += r.stuck; a.contacts += r.contacts;
     a.hillOccupied += r.hillOccupied; a.hillContested += r.hillContested;
-    a.strikes += r.strikes; a.impacts += r.impacts; a.pickups += r.pickups;
+    a.strikes += r.strikes; a.impacts += r.impacts; a.pendingStrikes += r.pendingStrikes;
+    a.pickups += r.pickups;
     a.returns += r.returns; a.captures += r.captures;
     for (const [key, value] of Object.entries(r.killsByClass))
       a.killsByClass[key] = (a.killsByClass[key] ?? 0) + value;
@@ -203,7 +307,17 @@ try {
   assert.ok(rows.length > 0, 'no bot simulation cases selected');
   const byMode = Object.fromEntries(['ctf', 'tdm', 'koth'].map(mode =>
     [mode, rows.filter(row => row.mode === mode).reduce(add, blank())]));
+  const ctfRuns = rows.filter(row => row.mode === 'ctf').flatMap(row => row.ctfRuns);
+  const ctfOutcomes = Object.fromEntries(['capture', 'death_drop', 'drop', 'other']
+    .map(outcome => [outcome, ctfRuns.filter(run => run.outcome === outcome).length]));
   const report = { seconds, rounds: rows.length, aggregate, byMode,
+    ctf: { runs: ctfRuns.length, outcomes: ctfOutcomes,
+      approachedHome: ctfRuns.filter(run => run.approachedHome).length,
+      returnedDrops: ctfRuns.filter(run => run.returnAssociation).length,
+      averageEscortSeconds: ctfRuns.reduce((total, run) => total + run.escortSeconds, 0)
+        / Math.max(1, ctfRuns.length),
+      closestHomeDistance: ctfRuns.length
+        ? Math.min(...ctfRuns.map(run => run.closestHomeDistance)) : null },
     spawnDeathRate: aggregate.deaths ? aggregate.spawnDeaths / aggregate.deaths : 0,
     averageEdits: aggregate.edits / Math.max(1, rows.length),
     worstFirstContact: Math.max(...rows.map(row => row.firstContact ?? Infinity)),
@@ -212,12 +326,24 @@ try {
     process.env.SPADE_BOT_SIM_VERBOSE ? { ...report, cases: rows } : report));
   assert.deepEqual(browserFaults, [], browserFaults.join('\n'));
   assert.ok(rows.every(r => !r.errors.length && !r.faults.length), JSON.stringify(rows.filter(r => r.errors.length || r.faults.length)));
+  // These check the diagnostic contract, not whether the current bot tactics
+  // happen to produce a capture on a particular map/seed.
+  assert.ok(ctfRuns.every(run => Number.isInteger(run.id) && run.carrierId != null
+    && ['green', 'blue'].includes(run.flagTeam) && ['green', 'blue'].includes(run.carrierTeam)
+    && Number.isFinite(run.startedAt) && Number.isFinite(run.duration)
+    && Number.isFinite(run.closestHomeDistance) && run.startPosition && run.homePosition
+    && ['capture', 'death_drop', 'drop', 'other'].includes(run.outcome)
+    && Array.isArray(run.stuckSamples) && Array.isArray(run.obstructionSamples)),
+  `invalid CTF telemetry ${JSON.stringify(ctfRuns)}`);
+  assert.equal(ctfRuns.length, byMode.ctf.pickups,
+    'each CTF pickup should produce exactly one carrier diagnostic run');
   assert.ok(report.spawnDeathRate < .15, `spawn deaths ${report.spawnDeathRate.toFixed(3)}`);
   assert.ok(report.averageEdits < 1000, `terrain edits ${report.averageEdits.toFixed(1)}/round`);
   assert.ok(report.worstFirstContact <= 90, `first contact ${report.worstFirstContact.toFixed(1)}s`);
   if (byMode.koth.rounds) assert.ok(byMode.koth.hillOccupied >= 60,
     'KOTH bots rarely reached an objective');
-  assert.equal(aggregate.impacts, aggregate.strikes, 'confirmed bot strikes did not all impact');
+  assert.equal(aggregate.impacts + aggregate.pendingStrikes, aggregate.strikes,
+    'a confirmed bot strike was neither pending nor impacted');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

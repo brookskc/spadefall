@@ -134,6 +134,7 @@ export class Bot {
     this.cachedGoal = null;
     this.navRevision = game.navRevision ?? 0;
     this.tacticalRole = 'attack';
+    this.ctfStageAt = -Infinity; // final-approach support wait; see bot-rules
     this.orderId = null;
     this.telemetry = { thinkMs: 0, thinkSamples: 0, stuckRecoveries: 0,
       objectiveSeconds: 0, decisions: 0 };
@@ -566,7 +567,8 @@ export class Bot {
     const speed = (b.inWater ? (digging ? 1.4 : 3.2)
       : this.target && !this.carrier ? 5.0 * profile.speedMul // close to patrol pace — a fight is not a standing trade
       : digging || bridging ? 2.2  // shovel/plank pace: never outrun the tool
-      : this.carrier ? 7.8         // objective run: match a player's sprint pace
+      : this.carrier || this.tacticalRole === 'escort' ? 7.8
+        // objective run / escort: match a player's sprint pace
       : this.responding ? 6.2      // urgency: our flag is on the ground
       : 6.0) * (cautious ? 0.45 : 1);
     // Local squad spacing: blend away from allies inside shoulder-to-shoulder
@@ -757,6 +759,7 @@ export class Bot {
 
   die(killer) {
     this.alive = false;
+    this.ctfStageAt = -Infinity;
     this.deadT = 0; // corpse tumble starts; the body hides itself when done
     this._mkCount = 0; this._mkT = null; // tracked for consistency even though bots don't get the callout shown
     this._streak = 0; // bots cannot spend scorestreak rewards
@@ -812,6 +815,7 @@ export class Bot {
     this.nextThink = this.game.time + this.difficulty.thinkInterval;
     this.navRevision = this.game.navRevision ?? 0;
     this.orderId = null;
+    this.ctfStageAt = -Infinity;
     this.face.set(this.heading, 0, 0);
     this.lastPos.copy(this.body.pos);
     this.deadT = -1;

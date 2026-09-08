@@ -13,9 +13,9 @@ import { generateMap, MAPS, BASE, mapAtmosphere, mapsForMode,
   pinefallRavineHeight, signatureMechanic, signatureProtectedAreas } from '../src/mapgen.js';
 import { Body, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT,
   animateSoldier, applySoldierGraphics, disposeObject, makeMq9Drone, makeSoldier,
-  setCrouch, setSoldierTool, triggerSoldierFire,
+  placeShadow, setCrouch, setSoldierTool, triggerSoldierFire,
   triggerSoldierHit } from '../src/entities.js';
-import { Game, airstrikeDronePose, mergeSnapshot, qx, qy, qa, relativeBearing,
+import { Game, airstrikeDronePose, combatHistoryDue, mergeSnapshot, qx, qy, qa, relativeBearing,
   unsupportedCollapseCells } from '../src/game.js';
 import { placedBlockColor, TOOLS } from '../src/player.js';
 import { chooseTeam, combatDamageAllowed, migrationSurvivors, normalizeDirection,
@@ -467,6 +467,13 @@ function meshingTests() {
 // ---------------------------------------------------------------------------
 function hostileInputTests() {
   group('malformed input reaching world.set / world.carve');
+  const revisionWorld = new VoxelWorld(scene());
+  const revisionStart = revisionWorld.revision;
+  revisionWorld.set(10, 10, 10, BLOCK.STONE);
+  const changedRevision = revisionWorld.revision;
+  revisionWorld.set(10, 10, 10, BLOCK.STONE);
+  ok('world revision advances only when voxel state changes',
+    changedRevision === revisionStart + 1 && revisionWorld.revision === changedRevision);
   const w = new VoxelWorld(scene());
   generateMap(w, 1, 0);
   let threw = null;
@@ -484,8 +491,10 @@ function hostileInputTests() {
   const w3 = new VoxelWorld(scene());
   generateMap(w3, 1, 0);
   let carveThrew = null, removed = null;
+  const carveRevision = w3.revision;
   try { removed = w3.carve(100, 25, 100, NaN); } catch (e) { carveThrew = e; }
-  ok('carve() with a NaN radius is a no-op rather than a throw', !carveThrew && removed?.length === 0);
+  ok('carve() with a NaN radius is a no-op rather than a throw',
+    !carveThrew && removed?.length === 0 && w3.revision === carveRevision);
 
   const w4 = new VoxelWorld(scene());
   generateMap(w4, 1, 0);
@@ -748,6 +757,12 @@ function botRuleTests() {
     botSeparation({ x: 10, z: 10 }, [
       { id: 2, x: 20, z: 10, alive: true }, { id: 3, x: 10.2, z: 10, alive: false },
     ], 1).x === 0);
+  const separationOut = { x: 9, z: 9 };
+  const separationActual = botSeparation({ x: 10, z: 10 }, [
+    { id: 2, alive: true, body: { pos: { x: 11, z: 10 } } },
+  ], 1, 2.4, separationOut);
+  ok('bot separation accepts live entities and reuses an output object',
+    separationActual === separationOut && separationOut.x < -0.99 && separationOut.z === 0);
 
   ok('difficulty scales cognition rather than health or damage',
     BOT_DIFFICULTY.easy.reaction > BOT_DIFFICULTY.normal.reaction
@@ -1732,6 +1747,19 @@ function soldierModelTests() {
   ok('graphics changes apply to an already-spawned soldier', liveLowParts <= visibleParts - 8,
     `${visibleParts} -> ${liveLowParts} visible parts`);
   applySoldierGraphics(p, 'high');
+  let shadowReads = 0;
+  const shadowWorld = { revision: 0,
+    solid: (_x, y) => { shadowReads++; return y === 5; } };
+  p.group.position.set(10.5, 10, 10.5);
+  placeShadow(p, shadowWorld);
+  const initialShadowReads = shadowReads;
+  placeShadow(p, shadowWorld);
+  const cachedShadowReads = shadowReads;
+  shadowWorld.revision++;
+  placeShadow(p, shadowWorld);
+  ok('soldier shadow scans cache unchanged terrain and invalidate after an edit',
+    initialShadowReads > 0 && cachedShadowReads === initialShadowReads
+      && shadowReads > cachedShadowReads);
   disposeObject(p.group);
 
   const hadStorage = 'localStorage' in globalThis;
@@ -2417,6 +2445,9 @@ function productionReadinessTests() {
 
 function combatNetworkContinuityTests() {
   group('latency compensation and reconnect continuity');
+  ok('combat history cadence is capped at 30Hz with an accumulator',
+    !combatHistoryDue(0, 0.01) && combatHistoryDue(0.02, 0.02)
+      && !combatHistoryDue(0.02, 0.01, 1 / 30));
   ok('rewind includes interpolation delay and remains hard-capped',
     Math.abs(rewindSecondsForRtt(0.12) - 0.21) < 1e-9
       && rewindSecondsForRtt(9) === MAX_REWIND_SECONDS);

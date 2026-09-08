@@ -209,6 +209,10 @@ function mulberry32(a) {
 export class VoxelWorld {
   constructor(scene) {
     this.data = new Uint8Array(SX * SY * SZ);
+    // Monotonic terrain mutation marker. Presentation caches use this to
+    // invalidate spatial answers after a dig/build without rescanning every
+    // unchanged frame.
+    this.revision = 0;
     this.group = new THREE.Group();
     this.chunks = new Map();
     this.material = new THREE.MeshBasicMaterial({ vertexColors: true });
@@ -369,7 +373,9 @@ export class VoxelWorld {
     // Wire values are untrusted: an out-of-palette v would render as holes
     // in the mesh and crash the AO lookup. Reject, don't clamp.
     if (!(v >= 0 && v < PALETTE.length)) return false;
-    this.data[idx(x, y, z)] = v;
+    const i = idx(x, y, z);
+    if (this.data[i] !== v) this.revision++;
+    this.data[i] = v;
     // Queue, don't rebuild: a bot dig swing can land 20 set() calls in one
     // frame, and each used to synchronously remesh up to 5 chunks. The flush
     // at end of Game.update remeshes each dirty chunk once.
@@ -598,6 +604,7 @@ export class VoxelWorld {
           removed.push({ x, y, z, v: this.get(x, y, z) });
           this.data[idx(x, y, z)] = 0;
         }
+    if (removed.length) this.revision++;
     // Join the same end-of-frame dirty queue as set(). Explosions used to
     // synchronously rebuild every touched chunk here, so a late joiner with
     // many historical blasts paid for the same chunk repeatedly while

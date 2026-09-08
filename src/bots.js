@@ -146,6 +146,8 @@ export class Bot {
     this.retreatT = 0;         // backing off to lick wounds
     this.retreatCd = 0;
     this.route = new THREE.Vector3(); // short committed detour around an obstacle
+    this._routeGoal = new THREE.Vector3(); // authored waypoint scratch; not retained
+    this._separation = { x: 0, z: 0 };
     this.routeT = 0;
     this.nades = 1;            // one frag per life
     this.nadeT = 0;
@@ -227,7 +229,8 @@ export class Bot {
         targetPoint.y + this.target.body.half.h - EYE_INSET, targetPoint.z) : null;
 
     // --- movement ---
-    const goal = authoredRouteGoal(this, this.cachedGoal ?? this.goal(), NAV_CONTEXT);
+    const goal = authoredRouteGoal(this, this.cachedGoal ?? this.goal(),
+      NAV_CONTEXT, this._routeGoal);
     this.wanderT -= dt;
     this.patrolT -= dt; // patrol waypoints go stale even if never reached
     if (this.wanderT <= 0) {
@@ -550,7 +553,7 @@ export class Bot {
       const over = this.heading > 0 ? b.pos.x > SX / 2 : b.pos.x < SX / 2;
       if (over) {
         cautious = true;
-        for (const m of g.entities())
+        for (const m of g.teamOf(this.team))
           if (m !== this && m.alive && m.team === this.team &&
               m.body.pos.distanceTo(b.pos) < profile.groupRange) { cautious = false; break; }
       }
@@ -576,11 +579,8 @@ export class Bot {
     // range, but never override a committed bridge/water exit or a deliberate
     // held firing position.
     if (!holding && !bridging && !b.inWater && dir.lengthSq() > 0.01) {
-      const allies = g.entities().filter(e => e !== this && e.alive && e.team === this.team)
-        .map(e => ({ id: e.id ?? e.ridx ?? e.name, alive: e.alive,
-          x: e.body.pos.x, z: e.body.pos.z }));
-      const sep = botSeparation({ x: b.pos.x, z: b.pos.z }, allies, this.id);
-      dir.add(new THREE.Vector3(sep.x, 0, sep.z).multiplyScalar(0.55)).normalize();
+      const sep = botSeparation(b.pos, g.teamOf(this.team), this.id, 2.4, this._separation);
+      dir.x += sep.x * 0.55; dir.z += sep.z * 0.55; dir.normalize();
     }
     b.vel.x += (dir.x * speed - b.vel.x) * Math.min(1, dt * 8);
     b.vel.z += (dir.z * speed - b.vel.z) * Math.min(1, dt * 8);

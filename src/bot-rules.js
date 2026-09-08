@@ -29,26 +29,31 @@ export function botTargetScore(distance, health = 100, carrier = false,
 
 // Repulsion direction for nearby allies. The caller blends this with its
 // tactical movement vector; returning zero means no separation is needed.
-export function botSeparation(position, allies, selfId, radius = 2.4) {
+export function botSeparation(position, allies, selfId, radius = 2.4, out = null) {
+  const result = out ?? { x: 0, z: 0 };
+  result.x = 0; result.z = 0;
   if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.z)
       || !Array.isArray(allies) || !Number.isFinite(radius) || radius <= 0)
-    return { x: 0, z: 0 };
+    return result;
   let x = 0, z = 0;
   for (const ally of allies) {
-    if (!ally || ally.id === selfId || ally.alive === false
-        || !Number.isFinite(ally.x) || !Number.isFinite(ally.z)) continue;
-    let dx = position.x - ally.x, dz = position.z - ally.z;
+    const allyPos = ally?.body?.pos ?? ally;
+    const allyId = ally?.id ?? ally?.ridx ?? ally?.name;
+    if (!ally || allyId === selfId || ally.alive === false
+        || !Number.isFinite(allyPos?.x) || !Number.isFinite(allyPos?.z)) continue;
+    let dx = position.x - allyPos.x, dz = position.z - allyPos.z;
     let d = Math.hypot(dx, dz);
     if (d >= radius) continue;
     if (d < 1e-4) {
-      const angle = ((Number(selfId) || 0) * 2.399963 + (Number(ally.id) || 0)) % (Math.PI * 2);
+      const angle = ((Number(selfId) || 0) * 2.399963 + (Number(allyId) || 0)) % (Math.PI * 2);
       dx = Math.cos(angle); dz = Math.sin(angle); d = 1;
     }
     const weight = (radius - d) / radius;
     x += dx / d * weight; z += dz / d * weight;
   }
   const length = Math.hypot(x, z);
-  return length > 1e-6 ? { x: x / length, z: z / length } : { x: 0, z: 0 };
+  if (length > 1e-6) { result.x = x / length; result.z = z / length; }
+  return result;
 }
 
 // Difficulty changes how quickly and accurately a bot processes information;

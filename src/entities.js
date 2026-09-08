@@ -264,9 +264,22 @@ export function placeShadow(parts, world, yaw = 0) {
   const g = parts.group;
   const x = Math.floor(g.position.x), z = Math.floor(g.position.z);
   const foot = Math.floor(g.position.y);
-  let top = -1;
-  for (let y = foot; y >= foot - SHADOW_MAX_DROP; y--)
-    if (world.solid(x, y, z)) { top = y + 1; break; }
+  // Shadow projection runs for every soldier every frame. Keep the scan while
+  // the soldier remains over the same integer column and foot height, but
+  // invalidate it on any terrain mutation so a freshly dug floor or built
+  // platform moves the shadow immediately.
+  const cache = parts._shadowGroundCache;
+  const revision = world.revision;
+  let top;
+  if (cache?.world === world && cache.revision === revision
+      && cache.x === x && cache.z === z && cache.foot === foot) {
+    top = cache.top;
+  } else {
+    top = -1;
+    for (let y = foot; y >= foot - SHADOW_MAX_DROP; y--)
+      if (world.solid(x, y, z)) { top = y + 1; break; }
+    parts._shadowGroundCache = { world, revision, x, z, foot, top };
+  }
   if (top < 0) { b.visible = false; return; } // over a void or deep water
   const drop = g.position.y - top;
   b.visible = true;

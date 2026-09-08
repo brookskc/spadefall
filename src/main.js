@@ -1492,14 +1492,15 @@ function frame() {
     }
     const info = renderer.info.render, memory = renderer.info.memory;
     const n = game.net?.stats?.();
+    const counts = game.runtimeCounts();
     const resources = { geometries: memory.geometries, textures: memory.textures,
-      sceneObjects: game.runtimeCounts().sceneObjects };
+      sceneObjects: counts.sceneObjects };
     if (!resourceBaseline && runtimeHealth.totalFrames >= 240) resourceBaseline = { ...resources };
     const report = runtimeHealth.snapshot({ drawCalls: info.calls, triangles: info.triangles,
       particles: game.effects.particles.length,
       networkBytesPerSecond: (n?.sentBytesPerSecond ?? 0) + (n?.recvBytesPerSecond ?? 0) });
     game.runtimeHealth = report;
-    diagnostics.metrics = { ...report, ...game.runtimeCounts(), resources,
+    diagnostics.metrics = { ...report, ...counts, resources,
       resourceDrift: resourceBaseline ? resourceDrift(resourceBaseline, resources) : null };
     diagnostics.engagement = engagement.snapshot();
     if (perfOn && perfCount) {

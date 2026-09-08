@@ -8,7 +8,7 @@ import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
 import { sfx, setListener } from './audio.js';
-import { BODY_HALF_WIDTH, CROUCH_HEIGHT, STAND_HEIGHT, disposeObject, footDust,
+import { BODY_HALF_WIDTH, CROUCH_HEIGHT, EYE_INSET, STAND_HEIGHT, disposeObject, footDust,
   applySoldierGraphics, makeMq9Drone, retintVoxelBoxes, setSoldierTool,
   triggerSoldierFire, triggerSoldierHit } from './entities.js';
 import { Avatar } from './avatar.js';
@@ -68,6 +68,15 @@ import { ctfFlagInteraction } from './objectives.js';
 import { advanceMatchClock } from './match-lifecycle.js';
 
 export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
+
+// Keep authoritative combat history on a fixed 30Hz cadence instead of tying
+// its sample count to the render refresh rate. The boolean is deliberately
+// pure so cadence changes can be regression-tested without constructing Game.
+export function combatHistoryDue(accumulator, dt, interval = 1 / 30) {
+  return Number.isFinite(accumulator) && Number.isFinite(dt)
+    && Number.isFinite(interval) && interval > 0
+    && Math.max(0, accumulator) + Math.max(0, dt) >= interval;
+}
 
 const POST_MATCH_TIME = 10;
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
@@ -385,6 +394,11 @@ export class Game {
     this._lastSnapshotSeq = null;
     this._snapshotEcho = null;
     this._combatHistory = new Map();
+    this._combatHistoryT = 0;
+    this._combatHistoryInitialized = false;
+    this._entityFrameActive = false;
+    this._entityRoster = [];
+    this._teamRosters = { green: [], blue: [] };
     this._reconnectReservations = new Map();
     this._resyncAt = { state: 0, world: 0 };
     this._sendT = 0;
@@ -602,6 +616,7 @@ export class Game {
 
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
+    this._entityFrameActive = false;
     this.voxelStory?.reset();
     hud.deathRecap(null);
     this._clearTeamPings();
@@ -693,6 +708,8 @@ export class Game {
     this._fullP.clear();
     this._fullB.clear();
     this._combatHistory.clear();
+    this._combatHistoryT = 0;
+    this._combatHistoryInitialized = false;
     this._reconnectReservations.clear();
     // Rebuilt world, rebuilt cast: bot indices change, so the old roster is
     // stale. Rows whose metadata hasn't re-landed are skipped until it does.
@@ -799,8 +816,12 @@ export class Game {
     const bots = { green: 0, blue: 0 };
     for (const b of this.bots) bots[b.team] = (bots[b.team] ?? 0) + 1;
     const target = teamSizeForMode(this.gameMode);
-    for (let i = bots.green; i < target - humans.green; i++) this.bots.push(this._newBot('green'));
-    for (let i = bots.blue; i < target - humans.blue; i++) this.bots.push(this._newBot('blue'));
+    for (let i = bots.green; i < target - humans.green; i++) {
+      this.bots.push(this._newBot('green'));
+    }
+    for (let i = bots.blue; i < target - humans.blue; i++) {
+      this.bots.push(this._newBot('blue'));
+    }
   }
 
   _newBot(team, name = null, difficultyKey = null) {
@@ -823,8 +844,35 @@ export class Game {
 
   enemyOf(team) { return team === 'blue' ? 'green' : 'blue'; }
 
+  _beginEntityFrame() {
+    const all = this._entityRoster, green = this._teamRosters.green;
+    const blue = this._teamRosters.blue;
+    all.length = green.length = blue.length = 0;
+    if (this.player) all.push(this.player);
+    for (const entity of this.remote.values()) all.push(entity);
+    for (const entity of this.bots) all.push(entity);
+    for (const entity of all) {
+      if (entity.team === 'green') green.push(entity);
+      else if (entity.team === 'blue') blue.push(entity);
+    }
+    this._entityFrameActive = true;
+  }
+
+  _endEntityFrame() { this._entityFrameActive = false; }
+
   // this.player is undefined while its constructor asks for its first spawn.
-  entities() { return [this.player, ...this.remote.values(), ...this.bots].filter(Boolean); }
+  // During a tick every subsystem shares three reusable roster arrays. Outside
+  // a tick, return a fresh live view so connection callbacks can never observe
+  // a stale frame after a join, departure, rebuild, or host migration.
+  entities() {
+    return this._entityFrameActive
+      ? this._entityRoster : [this.player, ...this.remote.values(), ...this.bots].filter(Boolean);
+  }
+
+  teamOf(team) {
+    if (this._entityFrameActive && this._teamRosters[team]) return this._teamRosters[team];
+    return this.entities().filter(entity => entity?.team === team);
+  }
 
   // Announcements: show locally, and relay to clients when hosting.
   feed(html) {
@@ -845,7 +893,11 @@ export class Game {
     if (this.player.team === team) hud.message(text, color);
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'msg', text, color, team });
   }
-  foesOf(team) { return this.entities().filter(e => e.team !== team); }
+  foesOf(team) {
+    if (team === 'green') return this.teamOf('blue');
+    if (team === 'blue') return this.teamOf('green');
+    return this.entities().filter(e => e.team !== team);
+  }
 
   // --- bot intel ---
   // Bots only run host/solo-side, so clients never bother recording.
@@ -1973,7 +2025,7 @@ export class Game {
   }
 
   _updateBreathFor(entity, dt, authoritative) {
-    const submerged = entity.body.eye().y < SEA + 0.3;
+    const submerged = entity.body.pos.y + entity.body.half.h - EYE_INSET < SEA + 0.3;
     const next = stepBreath(entity._breath, entity._drownClock, submerged, dt);
     entity._breath = next.breath;
     entity._drownClock = next.drownClock;
@@ -4253,6 +4305,7 @@ export class Game {
       // Same deterministic baseline, repaired in place so bodies and scene
       // references remain valid while the terrain replica is rebuilt.
       this.world.data.fill(0);
+      this.world.revision++;
       this.world.dirty?.clear();
       generateMap(this.world, this.seed, this.mapIndex);
       this._replayEdits(d.log);
@@ -4809,6 +4862,7 @@ export class Game {
   // ---------------- main tick ----------------
   update(dt) {
     this.time += dt;
+    this._beginEntityFrame();
     this.world.animateSky(this.time);
     this._updateUnderwaterFog();
     this._updateTeamPings(dt);
@@ -4843,7 +4897,9 @@ export class Game {
     this._updateContactFlow();
     this._updateGrenadeWarning();
     this._updateIntensityCues();
-    if (this.mode === 'client') { this._clientUpdate(dt); this.world.flushDirty(); return; }
+    if (this.mode === 'client') {
+      this._clientUpdate(dt); this.world.flushDirty(); this._endEntityFrame(); return;
+    }
 
     // Pending airstrikes: host/solo only, since only this side is
     // authoritative for when damage actually lands. Iterated backward so
@@ -4895,7 +4951,13 @@ export class Game {
     for (const b of this.bots) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);
-    for (const e of this.entities()) if (e.alive) this._recordCombatPose(e);
+    this._combatHistoryT += Math.max(0, dt);
+    if (!this._combatHistoryInitialized || combatHistoryDue(0, this._combatHistoryT)) {
+      for (const e of this.entities()) if (e.alive) this._recordCombatPose(e);
+      const wasInitialized = this._combatHistoryInitialized;
+      this._combatHistoryInitialized = true;
+      this._combatHistoryT = wasInitialized ? this._combatHistoryT % (1 / 30) : 0;
+    }
     if (this.mode === 'host') this._expireReconnectReservations();
 
     // Fell out of the world: Body parked them above the sea and raised the
@@ -4988,6 +5050,7 @@ export class Game {
     // One remesh pass per frame: single-voxel set() calls queue their chunks
     // here instead of each synchronously rebuilding up to 5 of them.
     this.world.flushDirty();
+    this._endEntityFrame();
   }
 }
 

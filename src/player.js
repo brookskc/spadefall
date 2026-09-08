@@ -80,6 +80,8 @@ export class Player {
     this.motionScale = getMotionScale();
     this.mouseSensitivity = getMouseSensitivity();
     this.dom = dom;
+    this._crosshair = typeof document !== 'undefined'
+      ? document.getElementById('crosshair') : null;
     this.team = 'green';
     const b = game.spawnPoint('green');
     this.body = new Body(game.world, b.x, b.y, b.z);
@@ -654,7 +656,7 @@ export class Player {
       }
     }
     // Fully sighted in, the dot is gone entirely — the sights do the aiming.
-    const xh = document.getElementById('crosshair');
+    const xh = this._crosshair;
     if (xh) xh.style.opacity = 1 - this.aimK;
 
     // Aim zoom.

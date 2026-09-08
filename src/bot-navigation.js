@@ -58,11 +58,16 @@ export function crownRouteWaypoint(position, target, mapIndex = 0) {
   return planarDistance(position, outerExit) > CROWN_GATE_REACHED ? outerExit : null;
 }
 
-export function authoredRouteGoal(bot, target, context) {
+export function authoredRouteGoal(bot, target, context, out = null) {
   const waypoint = crownRouteWaypoint(bot?.body?.pos, target, bot?.game?.mapIndex);
-  if (!waypoint) return target;
-  return new context.THREE.Vector3(waypoint.x,
-    bot.game.world.surface(Math.floor(waypoint.x), Math.floor(waypoint.z)), waypoint.z);
+  if (!waypoint) {
+    if (!out) return target;
+    return out.copy ? out.copy(target) : Object.assign(out, target);
+  }
+  const y = bot.game.world.surface(Math.floor(waypoint.x), Math.floor(waypoint.z));
+  if (!out) return new context.THREE.Vector3(waypoint.x, y, waypoint.z);
+  return out.set ? out.set(waypoint.x, y, waypoint.z)
+    : Object.assign(out, { x: waypoint.x, y, z: waypoint.z });
 }
 
 // Perpendicular offset so a team advances on a broad front instead of
@@ -230,8 +235,7 @@ export function goal(bot, context) {
   bot.role = bot.tacticalRole
     ?? (botRank === 0 ? 'defend' : botRank === 1 ? 'mid' : 'attack');
   if (bot.role === 'escort') {
-    const carrier = g.entities().find(e => e !== bot && e.alive
-      && e.team === bot.team && e.carrier);
+    const carrier = g.teamOf(bot.team).find(e => e !== bot && e.alive && e.carrier);
     const stagingRunner = !carrier ? g.bots.filter(e => e !== bot && e.alive
       && e.team === bot.team && !e.carrier && Number.isFinite(e.ctfStageAt))
       .sort((a, b) => a.ctfStageAt - b.ctfStageAt || a.id - b.id)[0] : null;
@@ -253,8 +257,7 @@ export function goal(bot, context) {
     return laned(bot, new context.THREE.Vector3(context.SX / 2, g.world.surface(context.SX / 2, context.SZ / 2), context.SZ / 2), context);
   const enemyFlag = g.flags[g.enemyOf(bot.team)];
   if (enemyFlag.state === 'dropped') return enemyFlag.pos;         // grab the loose flag
-  const supportDistance = g.entities().filter(entity => entity !== bot
-    && entity.alive && entity.team === bot.team)
+  const supportDistance = g.teamOf(bot.team).filter(entity => entity !== bot && entity.alive)
     .reduce((nearest, entity) => Math.min(nearest,
       Math.hypot(entity.body.pos.x - bot.body.pos.x, entity.body.pos.z - bot.body.pos.z)), Infinity);
   const distanceToFlag = Math.hypot(enemyFlag.home.x - bot.body.pos.x,

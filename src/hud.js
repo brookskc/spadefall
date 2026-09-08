@@ -363,7 +363,10 @@ export function createHud(deps = {}) {
     $('statsbody').innerHTML = this.kdTable(g);
     $('stats').style.display = 'block';
   },
-  statsHide() { $('stats').style.display = 'none'; },
+  statsHide() {
+    const el = $('stats');
+    if (el?.style.display !== 'none') el.style.display = 'none';
+  },
   statsRefresh(g) {
     if ($('stats').style.display === 'block')
       $('statsbody').innerHTML = this.kdTable(g);

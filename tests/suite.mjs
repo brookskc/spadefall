@@ -48,7 +48,8 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
-import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint, laned } from '../src/bot-navigation.js';
+import { authoredRouteGoal, crownRouteWaypoint, ctfCarrierWaypoint,
+  laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
 import { Bot } from '../src/bots.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
@@ -883,6 +884,38 @@ function botRuleTests() {
     ctfRouteProgress(0, 'green').every(point => point.z < 88 || point.z > 168)
       && ctfCarrierWaypoint({ x: 70, z: 80 }, { x: 36, z: 128 }, 0, 'green', ctfRouteSeed) === null
       && ctfCarrierWaypoint({ x: 70, z: 128 }, { x: 36, z: 128 }, 1, 'green', ctfRouteSeed) === null);
+  const pineFordSeed = 439041101;
+  const pineFordZ = pinefallRavineCenter(pineFordSeed, 128) + 8;
+  const pineGreenHome = { x: 36, z: 128 };
+  ok('Pinefall carriers stay committed through the authored ford checkpoints',
+    pineFordZ > 143.5 && pineFordZ < 143.7
+      && [140, 134, 122].every(x => pinefallCarrierFordCommitted(
+        { x, z: pineFordZ }, 2, pineFordSeed, true, 'ctf'))
+      && [122, 134].every(x => pinefallCarrierFordCommitted({ x, z: pineFordZ },
+        2, pineFordSeed, true, 'ctf'))
+      && pinefallCarrierFordCommitted({ x: 116, z: pineFordZ },
+        2, pineFordSeed, true, 'ctf'));
+  ok('Pinefall ford commitment is bounded to the route corridor',
+    !pinefallCarrierFordCommitted({ x: 115.9, z: pineFordZ },
+      2, pineFordSeed, true, 'ctf')
+      && !pinefallCarrierFordCommitted({ x: 144.1, z: pineFordZ },
+        2, pineFordSeed, true, 'ctf')
+      && !pinefallCarrierFordCommitted({ x: 134, z: pineFordZ + 10.1 },
+        2, pineFordSeed, true, 'ctf'));
+  ok('Pinefall carrier route releases toward home after the west ford bank',
+    ctfCarrierWaypoint({ x: 126.1, z: pineFordZ }, pineGreenHome,
+      2, 'green', pineFordSeed)?.x === 122
+      && ctfCarrierWaypoint({ x: 126, z: pineFordZ }, pineGreenHome,
+        2, 'green', pineFordSeed) === null);
+  ok('Pinefall ford commitment stays isolated from carriers and modes outside it',
+    !pinefallCarrierFordCommitted({ x: 134, z: pineFordZ },
+      2, pineFordSeed, false, 'ctf')
+      && !pinefallCarrierFordCommitted({ x: 134, z: pineFordZ },
+        1, pineFordSeed, true, 'ctf')
+      && !pinefallCarrierFordCommitted({ x: 134, z: pineFordZ },
+        2, pineFordSeed, true, 'tdm')
+      && !pinefallCarrierFordCommitted({ x: 134, z: pineFordZ + 24 },
+        2, pineFordSeed, true, 'ctf'));
   ok('CTF authored routing stays isolated from non-carriers and other modes',
     ctfCarrierWaypoint({ x: 220, z: 128 }, { x: 36, z: 128 }, 4, 'green', ctfRouteSeed) === null
       && authoredRouteGoal({ carrier: false, body: { pos: { x: 220, z: 128 } },

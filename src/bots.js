@@ -15,6 +15,7 @@ import { botDifficulty, botSeparation, botTerrainEditAllowed, rememberedEnemyPos
   smgClosingIntent, BOT_EDIT_REFILL_SECONDS, BOT_LIFE_EDIT_BUDGET } from './bot-rules.js';
 import { clampToEnvelope, mapEnvelope } from './mapgen.js';
 import { authoredRouteGoal, goal as botGoal, hasOverhead,
+  pinefallCarrierFordCommitted,
   planLocalRoute } from './bot-navigation.js';
 import { acquireTarget, buildCover, digVoxel, hasCover } from './bot-combat.js';
 
@@ -314,7 +315,15 @@ export class Bot {
     // grace carries the commitment through the wading half-steps where the
     // bot bounces in and out of the inWater flag on the shelf.
     this.wetT = b.inWater ? 2 : Math.max(0, this.wetT - dt);
-    if (this.wetT > 0) {
+    // Pinefall's authored ford is a deliberate low crossing. Once a carrier
+    // is inside that bounded corridor, keep the authored checkpoint as the
+    // destination so the generic nearest-bank scan cannot turn it around in
+    // the middle of the creek. All other swimmers retain the existing exit
+    // policy, including Pinefall carriers outside this corridor.
+    const fordCommitted = pinefallCarrierFordCommitted(
+      b.pos, g.mapIndex, g.seed, this.carrier, g.gameMode);
+    if (fordCommitted) this.exit = null;
+    if (this.wetT > 0 && !fordCommitted) {
       // Commit to the chosen exit column until standing on dry land:
       // re-picking every frame just hops the dest a few blocks goal-ward
       // along the bank, and the bot outswims its own shovel without ever

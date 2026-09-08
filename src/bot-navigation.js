@@ -16,10 +16,19 @@ const CTF_REACHED = 4;
 const CTF_ROUTE_X_EAST = Object.freeze([
   Object.freeze([92, 116, 140, 164]),
   Object.freeze([86, 105, 145, 170]),
-  Object.freeze([110, 122, 134, 146]),
+  // Pinefall's permanent ford itself spans x=122..134. The 146 checkpoint
+  // lines up the east-bank approach; x=122 is already dry on the west side.
+  // An older x=110 checkpoint kept westbound carriers marching along the
+  // ford's fixed z after they had crossed, straight into the meandering
+  // ravine bank instead of letting the home vector lead them away.
+  Object.freeze([122, 134, 146]),
 ]);
 const CTF_ROUTE_X_WEST = Object.freeze(CTF_ROUTE_X_EAST.map(route =>
   Object.freeze(route.slice().reverse())));
+const PINEFALL_INDEX = 2;
+const PINEFALL_FORD_MIN_X = 116;
+const PINEFALL_FORD_MAX_X = 144;
+const PINEFALL_FORD_Z_TOLERANCE = 10;
 let cachedBeachheadSeed = null;
 let cachedBeachheadZ = null;
 
@@ -109,6 +118,24 @@ export function ctfCarrierWaypoint(position, home, mapIndex = 0, team = 'green',
 
 // Descriptive alias for callers that prefer the longer policy name.
 export const ctfCarrierRouteWaypoint = ctfCarrierWaypoint;
+
+/**
+ * Whether a carrier is still committed to Pinefall's authored low ford.
+ *
+ * This is deliberately narrower than "the bot is in water": only an active
+ * CTF carrier on Pinefall, inside the ford's bounded x/z corridor, receives
+ * this exception. Generic wet-land seeking remains authoritative everywhere
+ * else, including a carrier that leaves the authored crossing.
+ */
+export function pinefallCarrierFordCommitted(position, mapIndex = 0,
+  seed = 1979, carrier = true, gameMode = 'ctf') {
+  if (!carrier || gameMode !== 'ctf' || mapIndex !== PINEFALL_INDEX
+      || !validPlanarPoint(position)
+      || position.x < PINEFALL_FORD_MIN_X
+      || position.x > PINEFALL_FORD_MAX_X) return false;
+  const fordZ = pinefallRavineCenter(seed, CTF_MIDFIELD) + 8;
+  return Math.abs(position.z - fordZ) <= PINEFALL_FORD_Z_TOLERANCE;
+}
 
 const planarDistance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const crownCardinal = point => {

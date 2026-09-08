@@ -103,7 +103,17 @@ try {
         stuck: 0, contacts: [], firstDeathAt: null, reengage: [], deathsByClass: {}, killsByClass: {},
         pickups: 0, returns: 0, captures: 0, flagTransitions: 0, hillOccupied: 0,
         hillContested: 0, strikes: 0, impacts: 0, strikeKills: 0, errors: [],
-        ctfRuns: [] };
+        ctfRuns: [], ctfApproach: {
+          green: { entries48: 0, entries24: 0, first48At: null, first24At: null },
+          blue: { entries48: 0, entries24: 0, first48At: null, first24At: null },
+          approachSamples: [],
+          preFirstPickupDeaths: { total: 0, byTeam: { green: 0, blue: 0 }, byRole: {}, samples: [] },
+        } };
+      // CTF approach telemetry is intentionally bounded and sampled once per
+      // second. Per-bot band state prevents a bot circling a threshold from
+      // inflating entries, while the fixed sample caps keep CI output small.
+      const ctfBandState = new Map();
+      const ctfPickupSeen = new Set();
       const awaitingContact = new Map();
       // Keep this deliberately test-local.  Flag methods remain unmodified so
       // the bot room follows precisely the same authority path as production.
@@ -175,6 +185,42 @@ try {
       };
       const className = gun => gun === 0 ? 'rifle' : gun === 1 ? 'smg'
         : gun === 5 ? 'sniper' : 'unknown';
+      const roleName = bot => bot?.tacticalRole ?? bot?.role ?? 'unknown';
+      const isDefenderRole = role => ['defend', 'recover'].includes(role);
+      const ctfContext = (bot, flagDistance) => {
+        const allies = g.bots.filter(ally => ally.alive && ally.team === bot.team);
+        const nearestSupport = allies.filter(ally => ally !== bot)
+          .reduce((nearest, ally) => Math.min(nearest, distance(ally.body.pos, bot.body.pos)), Infinity);
+        const attackerCount = allies.filter(ally => !isDefenderRole(roleName(ally))).length;
+        return { team: bot.team, role: roleName(bot), flagDistance,
+          aliveAttackers: attackerCount, aliveDefenders: allies.length - attackerCount,
+          nearestSupportDistance: Number.isFinite(nearestSupport) ? nearestSupport : null };
+      };
+      const recordApproach = (bot, band, flagDistance) => {
+        const team = m.ctfApproach[bot.team];
+        if (!team) return;
+        const field = band === 48 ? 'entries48' : 'entries24';
+        const first = band === 48 ? 'first48At' : 'first24At';
+        team[field]++;
+        if (team[first] == null) team[first] = g.time - beganAt;
+        if (m.ctfApproach.approachSamples.length < 8)
+          m.ctfApproach.approachSamples.push({ t: g.time - beganAt, band,
+            ...ctfContext(bot, flagDistance) });
+      };
+      const sampleCtfApproach = () => {
+        if (scenario.mode !== 'ctf') return;
+        for (const bot of g.bots) {
+          if (!bot.alive || !bot.body?.pos) continue;
+          const enemyFlag = g.flags?.[g.enemyOf(bot.team)];
+          const flagDistance = distance(bot.body.pos, enemyFlag?.home);
+          if (!Number.isFinite(flagDistance)) continue;
+          const prior = ctfBandState.get(bot.id) ?? { band48: false, band24: false };
+          const band48 = flagDistance <= 48, band24 = flagDistance <= 24;
+          if (band48 && !prior.band48) recordApproach(bot, 48, flagDistance);
+          if (band24 && !prior.band24) recordApproach(bot, 24, flagDistance);
+          ctfBandState.set(bot.id, { band48, band24 });
+        }
+      };
       const oldDeath = g.onDeath.bind(g);
       g.onDeath = (victim, killer) => {
         if (victim?.id !== undefined) {
@@ -190,6 +236,17 @@ try {
             const kk = className(killer.gunClass);
             m.killsByClass[kk] = (m.killsByClass[kk] ?? 0) + 1;
           }
+          if (scenario.mode === 'ctf' && !ctfPickupSeen.has(victim.team)) {
+            const enemyFlag = g.flags?.[g.enemyOf(victim.team)];
+            const flagDistance = distance(victim.body?.pos, enemyFlag?.home);
+            const role = roleName(victim);
+            const deaths = m.ctfApproach.preFirstPickupDeaths;
+            deaths.total++;
+            deaths.byTeam[victim.team] = (deaths.byTeam[victim.team] ?? 0) + 1;
+            deaths.byRole[role] = (deaths.byRole[role] ?? 0) + 1;
+            if (deaths.samples.length < 8)
+              deaths.samples.push({ t: g.time - beganAt, ...ctfContext(victim, flagDistance) });
+          }
           if (victim.carrier && g.flags) {
             const flagTeam = g.enemyOf(victim.team);
             const run = activeRun.get(flagTeam);
@@ -197,6 +254,7 @@ try {
               terminalPosition: point(victim.body.pos), ownFlagStateAtTerminal: g.flags[victim.team]?.state ?? null,
               dropPosition: point(victim.body.pos) });
           }
+          ctfBandState.set(victim.id, { band48: false, band24: false });
           awaitingContact.set(victim.id, g.time);
         }
         return oldDeath(victim, killer);
@@ -230,6 +288,7 @@ try {
           m.flagTransitions++;
           if (before[team] !== 'carried' && f.state === 'carried') {
             m.pickups++;
+            if (f.carrier?.team) ctfPickupSeen.add(f.carrier.team);
             startRun(team, f.carrier);
           }
           if (before[team] === 'dropped' && f.state === 'home') {
@@ -259,6 +318,7 @@ try {
       g._updateHill = dt => { oldHill(dt); const h = g.hill; if (h?.contested) m.hillContested += dt;
         else if ((h?.presence.green ?? 0) + (h?.presence.blue ?? 0) > 0) m.hillOccupied += dt; };
       const sample = () => {
+        sampleCtfApproach();
         const alive = g.bots.filter(b => b.alive);
         for (const b of alive) m.stuck += b.telemetry?.stuckRecoveries ?? 0;
         // telemetry is cumulative; reset after each sample to avoid multiplying it.
@@ -338,6 +398,32 @@ try {
   const byMode = Object.fromEntries(['ctf', 'tdm', 'koth'].map(mode =>
     [mode, rows.filter(row => row.mode === mode).reduce(add, blank())]));
   const ctfRuns = rows.filter(row => row.mode === 'ctf').flatMap(row => row.ctfRuns);
+  const ctfApproach = {
+    green: { entries48: 0, entries24: 0, first48At: null, first24At: null },
+    blue: { entries48: 0, entries24: 0, first48At: null, first24At: null },
+    approachSamples: [],
+    preFirstPickupDeaths: { total: 0, byTeam: { green: 0, blue: 0 }, byRole: {}, samples: [] },
+  };
+  for (const row of rows.filter(candidate => candidate.mode === 'ctf')) {
+    for (const team of ['green', 'blue']) {
+      const source = row.ctfApproach[team], target = ctfApproach[team];
+      target.entries48 += source.entries48;
+      target.entries24 += source.entries24;
+      for (const field of ['first48At', 'first24At'])
+        if (source[field] != null && (target[field] == null || source[field] < target[field]))
+          target[field] = source[field];
+    }
+    ctfApproach.approachSamples.push(...row.ctfApproach.approachSamples);
+    ctfApproach.approachSamples.length = Math.min(8, ctfApproach.approachSamples.length);
+    const sourceDeaths = row.ctfApproach.preFirstPickupDeaths;
+    const targetDeaths = ctfApproach.preFirstPickupDeaths;
+    targetDeaths.total += sourceDeaths.total;
+    for (const team of ['green', 'blue']) targetDeaths.byTeam[team] += sourceDeaths.byTeam[team] ?? 0;
+    for (const [role, count] of Object.entries(sourceDeaths.byRole))
+      targetDeaths.byRole[role] = (targetDeaths.byRole[role] ?? 0) + count;
+    targetDeaths.samples.push(...sourceDeaths.samples);
+    targetDeaths.samples.length = Math.min(8, targetDeaths.samples.length);
+  }
   const ctfOutcomes = Object.fromEntries(['capture', 'death_drop', 'drop', 'other']
     .map(outcome => [outcome, ctfRuns.filter(run => run.outcome === outcome).length]));
   const report = { seconds, rounds: rows.length, aggregate, byMode,
@@ -347,7 +433,8 @@ try {
       averageEscortSeconds: ctfRuns.reduce((total, run) => total + run.escortSeconds, 0)
         / Math.max(1, ctfRuns.length),
       closestHomeDistance: ctfRuns.length
-        ? Math.min(...ctfRuns.map(run => run.closestHomeDistance)) : null },
+        ? Math.min(...ctfRuns.map(run => run.closestHomeDistance)) : null,
+      approach: ctfApproach },
     spawnDeathRate: aggregate.deaths ? aggregate.spawnDeaths / aggregate.deaths : 0,
     averageEdits: aggregate.edits / Math.max(1, rows.length),
     worstFirstContact: Math.max(...rows.map(row => row.firstContact ?? Infinity)),
@@ -356,6 +443,36 @@ try {
     process.env.SPADE_BOT_SIM_VERBOSE ? { ...report, cases: rows } : report));
   assert.deepEqual(browserFaults, [], browserFaults.join('\n'));
   assert.ok(rows.every(r => !r.errors.length && !r.faults.length), JSON.stringify(rows.filter(r => r.errors.length || r.faults.length)));
+  const ctfRows = rows.filter(row => row.mode === 'ctf');
+  assert.ok(ctfRows.every(row => {
+    const approach = row.ctfApproach;
+    if (!approach || !Array.isArray(approach.approachSamples)
+        || approach.approachSamples.length > 8) return false;
+    if (!approach.preFirstPickupDeaths || !Array.isArray(approach.preFirstPickupDeaths.samples)
+        || approach.preFirstPickupDeaths.samples.length > 8
+        || !Number.isInteger(approach.preFirstPickupDeaths.total)
+        || approach.preFirstPickupDeaths.total < 0) return false;
+    return ['green', 'blue'].every(team => {
+      const bands = approach[team];
+      return bands && Number.isInteger(bands.entries48) && bands.entries48 >= 0
+        && Number.isInteger(bands.entries24) && bands.entries24 >= 0
+        && (bands.first48At == null || Number.isFinite(bands.first48At))
+        && (bands.first24At == null || Number.isFinite(bands.first24At));
+    });
+  }), 'invalid CTF approach telemetry shape');
+  assert.ok(ctfRows.every(row => row.ctfApproach.approachSamples.every(sample =>
+    ['green', 'blue'].includes(sample.team) && [24, 48].includes(sample.band)
+    && Number.isFinite(sample.t) && Number.isFinite(sample.flagDistance)
+    && Number.isInteger(sample.aliveAttackers) && sample.aliveAttackers >= 0
+    && Number.isInteger(sample.aliveDefenders) && sample.aliveDefenders >= 0
+    && (sample.nearestSupportDistance == null || Number.isFinite(sample.nearestSupportDistance))
+  ) && row.ctfApproach.preFirstPickupDeaths.samples.every(sample =>
+    ['green', 'blue'].includes(sample.team) && typeof sample.role === 'string'
+    && Number.isFinite(sample.flagDistance)
+    && Number.isInteger(sample.aliveAttackers) && sample.aliveAttackers >= 0
+    && Number.isInteger(sample.aliveDefenders) && sample.aliveDefenders >= 0
+    && (sample.nearestSupportDistance == null || Number.isFinite(sample.nearestSupportDistance)))),
+  'invalid CTF approach sample telemetry');
   // These check the diagnostic contract, not whether the current bot tactics
   // happen to produce a capture on a particular map/seed.
   assert.ok(ctfRuns.every(run => Number.isInteger(run.id) && run.carrierId != null

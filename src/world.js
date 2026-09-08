@@ -473,6 +473,13 @@ export class VoxelWorld {
 
     const pos = [], col = [], ind = [];
     const c = new THREE.Color();
+    // Reuse AO scratch buffers across the visible faces in this chunk. These
+    // loops run tens of thousands of times during a rebuild, so allocating
+    // several tiny arrays per corner creates avoidable garbage-collector work.
+    const n = [0, 0, 0];
+    const ao = [0, 0, 0, 0];
+    const p = [0, 0, 0];
+    const p2 = [0, 0, 0];
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
 
     for (let y = 0; y < SY; y++)
@@ -495,16 +502,17 @@ export class VoxelWorld {
             const tint = FACE_TINT[f];
             // AO probes live in the air cell touching this face, one step to
             // each side of the corner plus the diagonal.
-            const n = [x + d[0], y + d[1], z + d[2]];
+            n[0] = x + d[0];
+            n[1] = y + d[1];
+            n[2] = z + d[2];
             const t0 = d[0] === 0 ? 0 : 1, t1 = d[2] === 0 ? 2 : 1; // tangent axes
-            const ao = [];
             const base = pos.length / 3;
             for (let corner = 0; corner < face.corners.length; corner++) {
-              const [ox, oy, oz] = face.corners[corner];
+              const o = face.corners[corner];
+              const ox = o[0], oy = o[1], oz = o[2];
               pos.push(x + ox, y + oy, z + oz);
-              const o = [ox, oy, oz];
               const s0 = o[t0] ? 1 : -1, s1 = o[t1] ? 1 : -1;
-              const p = [n[0], n[1], n[2]];
+              p[0] = n[0]; p[1] = n[1]; p[2] = n[2];
               p[t0] += s0;
               const nv0 = this.get(p[0], p[1], p[2]);
               const side0 = nv0 ? 1 : 0;
@@ -543,7 +551,7 @@ export class VoxelWorld {
               // everywhere, so boosting on top of it without this gate
               // would wash the whole field out instead of picking out
               // genuine edges specifically.
-              const p2 = [x, y, z];
+              p2[0] = x; p2[1] = y; p2[2] = z;
               p2[t0] += s0;
               const ledgeSide0 = !this.get(p2[0], p2[1], p2[2]);
               p2[t0] -= s0; p2[t1] += s1;
@@ -551,7 +559,7 @@ export class VoxelWorld {
               const rim = a === 3 && (ledgeSide0 || ledgeSide1) ? RIM_HIGHLIGHT : 1;
               const edges = (nv0 && nv0 !== v ? 1 : 0) + (nv1 && nv1 !== v ? 1 : 0) + (nvc && nvc !== v ? 1 : 0);
               const b = AO_LEVEL[a] * EDGE_LEVEL[edges] * rim;
-              ao.push(b); // the diagonal-flip check below now compares actual final brightness, not just raw AO counts, so it accounts for edge darkening too — safe for the no-edge case too, since EDGE_LEVEL[0]=1.0 makes this identical to comparing AO_LEVEL[a] alone, which is monotonic in a exactly like the old raw counts were
+              ao[corner] = b; // the diagonal-flip check below now compares actual final brightness, not just raw AO counts, so it accounts for edge darkening too — safe for the no-edge case too, since EDGE_LEVEL[0]=1.0 makes this identical to comparing AO_LEVEL[a] alone, which is monotonic in a exactly like the old raw counts were
               col.push(jr * tint[0] * b, jg * tint[1] * b, jb * tint[2] * b);
             }
             // Flip the quad diagonal toward the brighter corners — otherwise

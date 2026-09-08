@@ -250,6 +250,14 @@ function peerReady(peer, timeoutMs) {
   });
 }
 
+function closeConnectionQuietly(conn) {
+  try { conn?.close?.(); } catch { /* already gone */ }
+}
+
+function destroyPeerQuietly(peer) {
+  try { peer?.destroy?.(); } catch { /* already gone */ }
+}
+
 export function makeCode() {
   return Array.from({ length: 4 }, () =>
     CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
@@ -400,28 +408,29 @@ export class Net {
   static _knock(peer, code, name, team, timeoutMs) {
     return new Promise(resolve => {
       const target = PREFIX + code;
-      let settled = false;
+      let settled = false, timer = null, conn = null;
+      let onOpen = () => {}, onData = () => {}, onClose = () => {}, onConnError = () => {};
+      let onErr = () => {};
       const done = v => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        peer.off('error', onErr);
-        conn.off?.('open', onOpen);
-        conn.off?.('data', onData);
-        conn.off?.('close', onClose);
-        conn.off?.('error', onConnError);
+        if (timer) clearTimeout(timer);
+        try { peer.off?.('error', onErr); } catch { /* already gone */ }
+        try { conn?.off?.('open', onOpen); } catch { /* already gone */ }
+        try { conn?.off?.('data', onData); } catch { /* already gone */ }
+        try { conn?.off?.('close', onClose); } catch { /* already gone */ }
+        try { conn?.off?.('error', onConnError); } catch { /* already gone */ }
         // A failed knock must close its channel deterministically: an
         // abandoned one can still complete the handshake later and shambling
         // into the room as a zombie — half-open, never welcomed, and wedging
         // the host's connection map entry for our peer id.
-        if (v.kind !== 'join') conn.close();
+        if (v.kind !== 'join') closeConnectionQuietly(conn);
         resolve(v);
       };
-      const timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
-      const onErr = e => {
-        const kind = probeErrorKind(e.type);
+      onErr = e => {
+        const kind = probeErrorKind(e?.type);
         if (kind === 'unavailable') {
-          if (String(e.message).includes(target)) done({ kind: 'dead' });
+          if (String(e?.message).includes(target)) done({ kind: 'dead' });
           return;
         }
         // Connection-level errors are emitted on both Peer and DataConnection.
@@ -429,14 +438,16 @@ export class Net {
         // stale channel failure kill the current one.
         if (kind === 'down') done({ kind });
       };
-      peer.on('error', onErr); // the broker reports unknown room ids on the peer
-      const conn = peer.connect(target, { reliable: true });
       // team is the player's own OPTIONAL side preference (undefined when
       // they never set one) — the host honors it if given, falls back to
       // its own balance pick otherwise. See Game#_hostAddPlayer.
-      const onOpen = () => conn.send({ t: 'hi', v: PROTOCOL_VERSION, name, team,
-        resume: resumeToken() });
-      const onData = d => {
+      onOpen = () => {
+        try {
+          conn?.send({ t: 'hi', v: PROTOCOL_VERSION, name, team,
+            resume: resumeToken() });
+        } catch { done({ kind: 'dead' }); }
+      };
+      onData = d => {
         if (!isRecord(d)) return;
         // Do not adopt a channel on a merely welcome-shaped packet. A stale
         // or incompatible host used to make matchmaking report success, then
@@ -445,12 +456,20 @@ export class Net {
         else if (d.t === 'full') done({ kind: 'full' });
         else if (d.t === 'version') done({ kind: 'version', v: d.v });
       };
-      const onClose = () => done({ kind: 'dead' });
-      const onConnError = () => done({ kind: 'dead' });
-      conn.on('open', onOpen);
-      conn.on('data', onData);
-      conn.on('close', onClose);
-      conn.on('error', onConnError);
+      onClose = () => done({ kind: 'dead' });
+      onConnError = () => done({ kind: 'dead' });
+      try {
+        timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
+        peer.on('error', onErr); // the broker reports unknown room ids on the peer
+        if (settled) return;
+        conn = peer.connect(target, { reliable: true });
+        conn.on('open', onOpen);
+        conn.on('data', onData);
+        conn.on('close', onClose);
+        conn.on('error', onConnError);
+      } catch {
+        done({ kind: 'down' });
+      }
     });
   }
 
@@ -458,24 +477,30 @@ export class Net {
   // handlers attach on adoption — or { kind: 'taken' } / { kind: 'down' }.
   static _claim(code, timeoutMs) {
     return new Promise(resolve => {
-      let settled = false;
-      const net = Net.host(code, {});
+      let settled = false, timer = null, net = null;
+      let onOpen = () => {}, onError = () => {};
       const done = v => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        net.peer.off('open', onOpen);
-        net.peer.off('error', onError);
+        if (timer) clearTimeout(timer);
+        try { net?.peer?.off?.('open', onOpen); } catch { /* already gone */ }
+        try { net?.peer?.off?.('error', onError); } catch { /* already gone */ }
         resolve(v); // settle FIRST: if destroy() throws on a half-dead peer,
-        try { if (v.kind !== 'host') net.destroy(); } catch { /* already gone */ }
+        if (v.kind !== 'host') destroyPeerQuietly(net);
       };
       // A claim that never resolves means this slot did not work out, not that
       // signaling is broken: move on to the next one.
-      const timer = setTimeout(() => done({ kind: 'busy' }), timeoutMs);
-      const onOpen = () => done({ kind: 'host', net });
-      const onError = e => done({ kind: claimErrorKind(e.type) });
-      net.peer.on('open', onOpen);
-      net.peer.on('error', onError);
+      onOpen = () => done({ kind: 'host', net });
+      onError = e => done({ kind: claimErrorKind(e?.type) });
+      try {
+        net = Net.host(code, {});
+        timer = setTimeout(() => done({ kind: 'busy' }), timeoutMs);
+        net.peer.on('open', onOpen);
+        if (settled) return;
+        net.peer.on('error', onError);
+      } catch {
+        done({ kind: 'down' });
+      }
     });
   }
 
@@ -506,36 +531,52 @@ export class Net {
   static _probe(peer, code, timeoutMs) {
     return new Promise(resolve => {
       const target = PREFIX + code;
-      let settled = false;
+      let settled = false, timer = null, conn = null;
+      let onErr = () => {}, onOpen = () => {}, onData = () => {}, onClose = () => {}, onConnError = () => {};
       const done = v => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        peer.off('error', onErr);
-        conn.close();
+        if (timer) clearTimeout(timer);
+        try { peer.off?.('error', onErr); } catch { /* already gone */ }
+        try { conn?.off?.('open', onOpen); } catch { /* already gone */ }
+        try { conn?.off?.('data', onData); } catch { /* already gone */ }
+        try { conn?.off?.('close', onClose); } catch { /* already gone */ }
+        try { conn?.off?.('error', onConnError); } catch { /* already gone */ }
+        closeConnectionQuietly(conn);
         resolve(v);
       };
-      const timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
-      const onErr = e => {
-        const kind = probeErrorKind(e.type);
+      onErr = e => {
+        const kind = probeErrorKind(e?.type);
         if (kind === 'unavailable') {
-          if (String(e.message).includes(target)) done({ kind: 'dead' });
+          if (String(e?.message).includes(target)) done({ kind: 'dead' });
           return; // somebody else's miss — not ours
         }
         // Connection-level failures are handled by this probe's conn below.
         // A shared peer cannot attribute them to a target, so ignore them here.
         if (kind === 'down') done({ kind });
       };
-      peer.on('error', onErr);
-      const conn = peer.connect(target, { reliable: true });
-      conn.on('open', () => conn.send({ t: 'ping' }));
-      conn.on('data', d => {
+      onData = d => {
         if (validPong(d))
           done({ kind: 'room', humans: d.humans, max: d.max, map: d.map,
                  mode: d.mode, g: d.g, b: d.b, names: d.names ?? [] });
-      });
-      conn.on('close', () => done({ kind: 'dead' }));
-      conn.on('error', () => done({ kind: 'dead' }));
+      };
+      onOpen = () => {
+        try { conn.send({ t: 'ping' }); } catch { done({ kind: 'dead' }); }
+      };
+      onClose = () => done({ kind: 'dead' });
+      onConnError = () => done({ kind: 'dead' });
+      try {
+        timer = setTimeout(() => done({ kind: 'dead' }), timeoutMs);
+        peer.on('error', onErr);
+        if (settled) return;
+        conn = peer.connect(target, { reliable: true });
+        conn.on('open', onOpen);
+        conn.on('data', onData);
+        conn.on('close', onClose);
+        conn.on('error', onConnError);
+      } catch {
+        done({ kind: 'down' });
+      }
     });
   }
 
@@ -561,15 +602,16 @@ export class Net {
     const deadline = Date.now() + overallMs;
     const outOfTime = () => Date.now() >= deadline;
     const stepTimeout = () => Math.max(1, Math.min(timeoutMs, deadline - Date.now()));
-    // The boot-time warm-up is an optimization, not a race the user must win.
-    // An immediate click still waits briefly for TURN before constructing the
-    // peer; failure remains a bounded STUN-only fallback.
-    await primeIce({ timeoutMs: stepTimeout() });
-    if (outOfTime()) return { kind: 'timeout' };
-    const guest = new Peer(peerOptions());
-    try { await peerReady(guest, stepTimeout()); }
-    catch { guest.destroy(); return { kind: outOfTime() ? 'timeout' : 'down' }; }
+    let guest = null;
     try {
+      // The boot-time warm-up is an optimization, not a race the user must win.
+      // An immediate click still waits briefly for TURN before constructing the
+      // peer; failure remains a bounded STUN-only fallback.
+      await primeIce({ timeoutMs: stepTimeout() });
+      if (outOfTime()) return { kind: 'timeout' };
+      guest = new Peer(peerOptions());
+      try { await peerReady(guest, stepTimeout()); }
+      catch { destroyPeerQuietly(guest); return { kind: outOfTime() ? 'timeout' : 'down' }; }
       // Page through the slots: later pages are only probed once every
       // earlier room is full, so ordinary load costs one cheap page.
       for (let page = 0; page < PUBLIC_PAGES; page++) {
@@ -581,45 +623,45 @@ export class Net {
           console.debug(`[qm] probe ${slotCode(slot)} -> ${p.kind}${p.kind === 'room' ? ` ${p.humans}/${p.max}` : ''}`);
           if (p.kind === 'room') { if (p.humans < p.max) open.push({ slot, humans: p.humans }); }
           else if (p.kind === 'dead') dead.push(slot);
-          else { guest.destroy(); return { kind: 'down' }; }
+          else { destroyPeerQuietly(guest); return { kind: 'down' }; }
         }
         // Fullest first, ties to the lowest slot number.
         open.sort((a, b) => b.humans - a.humans || a.slot - b.slot);
         for (const room of open) {
-          if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
+          if (outOfTime()) { destroyPeerQuietly(guest); return { kind: 'timeout' }; }
           const k = await Net._knock(guest, slotCode(room.slot), name, team, stepTimeout());
           console.debug(`[qm] knock ${slotCode(room.slot)} -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: room.slot, welcome: k.welcome };
-          if (k.kind === 'version') { guest.destroy(); return k; }
-          if (k.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
+          if (k.kind === 'version') { destroyPeerQuietly(guest); return k; }
+          if (k.kind === 'down') { destroyPeerQuietly(guest); return { kind: 'down' }; }
           // 'full'/'dead': lost a race — try the next room
         }
         for (const i of dead) {
-          if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
+          if (outOfTime()) { destroyPeerQuietly(guest); return { kind: 'timeout' }; }
           const c = await Net._claim(slotCode(i), stepTimeout());
           console.debug(`[qm] claim ${slotCode(i)} -> ${c.kind}`);
-          if (c.kind === 'host') { guest.destroy(); return { kind: 'host', net: c.net, slot: i }; }
-          if (c.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
+          if (c.kind === 'host') { destroyPeerQuietly(guest); return { kind: 'host', net: c.net, slot: i }; }
+          if (c.kind === 'down') { destroyPeerQuietly(guest); return { kind: 'down' }; }
           if (c.kind === 'busy') continue; // this slot would not take — try the next
           // 'taken': the probe said dead but the id is registered — the broker
           // never lies about that, so the probe was a false negative (slow net).
           // Give a proven-live room one direct knock before moving on.
-          if (outOfTime()) { guest.destroy(); return { kind: 'timeout' }; }
+          if (outOfTime()) { destroyPeerQuietly(guest); return { kind: 'timeout' }; }
           const k = await Net._knock(guest, slotCode(i), name, team, stepTimeout());
           console.debug(`[qm] knock ${slotCode(i)} (taken) -> ${k.kind}`);
           if (k.kind === 'join')
             return { kind: 'join', net: Net.adoptGuest(guest, k.conn), slot: i, welcome: k.welcome };
-          if (k.kind === 'version') { guest.destroy(); return k; }
-          if (k.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
+          if (k.kind === 'version') { destroyPeerQuietly(guest); return k; }
+          if (k.kind === 'down') { destroyPeerQuietly(guest); return { kind: 'down' }; }
           // 'full'/'dead': genuinely unavailable — try the next dead slot
         }
         // Every room on this page was full — fall through to the next page.
       }
-      guest.destroy();
+      destroyPeerQuietly(guest);
       return outOfTime() ? { kind: 'timeout' } : { kind: 'full-all' };
     } catch (e) {
-      guest.destroy();
+      destroyPeerQuietly(guest);
       return { kind: 'down' };
     }
   }
@@ -637,19 +679,25 @@ export class Net {
     const slots = publicPageSlots(page);
     if (!slots.length) return { kind: 'invalid-page' };
     timeoutMs = Math.max(1, Number(timeoutMs) || 9000);
-    await primeIce({ timeoutMs });
-    const guest = new Peer(peerOptions());
-    try { await peerReady(guest, timeoutMs); }
-    catch { guest.destroy(); return { kind: 'down' }; }
-    const results = await Promise.all(slots.map(i =>
-      Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
-    const rooms = [];
-    for (const { slot, p } of results) {
-      if (p.kind === 'room') rooms.push({ slot, ...p });
-      else if (p.kind === 'down') { guest.destroy(); return { kind: 'down' }; }
+    let guest = null;
+    try {
+      await primeIce({ timeoutMs });
+      guest = new Peer(peerOptions());
+      try { await peerReady(guest, timeoutMs); }
+      catch { destroyPeerQuietly(guest); return { kind: 'down' }; }
+      const results = await Promise.all(slots.map(i =>
+        Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
+      const rooms = [];
+      for (const { slot, p } of results) {
+        if (p.kind === 'room') rooms.push({ slot, ...p });
+        else if (p.kind === 'down') { destroyPeerQuietly(guest); return { kind: 'down' }; }
+      }
+      rooms.sort((a, b) => b.humans - a.humans || a.slot - b.slot);
+      return { kind: 'rooms', guest, rooms, page, pages: PUBLIC_PAGES };
+    } catch {
+      destroyPeerQuietly(guest);
+      return { kind: 'down' };
     }
-    rooms.sort((a, b) => b.humans - a.humans || a.slot - b.slot);
-    return { kind: 'rooms', guest, rooms, page, pages: PUBLIC_PAGES };
   }
 
   get clientIds() { return [...this.conns.keys()]; }

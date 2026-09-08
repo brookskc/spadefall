@@ -928,16 +928,35 @@ $('hostBtn').addEventListener('click', async () => {
   await primeIce();
   // Stay in solo mode while awaiting credentials: host-mode simulation
   // assumes game.net already exists and can otherwise tick into a null peer.
-  game.mode = 'host';
-  game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
-  const tryCode = () => {
-    const code = params.get('code')?.toUpperCase() ?? makeCode();
-    adoptHost(Net.host(code, {}), code, { onTaken: tryCode });
+  let hostAttemptLive = true;
+  const failHostSetup = error => {
+    if (!hostAttemptLive) return;
+    hostAttemptLive = false;
+    recoverPrivateSetup('host-setup', error);
   };
-  tryCode();
-  connecting = false;
-  status('creating room…');
-  if (document.pointerLockElement === renderer.domElement) setPlaying(true);
+  const tryCode = () => {
+    if (!hostAttemptLive) return;
+    try {
+      const code = params.get('code')?.toUpperCase() ?? makeCode();
+      adoptHost(Net.host(code, {}), code, {
+        onTaken: () => { if (hostAttemptLive) tryCode(); },
+        onOpen: () => { hostAttemptLive = false; },
+      });
+    } catch (error) {
+      failHostSetup(error);
+    }
+  };
+  try {
+    game.mode = 'host';
+    game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
+    tryCode();
+    if (!hostAttemptLive) return;
+    connecting = false;
+    status('creating room…');
+    if (document.pointerLockElement === renderer.domElement) setPlaying(true);
+  } catch (error) {
+    failHostSetup(error);
+  }
 });
 
 $('joinBtn').addEventListener('click', async () => {
@@ -956,15 +975,19 @@ $('joinBtn').addEventListener('click', async () => {
   lock?.catch?.(() => {});
   connecting = true;
   status('preparing network…');
-  await primeIce();
-  game.mode = 'client';
-  const n = Net.join(code, {});
-  connecting = false;
-  status('connecting…');
-  adoptJoin(n, code);
-  n.handlers.onOpen = () => n.send({ t: 'hi', v: PROTOCOL_VERSION,
-    name: game.player.name, team: teamPref(), resume: resumeToken() });
-  if (document.pointerLockElement === renderer.domElement) setPlaying(true);
+  try {
+    await primeIce();
+    game.mode = 'client';
+    const n = Net.join(code, {});
+    connecting = false;
+    status('connecting…');
+    adoptJoin(n, code);
+    n.handlers.onOpen = () => n.send({ t: 'hi', v: PROTOCOL_VERSION,
+      name: game.player.name, team: teamPref(), resume: resumeToken() });
+    if (document.pointerLockElement === renderer.domElement) setPlaying(true);
+  } catch (error) {
+    recoverPrivateSetup('join-setup', error);
+  }
 });
 
 // --- quick match: drop into a public room with strangers ---
@@ -991,6 +1014,25 @@ function bailToMenu() {
   }
 }
 
+const destroyPeerQuietly = peer => {
+  try { peer?.destroy?.(); } catch { /* already gone */ }
+};
+
+const recoverPrivateSetup = (stage, error) => {
+  const current = net;
+  net = null;
+  destroyPeerQuietly(current);
+  game.net = null;
+  game.mode = 'solo';
+  connecting = false;
+  roomCode = null;
+  showInvite();
+  reportConnectionFailure(stage, error);
+  status('network setup failed — try again');
+  if (playing) setPlaying(false);
+  bailToMenu();
+};
+
 $('quickBtn').addEventListener('click', async () => {
   if (net || matchmaking || connecting) return;
   if (!ensureCallsign()) return;
@@ -1004,14 +1046,17 @@ $('quickBtn').addEventListener('click', async () => {
   lock?.catch?.(() => {}); // refused → DEPLOY fallback below
   $('menu').classList.add('searching');
   status('searching for a public room…');
+  let result = null;
   try {
     let r = await Net.quickScan(game.player.name, teamPref(), qmTimeout);
+    result = r;
     if (r.kind === 'full-all') { // one retry: a room may have just opened up
       status('all rooms full — rescanning…');
       await new Promise(res => setTimeout(res, 1500));
       r = await Net.quickScan(game.player.name, teamPref(), qmTimeout);
+      result = r;
     }
-    if (searchCanceled) { r.net?.destroy(); return; } // bailed with Esc mid-search
+    if (searchCanceled) { destroyPeerQuietly(r.net); return; } // bailed with Esc mid-search
     $('menu').classList.remove('searching');
     if (r.kind === 'join') {
       migrationGen = 0;
@@ -1042,7 +1087,17 @@ $('quickBtn').addEventListener('click', async () => {
     // Lock held since the click: drop straight in, no DEPLOY gate. (If the
     // lock was refused, adopt* already surfaced the DEPLOY button instead.)
     if (document.pointerLockElement === renderer.domElement) setPlaying(true);
-  } finally { matchmaking = false; }
+  } catch (error) {
+    if (!net) destroyPeerQuietly(result?.net);
+    reportConnectionFailure('matchmaking', error);
+    if (!searchCanceled) {
+      status('matchmaking failed — try again, or HOST a private room');
+      bailToMenu();
+    }
+  } finally {
+    matchmaking = false;
+    $('menu').classList.remove('searching');
+  }
 });
 
 // --- room browser: scan one eight-room page and list what answers ---
@@ -1096,7 +1151,7 @@ function roomRow(room) {
 async function scanRooms() {
   if (scanning) return;
   scanning = true;
-  browseGuest?.destroy(); browseGuest = null;
+  destroyPeerQuietly(browseGuest); browseGuest = null;
   browseListEl.innerHTML = '';
   updateBrowsePager();
   browseSt.textContent = `scanning rooms ${browsePage * PUBLIC_SLOTS + 1}–${(browsePage + 1) * PUBLIC_SLOTS}…`;
@@ -1119,6 +1174,9 @@ async function scanRooms() {
     }
     browseSt.textContent = `${r.rooms.length} room${r.rooms.length === 1 ? '' : 's'} online on page ${browsePage + 1} — click one to join`;
     for (const room of r.rooms) browseListEl.appendChild(roomRow(room));
+  } catch (error) {
+    reportConnectionFailure('room-scan', error);
+    browseSt.textContent = 'room scan failed — hit RESCAN to try again';
   } finally { scanning = false; }
 }
 
@@ -1133,7 +1191,16 @@ async function joinFromBrowser(room) {
   const lock = renderer.domElement.requestPointerLock(); // gesture-valid only now
   lock?.catch?.(() => {});
   browseSt.textContent = `joining ${MAPS[room.map]?.name ?? 'room'}…`;
-  const k = await Net._knock(guest, slotCode(room.slot), game.player.name, teamPref(), qmTimeout);
+  let k;
+  try {
+    k = await Net._knock(guest, slotCode(room.slot), game.player.name, teamPref(), qmTimeout);
+  } catch (error) {
+    destroyPeerQuietly(guest);
+    reportConnectionFailure('room-join', error);
+    browseSt.textContent = 'join failed — hit RESCAN to try again';
+    scanRooms();
+    return;
+  }
   if (k.kind === 'join') {
     migrationGen = 0;
     game.mode = 'client';
@@ -1149,7 +1216,7 @@ async function joinFromBrowser(room) {
     game.clientOnData(k.welcome); // replay the welcome through the normal path
     if (document.pointerLockElement === renderer.domElement) setPlaying(true);
   } else {
-    guest.destroy();
+    destroyPeerQuietly(guest);
     browseSt.textContent = k.kind === 'full' ? 'that room just filled up'
       : k.kind === 'version' ? 'game version mismatch — refresh this page'
       : k.kind === 'down' ? 'cannot reach the matchmaking service — check your connection'

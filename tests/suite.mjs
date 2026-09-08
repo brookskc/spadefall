@@ -2557,6 +2557,97 @@ async function iceConfigTests() {
       .every(t => claimErrorKind(t) === 'down'));
 }
 
+async function matchmakingSetupFailureTests() {
+  group('matchmaking setup failures stay bounded');
+  const hadPeer = Object.prototype.hasOwnProperty.call(globalThis, 'Peer');
+  const oldPeer = globalThis.Peer;
+  const hadFetch = Object.prototype.hasOwnProperty.call(globalThis, 'fetch');
+  const oldFetch = globalThis.fetch;
+  const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window');
+  const oldWindow = globalThis.window;
+  try {
+    globalThis.window = {};
+    globalThis.fetch = async () => { throw new Error('offline'); };
+    resetIce();
+    globalThis.Peer = class ThrowingPeer {
+      constructor() { throw new Error('peer constructor'); }
+    };
+    const quick = await Net.quickScan('TEST', undefined, 10, 50);
+    const rooms = await Net.roomScan(0, 10);
+    const claim = await Net._claim('PUB0', 10);
+    ok('quick scan normalizes a synchronous Peer constructor failure', quick.kind === 'down');
+    ok('room scan normalizes a synchronous Peer constructor failure', rooms.kind === 'down');
+    ok('public slot claims normalize a synchronous Peer constructor failure', claim.kind === 'down');
+
+    let destroyed = 0;
+    class ConnectThrowsPeer {
+      constructor() { this.handlers = new Map(); }
+      on(kind, handler) {
+        this.handlers.set(kind, handler);
+        if (kind === 'open') queueMicrotask(handler);
+      }
+      off() {}
+      connect() { throw new Error('connection setup'); }
+      destroy() { destroyed++; }
+    }
+    globalThis.Peer = ConnectThrowsPeer;
+    const quickConnect = await Net.quickScan('TEST', undefined, 10, 50);
+    const roomConnect = await Net.roomScan(0, 10);
+    ok('quick scan normalizes a synchronous connection setup failure', quickConnect.kind === 'down');
+    ok('room scan normalizes a synchronous connection setup failure', roomConnect.kind === 'down');
+    const probePeer = new ConnectThrowsPeer();
+    const knockPeer = new ConnectThrowsPeer();
+    const probe = await Net._probe(probePeer, 'PUB0', 10);
+    const knock = await Net._knock(knockPeer, 'PUB0', 'TEST', undefined, 10);
+    ok('probe setup failures resolve as down instead of rejecting', probe.kind === 'down');
+    ok('knock setup failures resolve as down instead of rejecting', knock.kind === 'down');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    ok('failed scans destroy their temporary peers', destroyed >= 2);
+    ok('failed probe and knock setup leave no delayed timeout exception', destroyed >= 2);
+
+    class SynchronousSignalPeer {
+      constructor() { this.connectCalls = 0; }
+      on(kind, handler) {
+        if (kind === 'error') handler({ type: 'network' });
+      }
+      off() {}
+      connect() { this.connectCalls++; throw new Error('must not connect'); }
+    }
+    const syncProbePeer = new SynchronousSignalPeer();
+    const syncKnockPeer = new SynchronousSignalPeer();
+    const syncProbe = await Net._probe(syncProbePeer, 'PUB0', 10);
+    const syncKnock = await Net._knock(syncKnockPeer, 'PUB0', 'TEST', undefined, 10);
+    ok('synchronous peer errors do not create a probe connection',
+      syncProbe.kind === 'down' && syncProbePeer.connectCalls === 0);
+    ok('synchronous peer errors do not create a knock connection',
+      syncKnock.kind === 'down' && syncKnockPeer.connectCalls === 0);
+
+    const openOffs = [];
+    const openConn = {
+      on(kind, handler) { if (kind === 'open') handler(); },
+      off(kind) { openOffs.push(kind); },
+      send() {},
+      close() {},
+    };
+    const openPeer = {
+      on() {},
+      off() {},
+      connect() { return openConn; },
+    };
+    await Net._probe(openPeer, 'PUB0', 5);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    ok('probe cleanup removes the named open listener', openOffs.includes('open'));
+  } finally {
+    resetIce();
+    if (hadPeer) globalThis.Peer = oldPeer;
+    else delete globalThis.Peer;
+    if (hadFetch) globalThis.fetch = oldFetch;
+    else delete globalThis.fetch;
+    if (hadWindow) globalThis.window = oldWindow;
+    else delete globalThis.window;
+  }
+}
+
 function productionReadinessTests() {
   group('automatic graphics selection and anonymous field diagnostics');
   ok('healthy representative hardware selects High while overloaded hardware selects Medium',
@@ -2774,6 +2865,7 @@ async function turnWorkerTests() {
 
 export async function run() {
   await iceConfigTests();
+  await matchmakingSetupFailureTests();
   await turnWorkerTests();
   collapseTests();
   wireTests();

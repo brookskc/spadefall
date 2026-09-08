@@ -768,7 +768,9 @@ function genDesert(world, seed) {
   // twice — itself and its mirror twin. Same walls, same gaps, same fight.
   const rnd = mulberry32(seed ^ 0x2015);
   {
-    const rx = SX / 2 - 14, rz = SZ / 2 - 10, cols = [];
+    const rx = SX / 2 - 14, rz = SZ / 2 - 10;
+    /** @type {Array<[number, number, boolean, number]>} */
+    const cols = [];
     for (let per = 0; per < 22; per++) {
       const side = per % 4, step = Math.floor(per / 4);
       const x = rx + (side === 0 ? step * 2 : side === 1 ? 8 : side === 2 ? step * 2 : 0);

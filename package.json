@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit -p jsconfig.json"
   },
   "devDependencies": {
+    "@types/three": "0.170.0",
     "eslint": "^9.39.5",
     "playwright": "^1.62.1",
     "typescript": "^5.9.3"

@@ -209,6 +209,10 @@ function mulberry32(a) {
 export class VoxelWorld {
   constructor(scene) {
     this.data = new Uint8Array(SX * SY * SZ);
+    /** @type {Set<number>} Columns changed during the current edit batch. */
+    this._editedColumns = new Set();
+    /** @type {((x: number, z: number) => void) | undefined} */
+    this.onEdit = undefined;
     // Monotonic terrain mutation marker. Presentation caches use this to
     // invalidate spatial answers after a dig/build without rescanning every
     // unchanged frame.
@@ -342,6 +346,7 @@ export class VoxelWorld {
 
   _buildFoam() {
     if (!gfxPreset().foam || this.foam) return;
+    /** @type {Array<[number, number, number]>} */
     const cells = [];
     for (let z = 2; z < SZ - 2 && cells.length < 420; z += 3)
       for (let x = 2; x < SX - 2 && cells.length < 420; x += 3) {
@@ -641,13 +646,15 @@ export class VoxelWorld {
     this.material.dispose();
     this.clouds.removeFromParent();
     if (this.clouds.children.length) { // shared puff resources, freed once
-      this.clouds.children[0].children[0].geometry.dispose();
-      this.clouds.children[0].children[0].material.dispose();
+      const puff = /** @type {THREE.Mesh} */ (this.clouds.children[0].children[0]);
+      puff.geometry.dispose();
+      /** @type {THREE.Material} */ (puff.material).dispose();
     }
     this.horizon.removeFromParent();
     if (this.horizon.children.length) { // shared peak resources, freed once
-      this.horizon.children[0].children[0].geometry.dispose();
-      this.horizon.children[0].children[0].material.dispose();
+      const peak = /** @type {THREE.Mesh} */ (this.horizon.children[0].children[0]);
+      peak.geometry.dispose();
+      /** @type {THREE.Material} */ (peak.material).dispose();
     }
   }
 

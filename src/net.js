@@ -4,6 +4,7 @@
 import { isRecord } from './multiplayer.js';
 import { PROTOCOL_VERSION, validPong, validServerMessage } from './protocol.js';
 import { createResumeToken, validResumeToken } from './reconnect.js';
+import { publicContentAvailable } from './content-gating.js';
 const ns = new URLSearchParams(typeof location === 'undefined' ? '' : location.search)
   .get('ns')?.replace(/[^\w-]/g, '').slice(0, 16); // guarded for headless import
 const PREFIX = 'spadefall-' + (ns ? ns + '-' : '');
@@ -621,7 +622,12 @@ export class Net {
         const open = [], dead = [];
         for (const { slot, p } of results) {
           console.debug(`[qm] probe ${slotCode(slot)} -> ${p.kind}${p.kind === 'room' ? ` ${p.humans}/${p.max}` : ''}`);
-          if (p.kind === 'room') { if (p.humans < p.max) open.push({ slot, humans: p.humans }); }
+          if (p.kind === 'room') {
+            // Pre-gating rooms may still be live. They must not re-enter
+            // Quick Match; their host also rejects a direct stale knock.
+            if (publicContentAvailable(p.mode, p.map) && p.humans < p.max)
+              open.push({ slot, humans: p.humans });
+          }
           else if (p.kind === 'dead') dead.push(slot);
           else { destroyPeerQuietly(guest); return { kind: 'down' }; }
         }
@@ -689,7 +695,8 @@ export class Net {
         Net._probe(guest, slotCode(i), timeoutMs).then(p => ({ slot: i, p }))));
       const rooms = [];
       for (const { slot, p } of results) {
-        if (p.kind === 'room') rooms.push({ slot, ...p });
+        if (p.kind === 'room' && publicContentAvailable(p.mode, p.map))
+          rooms.push({ slot, ...p });
         else if (p.kind === 'down') { destroyPeerQuietly(guest); return { kind: 'down' }; }
       }
       rooms.sort((a, b) => b.humans - a.humans || a.slot - b.slot);

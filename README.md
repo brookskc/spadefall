@@ -16,9 +16,10 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
-| Capture the Flag | First to three captures | Greenbelt, Beachhead, Pinefall |
-| Team Deathmatch | First to 50 kills | All maps |
-| King of the Hill | Capture and occupy rotating points for 120 seconds | Dunes, Crown, Caldera |
+| Team Deathmatch | First to 50 kills | Greenbelt, Beachhead, Pinefall, Dunes, Caldera |
+| King of the Hill | Capture and occupy rotating points for 120 seconds | Dunes, Caldera |
+
+Capture the Flag and the Crown map are retired from public play. Both remain playable in private rooms started with the `privateContent` feature for development and testing.
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
@@ -50,8 +51,10 @@ Each map has its own terrain generator, atmosphere, sight lines, water layout, a
 | Greenbelt | Beachhead |
 | ![Pinefall](docs/map-pinefall.png) | ![Dunes](docs/map-dunes.png) |
 | Pinefall | Dunes |
-| ![Crown](docs/map-crown.png) | ![Caldera](docs/map-caldera.png) |
-| Crown | Caldera |
+| ![Caldera](docs/map-caldera.png) | |
+| Caldera | |
+
+Crown is retired from public play and remains available in private development rooms only.
 
 ## Multiplayer
 

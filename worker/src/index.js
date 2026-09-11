@@ -80,6 +80,9 @@ const DIAGNOSTIC_ENUMS = Object.freeze({
   migration: { outcome: ['success', 'failure'],
     reason: ['timeout', 'closed', 'protocol', 'network', 'other'] },
   match_abandon: { reason: ['pagehide', 'network', 'menu', 'other'] },
+  funnel: { step: ['opened', 'play_selected', 'playable_match', 'joined',
+    'first_spawn', 'first_shoot', 'first_dig', 'first_place', 'first_ping',
+    'objective', 'first_death', 'match_complete', 'next_match'] },
 });
 
 const exactKeys = (value, required, optional = []) => {
@@ -99,7 +102,7 @@ export function validDiagnosticsEnvelope(value) {
     if (!schema) return false;
     const extras = event.type === 'crash' ? ['fingerprint']
       : event.type === 'frame_budget' ? ['frame', 'long']
-        : event.type === 'match_abandon' ? ['time'] : [];
+        : event.type === 'match_abandon' || event.type === 'funnel' ? ['time'] : [];
     if (!exactKeys(event, ['type', ...Object.keys(schema), ...extras])) return false;
     if (!Object.entries(schema).every(([key, allowed]) => allowed.includes(event[key])))
       return false;
@@ -107,7 +110,7 @@ export function validDiagnosticsEnvelope(value) {
     if (event.type === 'frame_budget'
         && (![event.frame, event.long].every(n => Number.isInteger(n) && n >= 0 && n <= 4)))
       return false;
-    return event.type !== 'match_abandon'
+    return event.type !== 'match_abandon' && event.type !== 'funnel'
       || (Number.isInteger(event.time) && event.time >= 0 && event.time <= 4);
   });
 }

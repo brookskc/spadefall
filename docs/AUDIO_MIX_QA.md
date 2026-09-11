@@ -21,3 +21,8 @@ Also inspect soldier firing, hit, crouch, and death poses in a live two-browser
 match. This is a release sign-off checklist: automated tests protect routing,
 timing, pitch ceilings, range, and occlusion, but cannot decide whether a mix is
 pleasant on the listener's hardware.
+
+The `?audioqa=1` harness is intentionally repeatable: run each comparison at
+normal volume, then 50% master and 50% effects. Record the browser, output
+device, and whether captions remained local/occlusion-safe. This is a
+code-level QA aid, not an ears-based approval.

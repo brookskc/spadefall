@@ -156,7 +156,7 @@ export function createHud(deps = {}) {
     const mark = done => done ? '■' : '□';
     $('firstMinuteProgress').textContent = [
       `${mark(view.progress.move)} MOVE`, `${mark(view.progress.fire)} FIRE`,
-      `${mark(view.progress.terrain)} TERRAIN`, `${mark(view.progress.ping)} PING`,
+      `${mark(view.progress.terrain)} TERRAIN`,
     ].join('  ·  ');
   },
   score(g) {

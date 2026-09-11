@@ -17,7 +17,7 @@ import { clampToEnvelope, mapEnvelope } from './mapgen.js';
 import { authoredRouteGoal, goal as botGoal, hasOverhead,
   pinefallCarrierFordCommitted,
   planLocalRoute } from './bot-navigation.js';
-import { acquireTarget, buildCover, digVoxel, hasCover } from './bot-combat.js';
+import { acquireTarget, buildCover, digVoxel, hasCover, heardFoe } from './bot-combat.js';
 
 const NAMES = {
   blue:  ['Vex', 'Havoc', 'Irons', 'Dagger', 'Rook', 'Frost'],
@@ -55,7 +55,13 @@ const randomClass = () => GUN_CLASSES[Math.floor(Math.random() * GUN_CLASSES.len
 //     for sniper (rarely satisfied — won't push forward alone), large for
 //     smg (almost always satisfied — rushes ahead of the pack readily).
 const CLASS_PROFILE = {
-  0: { hold: 18, strafe: 14, retreatHealth: 35, closeRetreat: null, speedMul: 1.0, groupRange: 18, vision: 60 },
+//   fireRange: open-fire envelope. The bot still spots and tracks a target
+//     all the way out to vision, but holds fire — and keeps moving — beyond
+//     this. Trading planted shots at max vision wastes ammo and tracers on
+//     low-percentage plinks while standing still for anyone closing. smg
+//     already had this (32); rifle gets 45, inside its lethal mid-range.
+//     Sniper stays uncapped: extreme range IS its job (scope to 130).
+  0: { hold: 18, strafe: 14, retreatHealth: 35, closeRetreat: null, speedMul: 1.0, groupRange: 18, vision: 60, fireRange: 45 },
   1: { hold: 999, strafe: 24, retreatHealth: 20, closeRetreat: null, speedMul: 1.18, groupRange: 40, vision: 64, fireRange: 32 },
   5: { hold: 30, strafe: 8, retreatHealth: 45, closeRetreat: 14, speedMul: 0.92, groupRange: 8, vision: 90 },
 };
@@ -171,6 +177,7 @@ export class Bot {
     this._aim = new THREE.Vector3();
     this._want = new THREE.Vector3();
     this._headingDir = new THREE.Vector3();
+    this._stageDir = new THREE.Vector3();
     this._separation = { x: 0, z: 0 };
     this.routeT = 0;
     this.nades = 1;            // one frag per life
@@ -231,17 +238,24 @@ export class Bot {
     if (thinks) {
       const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
       const seen = acquireTarget(this, profile, COMBAT_CONTEXT);
-      if (seen !== this.target || (seen && !this.targetVisible)) {
-        this.aimT = 0;    // fresh eyes: reaction time
+      // Hearing covers what vision cannot: a close, fresh sound turns the
+      // head even when the foe starts outside the face cone. Heard contact
+      // is tracked like any lost-visual contact (memory drift applies) and
+      // is never shared as a 'sight' — the sound itself is already on the
+      // feed, and echoing it back as a sighting would be a psychic radio.
+      const heard = seen ? null : heardFoe(this);
+      const contact = seen ?? heard;
+      if (contact !== this.target || (contact && !this.targetVisible)) {
+        this.aimT = 0;    // fresh eyes (or ears): reaction time
         this._reactJitter = 0.8 + Math.random() * 0.5;
       }
-      if (seen) {
+      if (contact) {
         // New eyes on an enemy: report it. Teammates investigate this sighting,
         // but a bot that loses LOS retains only this frozen position.
-        if (seen !== this.target) g.pingIntel(seen.body.pos, seen.team, 'sight');
-        this.target = seen;
-        this.targetVisible = true;
-        this.memoryPos.copy(seen.body.pos);
+        if (contact !== this.target && seen) g.pingIntel(contact.body.pos, contact.team, 'sight');
+        this.target = contact;
+        this.targetVisible = seen != null;
+        this.memoryPos.copy(contact.body.pos);
         this.memorySeenAt = g.time;
         this.memoryT = this.difficulty.memory * this.skill;
       } else this.targetVisible = false;
@@ -377,8 +391,14 @@ export class Bot {
     // at range — but never in water, where the sideways mix orbits the bot
     // off its committed exit wall.
     let toFoe = null, foeD = Infinity, undermining = false;
+    // foeDir is available from the first frame of contact, even before aim
+    // settles (aimT < 0.3) — so retreat and cover react to a fresh ambush.
+    // toFoe stays aim-gated: strafing and SMG closing need a settled bead,
+    // not just a heading.
+    let foeDir = null;
     if (this.target && targetPoint && !b.inWater) {
       foeD = b.pos.distanceTo(targetPoint);
+      foeDir = this._toFoe.subVectors(targetPoint, b.pos).setY(0).normalize();
       // Undermine: a foe we merely REMEMBER (memoryT keeps the trail) is up
       // a tower we can't see through — walk to the column and let the shovel
       // and gravity argue with his footing. No aim required: the head never
@@ -388,7 +408,7 @@ export class Bot {
         undermining = true;
         dir.subVectors(targetPoint, b.pos).setY(0).normalize();
       } else if (this.aimT > 0.3) {
-        toFoe = this._toFoe.subVectors(targetPoint, b.pos).setY(0).normalize();
+        toFoe = foeDir;
         // A flag carrier's movement vector belongs to the run home. They can
         // return fire, but must not orbit an incidental target and carry the
         // objective sideways away from the stand.
@@ -418,12 +438,12 @@ export class Bot {
     if (g.hill && b.pos.distanceTo(g.hill.pos) < g.hill.r + 4) retreatHealth *= 0.5;
     else if (this.role === 'defend' && g.flags && b.pos.distanceTo(g.standOf(this.team)) < 14) retreatHealth *= 0.6;
     this.retreatT -= dt; this.retreatCd -= dt;
-    if (this.target && this.retreatCd <= 0 && toFoe &&
+    if (this.target && this.retreatCd <= 0 && foeDir &&
         (this.health < retreatHealth ||
          (profile.closeRetreat != null && foeD < profile.closeRetreat))) {
       this.retreatT = 2.5; this.retreatCd = 9;
     }
-    if (this.retreatT > 0 && toFoe) {
+    if (this.retreatT > 0 && foeDir) {
       // A flag carrier keeps heading home even while retreating — the
       // generic "flee straight away from whoever's shooting" vector below
       // has no idea which direction that actually is, and could easily
@@ -431,10 +451,10 @@ export class Bot {
       // getting the flag home means staying on that line even wounded,
       // not abandoning it to flee blind. Carriers also skip the generic
       // stop-and-build behavior: the objective must keep moving.
-      if (!this.carrier) dir.set(-toFoe.x - this.heading * 0.5, 0, -toFoe.z).normalize();
+      if (!this.carrier) dir.set(-foeDir.x - this.heading * 0.5, 0, -foeDir.z).normalize();
       if (!this.carrier && b.onGround && this.blocks >= 3
-          && this.buildT <= 0 && !hasCover(this, toFoe))
-        buildCover(this, toFoe, COMBAT_CONTEXT);
+          && this.buildT <= 0 && !hasCover(this, foeDir))
+        buildCover(this, foeDir, COMBAT_CONTEXT);
     }
 
     // --- combat engineering: caught in the open at range, throw up a
@@ -443,10 +463,10 @@ export class Bot {
     // aggressive, and turtling up contradicts the whole point of carrying
     // a close-range gun in the first place.
     this.buildT -= dt; this.coverT -= dt; this.duckT -= dt;
-    if (this.gunClass !== 1 && this.target && !this.carrier && !this.responding && toFoe &&
+    if (this.gunClass !== 1 && this.target && !this.carrier && !this.responding && foeDir &&
         b.onGround && !b.inWater && this.blocks >= 3 && this.buildT <= 0 &&
         this.coverT <= 0) {
-      if (foeD > 8 && foeD < 42 && !hasCover(this, toFoe)) buildCover(this, toFoe, COMBAT_CONTEXT);
+      if (foeD > 8 && foeD < 42 && !hasCover(this, foeDir)) buildCover(this, foeDir, COMBAT_CONTEXT);
     }
     // A defender with quiet hands fortifies: wall off the enemy approach to
     // the flag stand, one knee wall at a time.
@@ -457,6 +477,24 @@ export class Bot {
         this.coverT = 0; // fortifying, not fighting — keep patrolling
       }
     }
+    // Staging for a flag run: dug in while waiting, not loitering in the
+    // open. A staged attacker with blocks throws a knee wall toward the
+    // enemy stand and waits behind it — the same wait, minus the exposure.
+    // Skipped once engaged: the combat cover above already owns that case,
+    // and carriers never stage.
+    const staging = g.gameMode === 'ctf' && !this.carrier && !this.target
+      && Number.isFinite(this.ctfStageAt);
+    if (staging && b.onGround && !b.inWater && this.blocks >= 3
+        && this.buildT <= 0 && this.coverT <= 0) {
+      const enemyHome = g.flags?.[g.enemyOf?.(this.team)]?.home;
+      if (enemyHome) {
+        const toFlag = this._stageDir.subVectors(enemyHome, b.pos).setY(0);
+        if (toFlag.lengthSq() > 0.01) {
+          toFlag.normalize();
+          if (!hasCover(this, toFlag)) buildCover(this, toFlag, COMBAT_CONTEXT);
+        }
+      }
+    }
     // Behind fresh cover: hold the line instead of advancing — unless there's
     // team-colored masonry overhead, which the collapse system can drop on us.
     // A retreating bot never holds: the wall it just threw up is for falling
@@ -464,8 +502,12 @@ export class Bot {
     const coverHold = !this.carrier && this.coverT > 0 && this.target
       && this.retreatT <= 0 && !hasOverhead(this, NAV_CONTEXT);
     if (coverHold) dir.multiplyScalar(0.15);
-    // Holding a ranged firing line: plant the feet while crouch-firing.
+    // Holding a ranged firing line: plant the feet while crouch-firing — but
+    // only inside the open-fire envelope. Beyond fireRange there is no shot
+    // to plant FOR, so keep moving (usually closing) instead of crawling at
+    // 0.15x toward the objective while silent.
     const holdingLine = this.target && !this.carrier && foeD > profile.hold
+        && foeD <= (profile.fireRange ?? Infinity)
         && this.aimT > reactT && this.coverT <= 0 &&
         !undermining && b.onGround && !b.inWater;
     if (holdingLine) dir.multiplyScalar(0.15);

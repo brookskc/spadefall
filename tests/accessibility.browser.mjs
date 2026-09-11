@@ -38,8 +38,20 @@ const faults = [];
 try {
   const page = await browser.newPage();
   page.on('pageerror', error => faults.push(error.message));
-  await page.goto(`http://127.0.0.1:${port}/?auto=1`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.player?.controls);
+
+  assert.deepEqual(await page.evaluate(() => ({
+    mode: document.getElementById('modePref').value,
+    ctfVisible: [...document.getElementById('modePref').options].some(option => option.value === 'ctf'),
+  })), { mode: 'tdm', ctfVisible: false }, 'fresh selector defaults to flagship TDM');
+  const privatePage = await browser.newPage();
+  await privatePage.goto(`http://127.0.0.1:${port}/?features=privateContent`,
+    { waitUntil: 'domcontentloaded' });
+  await privatePage.waitForFunction(() => window.__game?.player?.controls);
+  assert.equal(await privatePage.evaluate(() => [...document.getElementById('modePref').options]
+    .some(option => option.value === 'ctf')), true, 'private feature exposes CTF for development');
+  await privatePage.close();
 
   const drawer = page.locator('#displayDrawer summary');
   await drawer.focus();

@@ -7,7 +7,7 @@ const busLevel = { effects: 1, ambience: 1, ui: 1 };
 let activeCategory = 'effects';
 export const SOUND_META = Object.freeze({
   rifle: { category: 'effects', priority: 3 }, smg: { category: 'effects', priority: 2 }, sniper: { category: 'effects', priority: 3 },
-  reloadStart: { category: 'effects' }, reloadEject: { category: 'effects' }, reloadInsert: { category: 'effects' }, reloadChamber: { category: 'effects' },
+  reloadStart: { category: 'effects', priority: 1 }, reloadEject: { category: 'effects', priority: 1 }, reloadInsert: { category: 'effects', priority: 1 }, reloadChamber: { category: 'effects', priority: 1 },
   step: { category: 'effects', priority: 1 }, slide: { category: 'effects' }, explosion: { category: 'effects', priority: 3 }, airstrikeImpact: { category: 'effects', priority: 3 },
   drone: { category: 'ambience', priority: 1 }, missile: { category: 'effects', priority: 2 }, missileLaunch: { category: 'effects', priority: 3 },
   hit: { category: 'ui', priority: 3 }, kill: { category: 'ui', priority: 3 },
@@ -215,6 +215,9 @@ const profile = v => SURFACE[voxelSurface(v)];
 // Mechanical pitch, not a musical note: the compact SMG is a little lighter,
 // the sniper bolt heavier, and none lives in the piercing 600–1200Hz range.
 export const reloadPitch = kind => kind === 'smg' ? 330 : kind === 'sniper' ? 235 : 275;
+export const AUDIO_QA_CONTRACT = Object.freeze({ reloadStages: [0.24, 0.62, 0.86],
+  reloadPitchCeiling: 330, criticalPriority: 3, incidentalPriority: 1,
+  occlusion: 'timbre-not-wallhack' });
 
 const QUIET_SPACE = Object.freeze({ step: 24, dig: 30, spadeHit: 28,
   reloadStart: 26, reloadEject: 26, reloadInsert: 26, reloadChamber: 26 });

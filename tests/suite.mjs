@@ -35,7 +35,7 @@ import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
 import { modeScoreLimit } from '../src/match-modes.js';
 import { PresentationSchedule } from '../src/presentation.js';
-import { SOUND_META, reloadPitch, sfx, spatialAudioMix, spatialVerticality,
+import { AUDIO_QA_CONTRACT, SOUND_META, reloadPitch, sfx, spatialAudioMix, spatialVerticality,
   voxelSurface } from '../src/audio.js';
 import { DEFAULT_BINDINGS, bindingConflicts, normalizeBindings } from '../src/controls.js';
 import { captionFromMix } from '../src/captions.js';
@@ -49,9 +49,9 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   smgClosingIntent,
   scheduleBotBrains } from '../src/bot-rules.js';
 import { authoredRouteGoal, crownRouteWaypoint, ctfApproachSupportDistance,
-  ctfCarrierWaypoint, laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
+  ctfCarrierWaypoint, greenbeltOpeningRally, laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
 import { Bot } from '../src/bots.js';
-import { acquireTarget } from '../src/bot-combat.js';
+import { acquireTarget, heardFoe } from '../src/bot-combat.js';
 import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothApproachDepth, kothCandidateDirectionalAllowed,
@@ -91,6 +91,7 @@ import { ProductionTelemetry, errorFingerprint, sanitizeTelemetryEvent,
 import { chooseSpawn } from '../src/spawn-controller.js';
 import { ctfFlagInteraction } from '../src/objectives.js';
 import { advanceMatchClock } from '../src/match-lifecycle.js';
+import { contentAvailable, publicContentAvailable } from '../src/content-gating.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -233,6 +234,26 @@ function mapgenTests() {
       ok(`${name}: hill ${i + 1} has playable headroom`,
         a.get(h.x, surface + 1, h.z) === 0 && a.get(h.x, surface + 2, h.z) === 0);
     }
+    if (m === 5) {
+      const hills = MAPS[m].hills;
+      const clear = hills.every(h => {
+        const footprint = [];
+        for (let z = h.z - 14; z <= h.z + 14; z++)
+          for (let x = h.x - 14; x <= h.x + 14; x++) {
+            if (Math.hypot(x - h.x, z - h.z) > 14) continue;
+            const y = a.surface(x, z);
+            if (Math.hypot(x - h.x, z - h.z) <= h.r) footprint.push(y);
+            if (a.get(x, y + 1, z) !== 0 || a.get(x, y + 2, z) !== 0) return false;
+          }
+        return Math.max(...footprint) === Math.min(...footprint);
+      });
+      ok('CALDERA rotating objectives retain clear, gently level 10-block footprints and aprons', clear);
+      const mirroredRoutes = hills.every(h => {
+        const west = a.surface(76, h.z), east = a.surface(180, h.z);
+        return Math.abs(west - east) <= 1 && west <= SEA + 15 && east <= SEA + 15;
+      });
+      ok('CALDERA has mirrored, walkable base-facing ramp cuts for every rotating hill', mirroredRoutes);
+    }
     let bad = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] >= PALETTE.length) bad++;
     ok(`${name}: every voxel indexes PALETTE`, bad === 0, `${bad} out of range`);
@@ -253,6 +274,38 @@ function mapgenTests() {
   ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
   ok('mapsForMode(tdm) covers every map',
     mapsForMode('tdm').length === MAPS.length, JSON.stringify(mapsForMode('tdm')));
+  ok('public rotation excludes CTF and CROWN while internal rotations remain intact',
+    JSON.stringify(mapsForMode('ctf', { publicOnly: true })) === '[]'
+      && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[3,5]'
+      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,3,5]'
+      && mapsForMode('tdm').includes(4));
+  ok('private content requires its explicit feature outside public paths',
+    !publicContentAvailable('ctf', 0) && !publicContentAvailable('tdm', 4)
+      && !contentAvailable('ctf', 0, { privateContent: false })
+      && contentAvailable('ctf', 0, { privateContent: true })
+      && !contentAvailable('ctf', 0, { publicOnly: true, privateContent: true }));
+  const legacyPublicRoom = {
+    publicRoom: true, gameMode: 'ctf', mapIndex: 0, privateContent: false,
+    _nextMap: Game.prototype._nextMap,
+    _restartRound: (map) => { legacyPublicRoom.rotatedTo = map; },
+  };
+  const legacyNextMap = legacyPublicRoom._nextMap();
+  Game.prototype._rotate.call(legacyPublicRoom);
+  ok('legacy public CTF has a safe next-map preview and rotates to public TDM',
+    legacyNextMap === 0 && legacyPublicRoom.gameMode === 'tdm'
+      && legacyPublicRoom.rotatedTo === 1);
+  const rejectedWelcomes = [];
+  const guardedPublicClient = Object.assign(Object.create(Game.prototype), {
+    publicRoom: true, gameMode: 'tdm', mapIndex: 0,
+    onPublicContentRejected: welcome => rejectedWelcomes.push(welcome),
+  });
+  Game.prototype.clientOnData.call(guardedPublicClient, {
+    t: 'w', id: 'peer', team: 'green', seed: 1, map: 0, mode: 'ctf', me: 0,
+    life: 1, spawn: [10, 20, 30, 0], log: [], r: { p: [], b: [] },
+  });
+  ok('public clients reject a stale private-content welcome before state mutation',
+    rejectedWelcomes.length === 1 && guardedPublicClient.gameMode === 'tdm'
+      && guardedPublicClient.mapIndex === 0 && guardedPublicClient.myId === undefined);
   ok('every map has a complete authored flat-color terrain palette',
     MAPS.every(m => ['grass', 'dirt', 'sand', 'stone', 'moss']
       .every(material => Number.isInteger(m.paletteOverrides?.[material]))));
@@ -280,11 +333,11 @@ function mapgenTests() {
   ok('PINEFALL ravine still crosses midfield at its seeded ford',
     pinefallRavineCenter(4242, seededFord) === SZ / 2);
 
-  ok('signature metadata ships four active mechanics and two fallbacks each',
-    ['greenbelt', 'pinefall', 'crown', 'caldera'].every((key, i) => {
-      const mechanic = signatureMechanic([0, 2, 4, 5][i]);
+  ok('signature metadata ships all six active mechanics with fallbacks',
+    ['greenbelt', 'beachhead', 'pinefall', 'dunes', 'crown', 'caldera'].every((key, i) => {
+      const mechanic = signatureMechanic(i);
       return mechanic?.id === key && mechanic.fallbacks.length >= 2;
-    }) && signatureMechanic(1) === null);
+    }));
 
   const greenSignature = new VoxelWorld(scene());
   generateMap(greenSignature, 12345, 0);
@@ -302,6 +355,73 @@ function mapgenTests() {
       && [126, 127, 128, 129].every(x => pineSignature.get(x, SEA + 1, pineBridgeZ) === 0)
       && pineSignature.get(128, SEA, pineBridgeZ + 8) === BLOCK.STONE
       && pineSignature.get(128, SEA + 1, pineBridgeZ + 8) === 0);
+
+  const beachSignature = new VoxelWorld(scene());
+  generateMap(beachSignature, 12345, 1);
+  let beachWallColumns = 0;
+  for (let z = 85; z <= 171; z++) {
+    const raisedStone = [142, 143, 144, 145].some(x => {
+      const top = beachSignature.surface(x, z);
+      const shoulder = Math.max(beachSignature.surface(x - 2, z),
+        beachSignature.surface(x + 2, z));
+      return beachSignature.get(x, top, z) === BLOCK.STONE && top > shoulder;
+    });
+    if (raisedStone) beachWallColumns++;
+  }
+  const beachFallbacks = signatureProtectedAreas(1, 12345);
+  ok('BEACHHEAD has three ordinary strongpoints and a damaged fortified line',
+    signatureMechanic(1)?.id === 'beachhead'
+      && beachFallbacks.length === 2
+      // Enough connected silhouette to read as a line, enough missing
+      // columns to expose several ordinary breach/fallback lanes.
+      && beachWallColumns >= 30 && beachWallColumns <= 60
+      && beachFallbacks.every(area => {
+        const top = beachSignature.surface(area.x, area.z);
+        return !beachSignature.get(area.x, top + 1, area.z)
+          && !beachSignature.get(area.x, top + 2, area.z);
+      }));
+  const dunesSignature = new VoxelWorld(scene());
+  generateMap(dunesSignature, 12345, 3);
+  let mirroredCourt = true;
+  for (let x = 94; x <= 108 && mirroredCourt; x++)
+    for (let z = 103; z <= 113 && mirroredCourt; z++)
+      // Compare the authored silhouette above the dune cap. Deep moss uses
+      // world-space noise and is intentionally not mirror-painted.
+      for (let y = SEA + 12; y < SY && mirroredCourt; y++)
+        mirroredCourt = dunesSignature.get(x, y, z)
+          === dunesSignature.get(SX - 1 - x, y, z);
+  const supportZ = 105;
+  const supportBase = supportX => {
+    for (let y = 1; y < SY; y++)
+      if (dunesSignature.get(supportX, y, supportZ) === BLOCK.STONE
+          && dunesSignature.get(supportX, y - 1, supportZ) !== BLOCK.STONE
+          && dunesSignature.get(supportX, y - 1, supportZ) !== 0) return y;
+    return 0;
+  };
+  const supportX = 96, supportY = supportBase(supportX);
+  const hole = { x: supportX, y: supportY, z: supportZ };
+  const archCollapse = unsupportedCollapseCells((x, y, z) =>
+    x === hole.x && y === hole.y && z === hole.z ? 0 : dunesSignature.get(x, y, z),
+  [hole]);
+  const mirrorX = SX - 1 - supportX, mirrorY = supportBase(mirrorX);
+  const mirrorHole = { x: mirrorX, y: mirrorY, z: supportZ };
+  const mirrorCollapse = unsupportedCollapseCells((x, y, z) =>
+    x === mirrorHole.x && y === mirrorHole.y && z === mirrorHole.z
+      ? 0 : dunesSignature.get(x, y, z), [mirrorHole]);
+  const dunesFallbacks = signatureProtectedAreas(3, 12345);
+  ok('DUNES courts are mirrored and one exposed footing drops a bounded half-arch',
+    mirroredCourt && supportY > SEA && mirrorY === supportY
+      && archCollapse.size >= 8 && archCollapse.size <= 32
+      && mirrorCollapse.size === archCollapse.size
+      && [...archCollapse].every(key => {
+        const [x, , z] = key.split(',').map(Number);
+        return Math.hypot(x - SX / 2, z - SZ / 2) > 9;
+      })
+      && dunesFallbacks.every(area => {
+        const top = dunesSignature.surface(area.x, area.z);
+        return !dunesSignature.get(area.x, top + 1, area.z)
+          && !dunesSignature.get(area.x, top + 2, area.z);
+      }), `${supportY}/${archCollapse.size}`);
 
   const crownSignature = new VoxelWorld(scene());
   generateMap(crownSignature, 12345, 4);
@@ -545,6 +665,11 @@ function audioPaletteTests() {
     Math.max(...['rifle', 'smg', 'sniper'].map(reloadPitch)) <= 330);
   ok('reload weight remains class-specific after the lower retune',
     reloadPitch('sniper') < reloadPitch('rifle') && reloadPitch('rifle') < reloadPitch('smg'));
+  ok('audio QA contract protects staged reloads and critical-feedback priority',
+    AUDIO_QA_CONTRACT.reloadStages.join(',') === '0.24,0.62,0.86'
+      && AUDIO_QA_CONTRACT.reloadPitchCeiling === 330
+      && SOUND_META.rifle.priority > SOUND_META.reloadStart.priority
+      && SOUND_META.hit.priority === AUDIO_QA_CONTRACT.criticalPriority);
   const ear = { x: 0, y: 2, z: 0, rx: 1, rz: 0 };
   const clearShot = spatialAudioMix('rifle', { x: 12, y: 2, z: 0 }, ear);
   const blockedShot = spatialAudioMix('rifle', { x: 12, y: 2, z: 0 }, ear, true);
@@ -746,6 +871,26 @@ function botRuleTests() {
   ok('opposing KOTH formations are interleaved instead of stacked',
     Math.hypot(bluePost.x - greenPosts[0].x, bluePost.z - greenPosts[0].z) > 1);
 
+  const openingLanes = [0, 1, 2].map(id => greenbeltOpeningRally({
+    mapIndex: 0, gameMode: 'tdm', time: 8, team: 'green', id,
+  }));
+  const mirroredOpening = greenbeltOpeningRally({ mapIndex: 0, gameMode: 'tdm',
+    time: 8, team: 'blue', tacticalRole: 'flank-left', id: 4 });
+  ok('Greenbelt opening rally is scoped to early TDM without credible enemy intel',
+    !!openingLanes[0] && greenbeltOpeningRally({ mapIndex: 1, gameMode: 'tdm', time: 8,
+      team: 'green', id: 0 }) === null
+      && greenbeltOpeningRally({ mapIndex: 0, gameMode: 'ctf', time: 8,
+        team: 'green', id: 0 }) === null
+      && greenbeltOpeningRally({ mapIndex: 0, gameMode: 'tdm', time: 8,
+        hasIntel: true, team: 'green', id: 0 }) === null);
+  ok('Greenbelt opening rally distributes stable north/center/south lanes symmetrically',
+    new Set(openingLanes.map(p => p.lane)).size === 3
+      && openingLanes.every(p => p.x < SX / 2)
+      && mirroredOpening.x > SX / 2 && mirroredOpening.z === openingLanes[0].z);
+  ok('Greenbelt opening rally releases patrol policy after its bounded window',
+    greenbeltOpeningRally({ mapIndex: 0, gameMode: 'tdm', time: 24,
+      team: 'green', id: 0 }) === null);
+
   ok('current-target hysteresis prevents trivial target churn',
     botTargetScore(20, 100, false, true) < botTargetScore(18, 100, false, false));
   ok('an enemy flag carrier can still override target stickiness',
@@ -782,6 +927,36 @@ function botRuleTests() {
       && botEyeArgs.length === 2 && botEyeArgs.every(out => out === botEye)
       && foeEyeArgs.length === 2 && foeEyeArgs.every(out => out === targetEye)
       && targetDir.x === 1 && targetDir.y === 0 && targetDir.z === 0);
+
+  const makeBehindBody = (x, z) => ({
+    pos: new THREE.Vector3(x, 0, z),
+    eye(out) { return out.set(x, 1.6, z); },
+  });
+  const behindFoe = { alive: true, health: 100, carrier: false, body: makeBehindBody(-15, 0) };
+  const distantFoe = { alive: true, health: 100, carrier: false, body: makeBehindBody(-50, 0) };
+  const hearingGame = (spot, foes, los) => ({
+    time: 100,
+    foesOf: () => foes,
+    losClear: los ?? (() => true),
+    huntSpot: () => spot,
+  });
+  const hearingBot = game => ({
+    team: 'green', carrier: false, target: null,
+    face: new THREE.Vector3(1, 0, 0),
+    _eye: new THREE.Vector3(), _targetEye: new THREE.Vector3(),
+    difficulty: { hearing: 38 },
+    body: { pos: new THREE.Vector3(0, 0, 0),
+      eye(out) { return out.set(0, 1.6, 0); } },
+    game,
+  });
+  const freshSound = { x: -15, z: 0, team: 'blue', t: 100, kind: 'sound' };
+  ok('hearing acquires a close foe behind the face cone on a fresh sound',
+    heardFoe(hearingBot(hearingGame(freshSound, [behindFoe]))) === behindFoe);
+  ok('hearing ignores stale sounds, sightings, walls, and distant foes',
+    heardFoe(hearingBot(hearingGame({ ...freshSound, t: 90 }, [behindFoe]))) === null
+      && heardFoe(hearingBot(hearingGame({ ...freshSound, kind: 'sight' }, [behindFoe]))) === null
+      && heardFoe(hearingBot(hearingGame(freshSound, [behindFoe], () => false))) === null
+      && heardFoe(hearingBot(hearingGame({ ...freshSound, x: -50 }, [distantFoe]))) === null);
 
   const sep = botSeparation({ x: 10, z: 10 }, [
     { id: 2, x: 11, z: 10, alive: true },
@@ -853,6 +1028,11 @@ function botRuleTests() {
       stagedSeconds: 12 }) === 'advance'
       && ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: 30,
         stagedSeconds: 0, escalation: true }) === 'advance');
+  ok('a staged runner with no support anywhere advances early instead of waiting out the full fallback',
+    ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: Infinity,
+      stagedSeconds: 6 }) === 'advance'
+      && ctfFinalApproachPolicy({ distanceToFlag: 12, nearestSupportDistance: Infinity,
+        stagedSeconds: 3 }) === 'stage');
   const stagedRoles = assignBotRoles('ctf', squad, {
     friendlyCarrier: { x: squad[4].x, z: squad[4].z }, friendlyCarrierId: squad[4].id,
     ownStand: { x: 10, z: 40 }, midfield: { x: 128, z: 128 },
@@ -1067,6 +1247,175 @@ function botRuleTests() {
       && Object.values(roles).every(Boolean);
   }
   ok('deterministic role harness covers every map and game mode', scenarioRolesValid);
+
+  // Retreat-while-firing latches on contact, not on settled aim: a wounded
+  // bot with a FRESH target (aimT ~ 0) must still fall back. The old trigger
+  // gated on the aim-settled vector, so a fresh ambush on a wounded bot
+  // never retreated at all.
+  const retreatWorld = new VoxelWorld(scene());
+  generateMap(retreatWorld, 12345, 0);
+  const retreatGame = {
+    time: 100, mapIndex: 0, seed: 12345, gameMode: 'tdm',
+    world: retreatWorld, scene: scene(), player: null,
+    hill: null, flags: null, navRevision: 0,
+    _botThinkSet: new Set(),
+    spawnPoint: () => ({ x: 60.5, y: retreatWorld.surface(60, 128) + 1, z: 128.5 }),
+    losClear: () => true,
+    teamOf: () => [],
+    huntSpot: () => null,
+  };
+  const freshFoe = (bot, dist) => ({ alive: true, team: 'blue',
+    body: { pos: new THREE.Vector3(bot.body.pos.x + dist, bot.body.pos.y, bot.body.pos.z),
+      half: { h: 1.8 } } });
+  const woundBot = (gunClass, health, foeDist) => {
+    const bot = new Bot(retreatGame, 'green', `retreattest${gunClass}`, 'normal');
+    bot.gunClass = gunClass;
+    bot.health = health;
+    bot.aimT = 0; // fresh contact: eyes just landed, aim unsettled
+    bot.retreatT = 0;
+    bot.retreatCd = 0;
+    bot.blocks = 0; // skip cover construction; the trigger is under test
+    bot.nades = 0;
+    bot.target = freshFoe(bot, foeDist);
+    bot.targetVisible = true;
+    bot.update(1 / 60);
+    return bot;
+  };
+  const woundedRifle = woundBot(0, 10, 20); // rifle retreatHealth 35
+  ok('a wounded bot retreats on fresh contact even before aim settles',
+    woundedRifle.retreatT > 0 && woundedRifle.retreatCd > 0);
+  woundedRifle.health = 100;
+  woundedRifle.retreatT = 0;
+  woundedRifle.retreatCd = 0;
+  woundedRifle.update(1 / 60);
+  ok('a healthy rifle holds its ground on fresh contact instead of retreating',
+    woundedRifle.retreatT <= 0);
+  const crowdedSniper = woundBot(5, 100, 10); // sniper closeRetreat 14
+  ok('a healthy sniper still disengages when a fresh target closes inside its comfort range',
+    crowdedSniper.retreatT > 0);
+
+  // Open-fire envelope: the rifle spots to 60 but only shoots to 45, and
+  // never plants outside its envelope — it keeps moving (closing) instead
+  // of crawling silent toward the objective while aimed at nothing shootable.
+  let gunneryShots = 0;
+  const gunneryGame = { ...retreatGame, fireHitscan: () => { gunneryShots++; } };
+  const gunneryBot = foeDist => {
+    const bot = new Bot(gunneryGame, 'green', 'gunnerytest', 'normal');
+    bot.gunClass = 0; // rifle: vision 60, fireRange 45
+    bot.health = 100;
+    bot.aimT = 10; // settled aim: any held fire is a policy choice, not reaction
+    bot.cooldown = 0;
+    bot.ammo = TOOLS[0].mag;
+    bot.blocks = 0;
+    bot.nades = 0;
+    bot.retreatCd = 9; // healthy anyway; keep the trigger out of the picture
+    bot.target = { alive: true, team: 'blue',
+      body: { pos: new THREE.Vector3(bot.body.pos.x + foeDist, bot.body.pos.y, bot.body.pos.z),
+        half: { h: 1.8 } } };
+    bot.targetVisible = true;
+    bot.face.set(1, 0, 0); // staring straight down +x at the foe
+    return bot;
+  };
+  gunneryShots = 0;
+  const farBot = gunneryBot(55);
+  farBot.update(1 / 60);
+  ok('a rifle holds fire beyond its open-fire envelope instead of plinking',
+    gunneryShots === 0 && farBot.ammo === TOOLS[0].mag);
+  gunneryShots = 0;
+  const nearBot = gunneryBot(40);
+  nearBot.update(1 / 60);
+  ok('a rifle engages inside its envelope with settled aim',
+    gunneryShots > 0 && nearBot.ammo < TOOLS[0].mag);
+  const advancingBot = gunneryBot(55);
+  for (let i = 0; i < 30; i++) advancingBot.update(1 / 60);
+  ok('a rifle beyond its envelope keeps moving instead of planting',
+    Math.hypot(advancingBot.body.vel.x, advancingBot.body.vel.z) > 2);
+
+  // Ears before eyes: a close gunshot behind the face cone is acquired as a
+  // heard (not visible) contact, turns the head, and never reaches the
+  // squad radio disguised as a 'sight' intel report.
+  const heardKinds = [];
+  let loudSpot = null;
+  let loudFoes = [];
+  const thinkGame = { ...retreatGame,
+    _botThinkSet: new Set(),
+    fireHitscan: () => {},
+    foesOf: () => loudFoes,
+    pingIntel: (pos, team, kind) => { heardKinds.push(kind); },
+    huntSpot: () => loudSpot,
+  };
+  const listener = new Bot(thinkGame, 'green', 'listenertest', 'normal');
+  thinkGame._botThinkSet.add(listener.id);
+  listener.gunClass = 0;
+  listener.health = 100;
+  listener.aimT = 5;
+  listener.blocks = 0;
+  listener.nades = 0;
+  listener.face.set(1, 0, 0);
+  const loudFoe = { alive: true, team: 'blue', health: 100, carrier: false,
+    // Behind the face cone but slightly off-axis: exact opposition would pin
+    // the presentation lerp (lerping (1,0,0) toward (-1,0,0) renormalizes
+    // back to itself), a measure-zero degeneracy real positions never hit.
+    body: { pos: new THREE.Vector3(listener.body.pos.x - 15, listener.body.pos.y, listener.body.pos.z + 2),
+      half: { h: 1.8 },
+      eye(out) { return out.set(this.pos.x, this.pos.y + 1.6, this.pos.z); } } };
+  loudSpot = { x: loudFoe.body.pos.x, z: loudFoe.body.pos.z, team: 'blue', t: thinkGame.time, kind: 'sound' };
+  listener.target = null;
+  listener.targetVisible = false;
+  // Sneak the foe into the think path: vision must NOT see it (it starts
+  // behind the face cone), so whatever acquires it is hearing.
+  loudFoes = [loudFoe];
+  listener.update(1 / 60);
+  ok('a close gunshot behind the face cone is acquired as heard contact',
+    listener.target === loudFoe && listener.targetVisible === false
+      && heardKinds.length === 0 && listener.aimT < 1);
+  for (let i = 0; i < 120; i++) listener.update(1 / 60);
+  ok('heard contact turns the head without ever faking a radio sighting',
+    listener.target === loudFoe && listener.face.x < -0.3 && heardKinds.length === 0);
+
+  // Staging dug-in: a lone attacker holding outside the enemy flag throws a
+  // knee wall toward the stand instead of loitering in the open. A bot far
+  // from any flag (ordinary advance, nothing staged) builds nothing.
+  const ctfGame = { ...retreatGame, gameMode: 'ctf',
+    bots: [],
+    teamOf: () => [],
+    huntSpot: () => null,
+    tryBuild: () => true,
+    enemyOf: team => (team === 'green' ? 'blue' : 'green'),
+    standOf: team => (team === 'blue'
+      ? new THREE.Vector3(220, 20, 128) : new THREE.Vector3(36, 20, 128)),
+    flags: { blue: { state: 'home', home: new THREE.Vector3(220, 20, 128) } },
+    spawnPoint: () => ({ x: 200.5, y: retreatGame.world.surface(200, 128) + 1, z: 128.5 }),
+  };
+  const stager = new Bot(ctfGame, 'green', 'stagertest', 'normal');
+  stager.gunClass = 0;
+  stager.health = 100;
+  stager.nades = 0;
+  stager.ctfStageAt = ctfGame.time - 3; // already waiting, support nowhere
+  // A clean staging lane: foot-level obstructions toward the stand read as
+  // existing cover and would gate the build on mapgen luck. Clear the probe
+  // reaches (mirroring hasCover) so the decision under test is deterministic.
+  {
+    const dx = 220 - stager.body.pos.x, dz = 128 - stager.body.pos.z;
+    const len = Math.hypot(dx, dz);
+    const fy = Math.floor(stager.body.pos.y);
+    for (const reach of [1.2, 2.2, 3.2]) {
+      ctfGame.world.set(Math.floor(stager.body.pos.x + dx / len * reach), fy,
+        Math.floor(stager.body.pos.z + dz / len * reach), 0);
+    }
+  }
+  for (let i = 0; i < 60 && stager.coverT <= 0; i++) stager.update(1 / 60);
+  ok('a staged attacker builds cover toward the enemy stand while waiting',
+    stager.coverT > 0 && stager.buildT > 0);
+  const passerby = new Bot(ctfGame, 'green', 'passerbytest', 'normal');
+  passerby.gunClass = 0;
+  passerby.health = 100;
+  passerby.nades = 0;
+  passerby.body.pos.set(60.5, retreatGame.world.surface(60, 128) + 1, 128.5);
+  passerby.lastPos.copy(passerby.body.pos);
+  for (let i = 0; i < 60; i++) passerby.update(1 / 60);
+  ok('an advancing bot far from the flag does not throw staging cover',
+    passerby.coverT <= 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,10 +1803,12 @@ function engagementFoundationTests() {
     '?features=FIRSTMINUTE,deathRecap&features=publicChat,notAFeature');
   ok('completed engagement features default on while experiments remain opt-in',
     DEFAULT_ENGAGEMENT_FEATURES.every(name => defaults[name] === true)
-      && !defaults.publicChat
+      && !defaults.publicChat && !defaults.privateContent
       && !('selectedGoals' in defaults)
-      && selected.firstMinute && selected.deathRecap && selected.publicChat
+      && selected.firstMinute && selected.deathRecap && selected.publicChat && !selected.privateContent
       && !('notAFeature' in selected));
+  ok('private content is an explicit URL feature flag',
+    parseEngagementFeatures('?features=privateContent').privateContent);
   ok('retired field-goal events are rejected at the protocol boundary',
     !validServerMessage({ t: 'e', k: 'goal', metric: 'fieldwork', amount: 1,
       kind: 'built', voxels: 1 }));
@@ -1543,7 +1894,9 @@ function firstMinuteTests() {
       && firstMinuteObjective('koth').includes('HILL'));
   ok('signature maps teach their authored voxel decision in one line',
     firstMinuteTerrainCue(0).includes('MIDFIELD BELT')
+      && firstMinuteTerrainCue(1).includes('SEAWALL')
       && firstMinuteTerrainCue(2).includes('BROKEN BRIDGE')
+      && firstMinuteTerrainCue(3).includes('ARCH')
       && firstMinuteTerrainCue(4).includes('NORTH/SOUTH SPANS')
       && firstMinuteTerrainCue(5).includes('BASALT GATE'));
 
@@ -1554,7 +1907,7 @@ function firstMinuteTests() {
   guide.mark('shoot'); // natural play can satisfy steps before their cue appears
   let view = guide.update({ matchSecond: 101, x: 11, z: 10 });
   ok('sub-threshold movement keeps the first actionable cue visible',
-    view.visible && view.prompt === 'MOVE TO CONTACT' && !view.progress.move
+    view.visible && view.prompt === 'MOVE AND FIRE' && !view.progress.move
       && view.progress.fire);
   view = guide.update({ matchSecond: 102, x: 13, z: 10 });
   ok('completed actions are skipped rather than forcing a rigid tutorial order',
@@ -1562,9 +1915,8 @@ function firstMinuteTests() {
   guide.mark('place');
   view = guide.update({ matchSecond: 103, x: 13, z: 10 });
   ok('either digging or building satisfies the signature voxel interaction',
-    view.progress.terrain && view.prompt === 'MARK FOR YOUR SQUAD');
+    view.progress.terrain && view.prompt === 'FIELD READY' && view.complete);
   ok('unknown inputs cannot advance the guide', !guide.mark('open-menu'));
-  guide.mark('ping');
   view = guide.update({ matchSecond: 104, x: 13, z: 10 });
   ok('all fundamentals produce a short field-ready confirmation',
     view.complete && view.prompt === 'FIELD READY');
@@ -2724,6 +3076,14 @@ function productionReadinessTests() {
   ok('telemetry buckets elapsed time and passes the independent edge schema',
     envelope.events[1].time === 1 && envelope.events[1].room === undefined
       && validDiagnosticsEnvelope(envelope));
+  const funnelEnvelope = telemetryEnvelope('p14', [{ type: 'funnel', step: 'first_dig',
+    seconds: 142, player: 'Ada', room: 'secret', position: [1, 2, 3], text: 'nope' }]);
+  ok('funnel telemetry drops private fields and exactly matches the edge schema',
+    funnelEnvelope.events[0].step === 'first_dig' && funnelEnvelope.events[0].time === 2
+      && Object.keys(funnelEnvelope.events[0]).join(',') === 'type,step,time'
+      && validDiagnosticsEnvelope(funnelEnvelope)
+      && !validDiagnosticsEnvelope({ ...funnelEnvelope,
+        events: [{ ...funnelEnvelope.events[0], session: 'no' }] }));
   const transport = [];
   const telemetry = new ProductionTelemetry({ build: 'p14', sample: true,
     fetcher: async (...args) => { transport.push(args); return { ok: true }; } });
@@ -2731,6 +3091,27 @@ function productionReadinessTests() {
   ok('a bounded payload can flush without adding a session or player identifier',
     telemetry.flush({ beacon: null }) && transport.length === 1
       && !transport[0][1].body.includes('session') && !transport[0][1].body.includes('player'));
+  const batches = [];
+  const batching = new ProductionTelemetry({ build: 'p14', sample: true,
+    fetcher: async (...args) => { batches.push(args); return { ok: true }; } });
+  for (const step of ['opened', 'play_selected', 'joined', 'playable_match',
+    'first_spawn', 'first_shoot', 'first_dig', 'first_death'])
+    batching.record('funnel', { step, seconds: 12 });
+  ok('funnel milestones auto-flush before the fixed event ring can fill',
+    batches.length === 1 && batching.events.length === 0
+      && JSON.parse(batches[0][1].body).events.length === 8);
+  const funnelCalls = [];
+  const funnelGame = Object.assign(Object.create(Game.prototype), {
+    _funnelSeen: new Set(), matchElapsed: 42,
+    fieldTelemetry: { record: (type, data) => { funnelCalls.push([type, data]); return true; } },
+  });
+  funnelGame.funnel('first_spawn');
+  funnelGame.funnel('first_spawn');
+  funnelGame._funnelSeen.clear(); // rebuild starts a new anonymous round
+  funnelGame.funnel('first_spawn');
+  ok('game funnel milestones are exactly once per round and reset for the next',
+    funnelCalls.length === 2 && funnelCalls.every(([type, data]) =>
+      type === 'funnel' && data.step === 'first_spawn' && data.seconds === 42));
 
   const base = team => `base:${team}`;
   ok('the extracted spawn policy preserves preference, mode, and safe fallback order',

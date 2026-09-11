@@ -1,7 +1,8 @@
 # Signature voxel mechanics plan
 
-Status: GREENBELT, PINEFALL, CROWN, and CALDERA are implemented and active by
-default. BEACHHEAD and DUNES remain planned follow-up mechanics.
+Status: all six mechanics are implemented and active by default. BEACHHEAD's
+fortified line and DUNES' arch courts use ordinary destructible voxels; their
+fallback lane anchors are the only signature-specific protected cells.
 
 ## Goal
 
@@ -26,7 +27,7 @@ The obvious play is to cut a doorway with the spade or grenade, then reuse the r
 
 Guardrails: never span the entire map edge to edge, keep both outer flanks open, keep belt fragments outside protected base zones, and limit vertical thickness so tunneling is useful without becoming a long mining chore.
 
-## BEACHHEAD — crack the fortified line (planned)
+## BEACHHEAD — crack the fortified line (implemented)
 
 Turn the existing bluff pillboxes into one readable defensive line with three strongpoints and two thin connecting seawall sections. The beach team can take the exposed trench route, attack a pillbox door, or blast a short breach through a visibly damaged wall section. Defenders can spend blocks to close a hole, but cannot restore protected foundation blocks.
 
@@ -42,7 +43,7 @@ Dense tree clusters should frame these crossings. Cutting trunks opens sightline
 
 Guardrails: the ford is protected and always walkable, water exits remain mantle-safe for humans and bots, bridge anchors are protected while the span is editable, and canopy collapse cannot bury a spawn or the ford.
 
-## DUNES — bring down the ruins (planned)
+## DUNES — bring down the ruins (implemented)
 
 Expand the paired midfield ruins into two tall, skeletal arch courts beside the rotating hill approaches. Their exposed support columns are ordinary stone. Removing a support triggers the existing structural-collapse system, dropping a whole firing perch and opening a direct ground lane.
 
@@ -66,11 +67,11 @@ The signature moment is seeing daylight through a new hole in the crater wall, t
 
 Guardrails: saddles remain protected fallback routes, fault depth is short enough for one player to open quickly, rim breaches cannot produce lethal unavoidable drops, objective knolls remain protected, and bots understand both the original saddles and new holes.
 
-## Recommended build order
+## Recommended validation order
 
-1. Validate first-use timing, route choice, remesh spikes, and whether teams can create a stalemate in GREENBELT, PINEFALL, CROWN, and CALDERA.
-2. Ship BEACHHEAD after the water exits, pillbox breaches, and fortified-line balance pass two-browser playtests.
-3. Ship DUNES after worst-case collapse profiling.
+1. Validate first-use timing, route choice, remesh spikes, and whether teams can create a stalemate across all six maps.
+2. Sign off BEACHHEAD after water exits, pillbox breaches, and fortified-line balance pass two-browser playtests.
+3. Sign off DUNES after worst-case collapse profiling and mirrored-route playtests.
 
 ## Ship gates
 

@@ -20,9 +20,9 @@ export function firstMinuteObjective(mode) {
 export function firstMinuteTerrainCue(mapIndex) {
   return [
     'CUT A NEW DOOR THROUGH THE MIDFIELD BELT',
-    'DIG COVER OR OPEN A SHORTER APPROACH',
+    'BREACH THE DAMAGED SEAWALL OR USE THE TRENCH',
     'FINISH THE BROKEN BRIDGE OR USE THE STONE FORD',
-    'DROP COVER OR BUILD A NEW FIRING STEP',
+    'DROP AN ARCH OR BUILD A NEW FIRING STEP',
     'CUT OR REBUILD THE NORTH/SOUTH SPANS',
     'OPEN A SHORT PATH THROUGH A BASALT GATE',
   ][mapIndex] ?? 'DIG A ROUTE OR BUILD NEW COVER';
@@ -83,29 +83,24 @@ export class FirstMinuteGuide {
       move: this.actions.has('move'),
       fire: this.actions.has('shoot'),
       terrain: this.actions.has('dig') || this.actions.has('place'),
-      ping: this.actions.has('ping'),
+      // Communication remains a useful optional shortcut, never a gate.
     };
-    const complete = Object.values(progress).every(Boolean);
+    const complete = progress.move && progress.fire && progress.terrain;
     if (complete && this.completedAt == null) this.completedAt = elapsed;
     if (complete && elapsed - this.completedAt >= 4) {
       this.active = false;
       return { visible: false };
     }
 
-    let prompt = 'MOVE TO CONTACT';
-    let hint = 'WASD · FOLLOW THE GOLD OBJECTIVE ARROW';
-    if (progress.move && !progress.fire) {
-      prompt = 'TEST YOUR WEAPON';
-      hint = 'LEFT MOUSE FIRE · RIGHT MOUSE AIM';
-    } else if (progress.move && progress.fire && !progress.terrain) {
+    let prompt = 'MOVE AND FIRE';
+    let hint = !progress.move ? 'WASD · FOLLOW THE GOLD ARROW'
+      : !progress.fire ? 'LEFT MOUSE · RIGHT MOUSE AIM' : 'PUSH WITH YOUR SQUAD';
+    if (progress.move && progress.fire && !progress.terrain) {
       prompt = 'RESHAPE THE FIGHT';
       hint = firstMinuteTerrainCue(this.mapIndex);
-    } else if (progress.move && progress.fire && progress.terrain && !progress.ping) {
-      prompt = 'MARK FOR YOUR SQUAD';
-      hint = 'G PLACES A TEAM PING';
     } else if (complete) {
       prompt = 'FIELD READY';
-      hint = 'YOU KNOW THE TOOLS · MAKE THE PLAY';
+      hint = 'TERRAIN IS A TOOL · MAKE THE PLAY';
     }
 
     return {

@@ -3,6 +3,7 @@
 // world.data, re-anchors BASE, and meshes everything via world.buildAll().
 import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS, setVoxelLight } from './world.js';
 import { teamHex } from './settings.js';
+import { contentAvailable } from './content-gating.js';
 
 // Deterministic value noise — smooth, seedable, dependency-free.
 function makeNoise(seed) {
@@ -81,9 +82,9 @@ export const MAPS = [
   { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [
-      { x: SX / 2, z: SZ / 2, r: 8, label: 'KNOLL' },
-      { x: SX / 2, z: SZ / 2 - 28, r: 8, label: 'NORTH BOWL' },
-      { x: SX / 2, z: SZ / 2 + 28, r: 8, label: 'SOUTH BOWL' },
+      { x: SX / 2, z: SZ / 2, r: 10, label: 'KNOLL' },
+      { x: SX / 2, z: SZ / 2 - 28, r: 10, label: 'NORTH BOWL' },
+      { x: SX / 2, z: SZ / 2 + 28, r: 10, label: 'SOUTH BOWL' },
     ],
     atmosphere: { sky: ['#40334f', '#76556a', '#c38a73'], fog: 0xa47770, cloud: 0xc7b1ae, water: 0x595866,
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
@@ -134,8 +135,12 @@ export const BASE = {
 export const SIGNATURE_MECHANICS = Object.freeze({
   greenbelt: Object.freeze({ id: 'greenbelt', mapIndex: 0,
     fallbacks: Object.freeze(['north-flank', 'south-flank']) }),
+  beachhead: Object.freeze({ id: 'beachhead', mapIndex: 1,
+    fallbacks: Object.freeze(['covered-trench', 'north-ramp', 'south-ramp']) }),
   pinefall: Object.freeze({ id: 'pinefall', mapIndex: 2,
     fallbacks: Object.freeze(['ford', 'shoulder']) }),
+  dunes: Object.freeze({ id: 'dunes', mapIndex: 3,
+    fallbacks: Object.freeze(['north-wash', 'south-wash']) }),
   crown: Object.freeze({ id: 'crown', mapIndex: 4,
     fallbacks: Object.freeze(['east-causeway', 'west-causeway']) }),
   caldera: Object.freeze({ id: 'caldera', mapIndex: 5,
@@ -152,6 +157,14 @@ export function signatureMechanic(mapIndex = 0) {
 // other anchors sit on fixed symmetric map landmarks.
 export function signatureProtectedAreas(mapIndex = 0, seed = 1979) {
   const cx = SX / 2, cz = SZ / 2;
+  if (mapIndex === 1) return [
+    { x: 112, y: SEA + 8, z: cz - 42, r: 3, below: 3, above: 3, kind: 'north-ramp' },
+    { x: 112, y: SEA + 8, z: cz + 42, r: 3, below: 3, above: 3, kind: 'south-ramp' },
+  ];
+  if (mapIndex === 3) return [
+    { x: cx - 28, y: SEA + 7, z: cz - 48, r: 3, below: 3, above: 3, kind: 'north-wash' },
+    { x: cx + 28, y: SEA + 7, z: cz + 48, r: 3, below: 3, above: 3, kind: 'south-wash' },
+  ];
   if (mapIndex === 2) {
     const fordZ = pinefallRavineCenter(seed, 128) + 8;
     return [
@@ -510,6 +523,18 @@ function genBeach(world, seed) {
     pillbox(150 + Math.floor(noise(pz, 11) * 6), pz, -2);
   pillbox(72, SZ / 2, 2);
 
+  // One continuous but deliberately damaged fortified line makes the three
+  // pillboxes read as a shared defense. Thin sections are only two voxels
+  // wide: a spade or grenade opens them, while the offset gaps retain the
+  // covered trench and both flank ramps as ordinary always-usable routes.
+  for (const [from, to] of [[SZ / 2 - 43, SZ / 2 - 7], [SZ / 2 + 7, SZ / 2 + 43]])
+    for (let z = from; z <= to; z++) {
+      if ((z - from) % 15 < 4 || Math.abs(z - trenchZ) < 5) continue;
+      const x = 142 + Math.floor(noise(z, 19) * 4), y = terrainY(height, x, z);
+      put(world, x, y + 1, z, BLOCK.STONE);
+      if ((z - from) % 8 !== 0) put(world, x, y + 2, z, BLOCK.STONE);
+    }
+
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
 }
@@ -804,6 +829,46 @@ function genDesert(world, seed) {
   };
   ruinGate(SX / 2 - 12, SZ / 2 - 14);
   ruinGate(SX / 2 + 11, SZ / 2 - 14);
+  // Paired skeletal arch courts frame the rotating hill approaches. Their
+  // narrow, exposed stone legs are normal voxels: removing one lets the
+  // existing unsupported-structure pass turn the high perch into rubble.
+  // The courts sit outside the pad and the broad dry washes, so neither a
+  // collapse nor a rebuild can close the objective's permanent routes.
+  const archCourt = (px, pz) => {
+    const footingY = (x, z) => {
+      let y = 0;
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dz = -1; dz <= 1; dz++)
+          y = Math.max(y, terrainY(height, x + dx, z + dz));
+      return y;
+    };
+    for (const dz of [-3, 3]) {
+      for (const side of [-5, 5]) {
+        const x = px + side, z = pz + dz, y = footingY(x, z);
+        for (let dy = 1; dy <= 8; dy++) put(world, x, y + dy, z, BLOCK.STONE);
+        // A high brace strengthens the silhouette without touching terrain;
+        // the exposed bottom cell remains the half-arch's only ground path.
+        const inward = side < 0 ? 1 : -1;
+        put(world, x + inward, y + 4, z, BLOCK.STONE);
+        // A one-voxel crown crack separates the two cantilevers. That keeps
+        // the ruin reading as an arch while each leg remains independently
+        // severable by one bottom-cell breach.
+        for (let step = 0; step < 5; step++)
+          put(world, x + inward * step, y + 8, z, BLOCK.STONE);
+        put(world, x + inward * 2, y + 9, z, BLOCK.STONE);
+      }
+    }
+    // Broken cross pieces sell the court silhouette without joining its two
+    // arch frames or creating a solid roof.
+    for (const side of [-5, 5])
+      for (const dz of [-2, -1, 1, 2]) {
+        const frameZ = pz + (dz < 0 ? -3 : 3);
+        put(world, px + side, footingY(px + side, frameZ) + 6,
+          pz + dz, BLOCK.STONE);
+      }
+  };
+  archCourt(101, CZ - 20);
+  archCourt(SX - 1 - 101, CZ - 20);
   // Cacti, mirrored like everything else.
   for (let i = 0; i < 21; i++) {
     const x = 6 + Math.floor(rnd() * (CX - 12)), z = 6 + Math.floor(rnd() * (SZ - 12));
@@ -953,11 +1018,19 @@ function genCaldera(world, seed) {
       else if (d < 64) h = rimH;                                       // the rim
       else if (d < 78) h = rimH + (plain - rimH) * ss((d - 64) / 14);  // outer falloff
       else h = plain;
-      // Saddle gaps facing the bases (east/west): passable at a climb.
-      if (Math.abs(z - CZ) < 8 && d > 36 && d < 80) {
-        const saddle = SEA + 9 + 2 * noise(x * 0.08, z * 0.08);
-        const b = clamp01((8 - Math.abs(z - CZ)) / 4);
-        h = h * (1 - b) + Math.min(h, saddle) * b;
+      // Three mirrored, base-facing ramp cuts connect the rotating points to
+      // both sides of the crater. They only soften a narrow slice of the
+      // inner rim: the volcanic bowl and its editable fault gates remain.
+      // The central cut is deliberately broader, preserving the saddle as
+      // Caldera's most legible direct route rather than a one-body choke.
+      const routeZ = [CZ - 28, CZ, CZ + 28];
+      for (const rz of routeZ) {
+        const halfWidth = rz === CZ ? 11 : 7;
+        const offset = Math.abs(z - rz);
+        if (offset >= halfWidth || d <= 30 || d >= 72) continue;
+        const ramp = SEA + 5 + Math.min(9, Math.max(0, d - 30) * 0.22);
+        const blend = clamp01((halfWidth - offset) / 3);
+        h = h * (1 - blend) + Math.min(h, ramp) * blend;
       }
       // North/south fault gates are shallow cuts through the rim, not solid
       // mountain walls. Their ordinary stone fins below are quick to breach;
@@ -965,11 +1038,23 @@ function genCaldera(world, seed) {
       const fault = (Math.abs(z - (CZ - 64)) <= 1 || Math.abs(z - (CZ + 64)) <= 1)
         && Math.abs(x - CX) <= 24;
       if (fault) h = Math.min(h, SEA + 10);
-      // The knoll: a flat rocky rise at the very bottom — the hill.
-      if (d < 7) h = SEA + 10;
-      else if (d < 14) h = (SEA + 10) + (h - (SEA + 10)) * ss((d - 7) / 7);
       height[at(x, z)] = Math.min(SY - 8, h);
     }
+
+  // Each rotating hill receives a level, walkable footprint plus a gentle
+  // apron. The center remains a raised knoll; the north/south bowls stay low
+  // ground, so relocating the point changes the fight without making bodies
+  // climb a random radial wall just to stand together.
+  for (const { z: hz } of MAPS[5].hills) {
+    const padY = hz === CZ ? SEA + 10 : SEA + 4;
+    for (let z = Math.floor(hz - 15); z <= Math.ceil(hz + 15); z++)
+      for (let x = CX - 15; x <= CX + 15; x++) {
+        const d = Math.hypot(x - CX, z - hz);
+        if (d <= 11) height[at(x, z)] = padY;
+        else if (d <= 15) height[at(x, z)] = padY
+          + (height[at(x, z)] - padY) * ss((d - 11) / 4);
+      }
+  }
 
   flattenBases(height);
   applyArenaRim(height, mapEnvelope(5), SEA + 12, SEA + 28);
@@ -986,11 +1071,13 @@ function genCaldera(world, seed) {
 
   // Basalt formations scattered across the bowl—single columns, paired
   // fins, and broken clusters rather than fourteen copies of one pillar.
-  // They remain chewable cover and stay outside the central objective.
+  // They remain chewable cover, but cannot obstruct a hill footprint or its
+  // immediate apron after a rotation.
   const rnd = mulberry32(seed ^ 0xca1de);
   for (let i = 0; i < 14; i++) {
     const a = rnd() * Math.PI * 2, d = 15 + rnd() * 20;
     const px = Math.round(CX + Math.cos(a) * d), pz = Math.round(CZ + Math.sin(a) * d);
+    if (MAPS[5].hills.some(h => Math.hypot(px - h.x, pz - h.z) < h.r + 5)) continue;
     const py = Math.floor(height[at(px, pz)]);
     const ph = 3 + Math.floor(rnd() * 4);
     for (let y = py + 1; y <= py + ph; y++) put(world, px, y, pz, BLOCK.STONE);
@@ -1011,6 +1098,16 @@ function genCaldera(world, seed) {
       put(world, px, py + ph, pz + 1, BLOCK.STONE);
     }
   }
+
+  // Purposeful one-high cover just beyond the protected aprons gives arriving
+  // squads a choice of shoulders without blocking the broad ramp cuts.
+  for (const h of MAPS[5].hills)
+    for (const [dx, dz] of [[-12, 12], [12, -12]]) {
+      const px = h.x + dx, pz = h.z + dz;
+      const py = Math.floor(height[at(px, pz)]);
+      put(world, px, py + 1, pz, BLOCK.STONE);
+      put(world, px, py + 1, pz + 1, BLOCK.STONE);
+    }
 
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
@@ -1064,6 +1161,7 @@ export function generateMap(world, seed = 1979, mapIndex = 0, { buildMeshes = tr
 }
 
 // Map indices supporting a mode, in rotation order.
-export function mapsForMode(mode) {
-  return MAPS.map((m, i) => i).filter(i => MAPS[i].modes.includes(mode));
+export function mapsForMode(mode, options = {}) {
+  return MAPS.map((m, i) => i).filter((i) => MAPS[i].modes.includes(mode)
+    && contentAvailable(mode, i, options));
 }

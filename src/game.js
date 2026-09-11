@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
 import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere,
   clampToEnvelope, envelopeContains, mapEnvelope, signatureProtectedAreas } from './mapgen.js';
+import { publicContentAvailable } from './content-gating.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
@@ -373,6 +374,9 @@ export class Game {
     this.mode = opts.mode ?? 'solo';       // solo | host | client
     this.net = opts.net ?? null;
     this.engagement = opts.engagement ?? null;
+    this.fieldTelemetry = opts.fieldTelemetry ?? null;
+    this._funnelSeen = new Set();
+    this._completedFunnelMatch = false;
     this.engagementFeatures = opts.engagementFeatures ?? {};
     this.firstMinuteGuide = this.engagementFeatures.firstMinute
       ? new FirstMinuteGuide() : null;
@@ -485,7 +489,9 @@ export class Game {
 
     if (this.mode !== 'client') this._spawnBots();
 
-    this.gameMode = 'ctf';             // 'ctf' | 'tdm' | 'koth' — set before rebuild()
+    this.gameMode = 'tdm';             // Fresh installs begin in the flagship mode.
+    this.publicRoom = false;
+    this.privateContent = !!this.engagementFeatures.privateContent;
     this.matchElapsed = 0;
     this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
     this.overtime = false;
@@ -626,6 +632,7 @@ export class Game {
 
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
+    this._funnelSeen.clear();
     this._entityFrameActive = false;
     this.voxelStory?.reset();
     hud.deathRecap(null);
@@ -766,9 +773,10 @@ export class Game {
     if (r.specialties && Object.prototype.hasOwnProperty.call(r.specialties, specialty))
       r.specialties[specialty] += Math.max(0, Math.floor(Number(specialtyPoints) || earned));
     if (earned || objective || assists) this._noteAction(e);
-    if (e === this.player) this.engagement?.contribution({
-      points: earned, assists, objective,
-    });
+    if (e === this.player) {
+      this.engagement?.contribution({ points: earned, assists, objective });
+      if (objective > 0) this.funnel('objective');
+    }
     // All authoritative combatants earn the exact same contribution values as
     // scoreboard. Kills still matter, but assists and playing the objective
     // now advance the meter too. Bots spend their host-side meter autonomously.
@@ -1291,6 +1299,21 @@ export class Game {
           const radius = depth / Math.max(0.5, Math.cos(offset));
           raw.push([hill.x + Math.cos(angle) * radius,
             hill.z + Math.sin(angle) * radius]);
+        }
+      }
+      if (this.mapIndex === 5 && this.hill.owner
+          && this.hill.owner !== team) {
+        // Caldera's bowl can leave a wiped, losing side with no qualifying
+        // quiet anchor at all, which otherwise sends it back to the base
+        // beyond the rim. These are still ordinary home-facing, off-point
+        // candidates and pass the shared LOS/enemy/recent-death scorer below;
+        // they merely seed a safe recovery wave at the foot of a ramp.
+        const hill = this.hill.pos;
+        const homeAngle = Math.atan2(b.z - hill.z, b.x - hill.x);
+        for (const offset of [-0.28, 0, 0.28]) {
+          const depth = 38 + Math.abs(offset) * 8;
+          raw.push([hill.x + Math.cos(homeAngle + offset) * depth,
+            hill.z + Math.sin(homeAngle + offset) * depth]);
         }
       }
     }
@@ -1864,9 +1887,18 @@ export class Game {
     };
   }
 
+  // Match-local and exactly once: telemetry has no identifiers or arbitrary
+  // data; its strict sanitizer is the only route to the production endpoint.
+  funnel(step) {
+    if (this._funnelSeen.has(step)) return false;
+    this._funnelSeen.add(step);
+    return this.fieldTelemetry?.record('funnel', { step, seconds: this.matchElapsed }) ?? false;
+  }
+
   beginFirstMinute() {
     const p = this.player?.body?.pos;
     if (!p) return false;
+    this.funnel('first_spawn');
     return this.firstMinuteGuide?.start({
       mode: this.gameMode, mapIndex: this.mapIndex,
       matchSecond: this.matchElapsed, x: p.x, z: p.z,
@@ -1877,6 +1909,8 @@ export class Game {
     if (p !== this.player) return;
     this._noteAction(p);
     this.engagement?.action(action, this.matchElapsed);
+    const step = { shoot: 'first_shoot', dig: 'first_dig', place: 'first_place', ping: 'first_ping' }[action];
+    if (step) this.funnel(step);
     this.firstMinuteGuide?.mark(action);
   }
 
@@ -2073,7 +2107,10 @@ export class Game {
     if (deathCause === 'collapse') this.voxelStory?.recordCollapseKill();
     const engagementCause = deathCause
       ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
-    if (victim === this.player) this.engagement?.combat('death', engagementCause);
+    if (victim === this.player) {
+      this.engagement?.combat('death', engagementCause);
+      this.funnel('first_death');
+    }
     if (killer === this.player && killer !== victim)
       this.engagement?.combat('kill', engagementCause);
     if (victim === this.player)
@@ -3005,6 +3042,11 @@ export class Game {
       scoreMargin: Math.abs((this.captures.green ?? 0) - (this.captures.blue ?? 0)),
       points: report.local.score, objective: report.local.objective, assists: report.local.a,
     });
+    this.funnel('match_complete');
+    // A completed round is a natural delivery boundary; do not make product
+    // diagnostics depend on a later pagehide or on filling a whole batch.
+    this.fieldTelemetry?.flush();
+    this._completedFunnelMatch = true;
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
     $('end').dataset.outcome = won ? 'victory' : 'defeat';
     $('end').dataset.map = MAPS[this.mapIndex]?.key ?? 'island';
@@ -3044,11 +3086,26 @@ export class Game {
 
   // Next map in the rotation for the current mode.
   _nextMap() {
-    const pool = mapsForMode(this.gameMode);
+    const pool = mapsForMode(this.gameMode, {
+      publicOnly: this.publicRoom,
+      privateContent: this.privateContent,
+    });
+    // Legacy public CTF has no public rotation pool. _end reads the next map
+    // for its intermission copy before _rotate can normalize the mode.
+    if (!pool.length && this.publicRoom)
+      return mapsForMode('tdm', { publicOnly: true })[0];
     return pool[(pool.indexOf(this.mapIndex) + 1) % pool.length];
   }
 
+  publicContentAvailable() {
+    return !this.publicRoom || publicContentAvailable(this.gameMode, this.mapIndex);
+  }
+
   _rotate() {
+    // Let an already-running legacy public room finish, then bring it back
+    // onto the public catalogue instead of carrying CTF into another round.
+    if (this.publicRoom && !publicContentAvailable(this.gameMode, this.mapIndex))
+      this.gameMode = 'tdm';
     const map = this._nextMap();
     const seed = Math.floor(Math.random() * 1e9);
     this._restartRound(map, seed);
@@ -3335,6 +3392,12 @@ export class Game {
     }
     if (!validClientMessage(d)) {
       this._securityViolation(this.remote.get(id), 'malformed', 2);
+      return;
+    }
+    // A public slot from before the catalogue gate can remain registered for
+    // a while. It must neither advertise nor admit a late public player.
+    if (!this.publicContentAvailable() && (d.t === 'ping' || d.t === 'hi')) {
+      this.net.sendTo(id, { t: 'full' });
       return;
     }
     // Matchmaking probe: answer on the same channel, before any join logic.
@@ -4389,6 +4452,10 @@ export class Game {
 
   clientOnData(d) {
     if (!validServerMessage(d)) return;
+    // Public-room identity comes from the deterministic PUB code, not a host
+    // claim. Reject a stale/racing welcome before touching client state.
+    if (d.t === 'w' && this.publicRoom && !publicContentAvailable(d.mode, d.map))
+      return this.onPublicContentRejected?.(d);
     if (hostHeartbeatMessage(d)) {
       this.lastRecv = performance.now(); // welcome/snapshots are the host heartbeat
       this._unstableShown = false; // the link's talking again — clear the warning flag

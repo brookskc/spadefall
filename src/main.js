@@ -1,10 +1,11 @@
 // main.js — boot, renderer, sky, lobby flow (solo / host / join), main loop.
 import * as THREE from 'three';
 import { Game } from './game.js';
-import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume, setBusVolume, setCaptionSink, sfx } from './audio.js';
+import { initAudio, isAudioMuted, setAudioMuted, setMasterVolume as applyMasterVolume, setBusVolume, setCaptionSink, sfx, AUDIO_QA_CONTRACT } from './audio.js';
 import { captionFromMix } from './captions.js';
 import { SX, SZ, skyGradient } from './world.js';
-import { MAPS } from './mapgen.js';
+import { MAPS, mapsForMode } from './mapgen.js';
+import { contentAvailable, publicContentAvailable } from './content-gating.js';
 import { Net, makeCode, primeIce, PUBLIC_PAGES, PUBLIC_SLOTS, resumeToken, slotCode } from './net.js';
 import { stats, GUN_COLORS } from './stats.js';
 import { BASE_FOV } from './player.js';
@@ -36,10 +37,21 @@ for (const el of document.querySelectorAll('.opt, .plink, .play')) {
 }
 const params = new URLSearchParams(location.search);
 const engagementFeatures = parseEngagementFeatures(location.search);
+// Browser automation keeps its existing explicit CTF fixtures, but ordinary
+// private hosting needs the named feature flag to expose unreleased content.
+const privateContent = engagementFeatures.privateContent || params.has('auto');
 if (engagementFeatures.publicChat)
   document.documentElement.dataset.publicChat = 'on';
 const engagement = new EngagementTracker();
 const fieldTelemetry = new ProductionTelemetry({ build: `p${PROTOCOL_VERSION}` });
+// Page-level choices are sampled once; match-local first-use events are owned
+// by Game. A mode click followed by DEPLOY therefore cannot inflate intent.
+const pageFunnel = new Set();
+const funnel = step => {
+  if (pageFunnel.has(step)) return false;
+  pageFunnel.add(step);
+  return fieldTelemetry.record('funnel', { step, seconds: game?.matchElapsed ?? 0 });
+};
 const connectionReason = value => {
   const reason = String(value?.type ?? value ?? '').toLowerCase();
   if (reason.includes('timeout')) return 'timeout';
@@ -98,7 +110,9 @@ const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0
 scene.add(camera); // so the viewmodel renders
 
 // Boots as a solo game — it doubles as the menu's orbiting backdrop.
-const game = new Game(scene, camera, renderer.domElement, { engagement, engagementFeatures });
+const game = new Game(scene, camera, renderer.domElement, { engagement, engagementFeatures, fieldTelemetry });
+game.privateContent = privateContent;
+funnel('opened');
 window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
 game.onRoundEnd = () => {
@@ -122,6 +136,7 @@ if (audioQa) {
   const sequence = (names, gap = 550) => names.forEach((name, i) =>
     setTimeout(() => play(name), i * gap));
   window.__audioQa = {
+    contract: AUDIO_QA_CONTRACT,
     sounds: Object.keys(sfx).filter(k => k !== 'at'), play, sequence,
     comparisons: {
       weapons: () => sequence(['rifle', 'smg', 'sniper'], 850),
@@ -295,7 +310,12 @@ function setPlaying(v) {
     // Wait for a roster identity before counting that as a playable match.
     if (game.mode !== 'client' || game.myId) {
       const started = engagement.beginMatch(game.engagementContext(engagementSource));
-      if (started) game.beginFirstMinute();
+      if (started) {
+        game.funnel('playable_match');
+        if (game._completedFunnelMatch) game.funnel('next_match');
+        game._completedFunnelMatch = false;
+        game.beginFirstMinute();
+      }
     }
   } else if (engagement.pauseMatch('menu')) engagementSource = 'resume';
   // Dropping in with the callsign box still focused (a click on a
@@ -334,6 +354,7 @@ $('playBtn').addEventListener('click', () => {
   if (game.mode === 'client' && !game.myId) return; // still connecting
   stopRotationCountdown(); // clicking through is just skipping the wait
   engagement.record('lobby_action', { action: 'deploy' });
+  funnel('play_selected');
   deploy();
 });
 
@@ -350,6 +371,7 @@ function adoptHost(n, code, opts = {}) {
   roomCode = code;
   showInvite();
   game.net = n;
+  game.publicRoom = !!opts.public;
   n.handlers = {
     onOpen: () => {
       if (opts.public) {
@@ -421,6 +443,7 @@ function rejectClientSession(n, message) {
   game.onHostSilent = null;
   game.onVersion = null;
   game.onKicked = null;
+  game.onPublicContentRejected = null;
   net = null; game.net = null; game.mode = 'solo';
   n.destroy();
   status(message);
@@ -473,8 +496,11 @@ function adoptMigratedClient(peer, conn, code, welcome, gen) {
     ? 'players in that room voted to remove you'
     : reason === 'resumed' ? 'this soldier was resumed in another tab'
     : 'connection closed after sustained invalid gameplay input');
+  game.onPublicContentRejected = () => rejectClientSession(n,
+    'that public room is no longer available');
   console.debug(`[mig] rejoined migrated room ${code} as client`);
   game.clientOnData(welcome); // migrated welcome: world and kit kept as-is
+  if (net !== n) return; // public-content guard rejected this stale welcome
   if (fieldTelemetry.record('migration', { outcome: 'success', reason: 'other' }))
     fieldTelemetry.flush();
   $('roomcode').querySelector('b').textContent = code;
@@ -552,6 +578,7 @@ function adoptJoin(n, code) {
   roomCode = code;
   showInvite();
   game.net = n;
+  game.publicRoom = /^PUB\d+(?:-M\d+)?$/.test(code);
   const pub = /^PUB(\d+)$/.exec(code); // public slots show as "PUBLIC n"
   $('roomcode').querySelector('b').textContent = pub ? `PUBLIC ${+pub[1] + 1}` : code;
   n.handlers.onData = d => game.clientOnData(d);
@@ -563,6 +590,8 @@ function adoptJoin(n, code) {
     ? 'players in that room voted to remove you'
     : reason === 'resumed' ? 'this soldier was resumed in another tab'
     : 'connection closed after sustained invalid gameplay input');
+  game.onPublicContentRejected = () => rejectClientSession(n,
+    'that public room is no longer available');
   n.handlers.onError = e => {
     reportConnectionFailure('welcome', e);
     // Join failed before the match started — reset so the lobby still works.
@@ -579,6 +608,9 @@ function adoptJoin(n, code) {
     if (playing) bailToMenu();
   };
   game.onWelcome = () => {
+    // This callback runs only after a welcome passes the protocol boundary.
+    // Clicks, failed knocks, and full/rejected rooms never count as joins.
+    funnel('joined');
     status(`connected — you are <b>${game.player.team.toUpperCase()}</b>`);
     showPlay('DEPLOY');
     if (playing) setPlaying(true); // quick match dropped in already: resync HUD
@@ -593,10 +625,15 @@ function adoptJoin(n, code) {
 // only exist in CTF. ?map=2&mode=tdm remain QA hooks for the starting map.
 const modePref = $('modePref');
 {
-  const allowedModes = ['any', 'ctf', 'tdm', 'koth'];
-  let savedMode = 'any';
+  const allowedModes = privateContent ? ['any', 'ctf', 'tdm', 'koth'] : ['any', 'tdm', 'koth'];
+  if (privateContent) {
+    const ctf = document.createElement('option');
+    ctf.value = 'ctf'; ctf.textContent = 'capture the flag · private testing';
+    modePref.insertBefore(ctf, modePref.querySelector('option[value="tdm"]'));
+  }
+  let savedMode = 'tdm';
   try { savedMode = localStorage.getItem('tos.mode') ?? savedMode; } catch { /* best effort */ }
-  modePref.value = allowedModes.includes(savedMode) ? savedMode : 'any';
+  modePref.value = allowedModes.includes(savedMode) ? savedMode : 'tdm';
   if (allowedModes.includes(params.get('mode'))) modePref.value = params.get('mode');
   modePref.addEventListener('change', () => {
     try { localStorage.setItem('tos.mode', modePref.value); } catch { /* best effort */ }
@@ -900,14 +937,16 @@ function teamPref() {
 
 // Returns a random compatible starting map. The room advances through that
 // mode's map rotation after every match; there is no public one-map pin.
-function applyHostPrefs() {
-  const modes = ['ctf', 'tdm', 'koth'];
+function applyHostPrefs({ publicOnly = false } = {}) {
+  const modes = ['ctf', 'tdm', 'koth'].filter(mode =>
+    mapsForMode(mode, { publicOnly, privateContent }).length);
   const mode = modes.includes(modePref.value) ? modePref.value
     : modes[Math.floor(Math.random() * modes.length)];
   game.gameMode = mode;
   const qaMap = Number.parseInt(params.get('map'), 10);
-  if (Number.isInteger(qaMap) && MAPS[qaMap]?.modes.includes(mode)) return qaMap;
-  const pool = MAPS.map((m, i) => i).filter(i => MAPS[i].modes.includes(mode));
+  if (Number.isInteger(qaMap) && MAPS[qaMap]?.modes.includes(mode)
+      && contentAvailable(mode, qaMap, { publicOnly, privateContent })) return qaMap;
+  const pool = mapsForMode(mode, { publicOnly, privateContent });
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -916,6 +955,7 @@ $('hostBtn').addEventListener('click', async () => {
   migrationGen = 0; // a fresh room starts the baton count over
   if (!ensureCallsign()) return;
   engagementSource = 'host';
+  funnel('play_selected');
   engagement.record('lobby_action', { action: 'host' });
   initAudio();
   game.player.name = callsign();
@@ -948,6 +988,7 @@ $('hostBtn').addEventListener('click', async () => {
   };
   try {
     game.mode = 'host';
+    game.publicRoom = false;
     game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
     tryCode();
     if (!hostAttemptLive) return;
@@ -966,6 +1007,7 @@ $('joinBtn').addEventListener('click', async () => {
   migrationGen = 0;
   if (!ensureCallsign()) return;
   engagementSource = 'join';
+  funnel('play_selected');
   engagement.record('lobby_action', { action: 'join' });
   initAudio();
   game.player.name = callsign();
@@ -1037,6 +1079,7 @@ $('quickBtn').addEventListener('click', async () => {
   if (net || matchmaking || connecting) return;
   if (!ensureCallsign()) return;
   engagementSource = 'quick';
+  funnel('play_selected');
   engagement.record('lobby_action', { action: 'quick' });
   matchmaking = true;
   searchCanceled = false;
@@ -1069,10 +1112,12 @@ $('quickBtn').addEventListener('click', async () => {
         game.hud.message(`JOINED PUBLIC ROOM ${r.slot + 1} — YOU ARE ${game.player.team.toUpperCase()}`, '#ffd97a');
       };
       game.clientOnData(r.welcome); // replay the welcome through the normal path
+      if (net !== r.net) return; // stale public room rejected during welcome
     } else if (r.kind === 'host') {
       migrationGen = 0;
       game.mode = 'host';
-      game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
+      game.publicRoom = true;
+      game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs({ publicOnly: true }));
       adoptHost(r.net, slotCode(r.slot), { public: true, alreadyOpen: true });
       game.hud.message(`HOSTING PUBLIC ROOM ${r.slot + 1} — PLAYERS WILL DROP IN`, '#ffd97a');
     } else {
@@ -1182,10 +1227,16 @@ async function scanRooms() {
 
 async function joinFromBrowser(room) {
   if (net || scanning) return;
+  if (!publicContentAvailable(room.mode, room.map)) {
+    browseSt.textContent = 'that room is no longer available';
+    scanRooms();
+    return;
+  }
   const guest = browseGuest; browseGuest = null;
   if (!guest) { scanRooms(); return; } // stale rows: rescan, pick again
   engagementSource = 'browse';
   engagement.record('lobby_action', { action: 'browse_join' });
+  funnel('play_selected');
   initAudio();
   game.player.name = callsign();
   const lock = renderer.domElement.requestPointerLock(); // gesture-valid only now
@@ -1206,7 +1257,8 @@ async function joinFromBrowser(room) {
     game.mode = 'client';
     browserEl.classList.add('hidden');
     $('menu').classList.remove('hidden');
-    adoptJoin(Net.adoptGuest(guest, k.conn), slotCode(room.slot));
+    const joinedNet = Net.adoptGuest(guest, k.conn);
+    adoptJoin(joinedNet, slotCode(room.slot));
     const plain = game.onWelcome;
     game.onWelcome = () => {
       plain();
@@ -1214,7 +1266,7 @@ async function joinFromBrowser(room) {
       game.hud.message(`JOINED PUBLIC ROOM ${room.slot + 1} — YOU ARE ${game.player.team.toUpperCase()}`, '#ffd97a');
     };
     game.clientOnData(k.welcome); // replay the welcome through the normal path
-    if (document.pointerLockElement === renderer.domElement) setPlaying(true);
+    if (net === joinedNet && document.pointerLockElement === renderer.domElement) setPlaying(true);
   } else {
     destroyPeerQuietly(guest);
     browseSt.textContent = k.kind === 'full' ? 'that room just filled up'
@@ -1618,8 +1670,8 @@ function frame() {
     menuT += dt * 0.05;
     // The backdrop previews the same rotation a hosted room will use.
     if (carouselOn && game.mode === 'solo' && !net && !matchmaking) {
-      const pool = MAPS.map((m, i) => i).filter(i => modePref.value === 'any'
-        || MAPS[i].modes.includes(modePref.value));
+      const pool = mapsForMode(modePref.value === 'any' ? game.gameMode : modePref.value,
+        { privateContent });
       let next = -1;
       menuMapT += wallDt; // wall-clock: a stalled frame still counts its time
       if (menuMapT >= MENU_MAP_EVERY || !pool.includes(game.mapIndex)) {

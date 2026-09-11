@@ -31,6 +31,40 @@ export function acquireTarget(bot, profile) {
   return best;
 }
 
+// Hearing: close, fresh sounds turn heads. Vision found nothing — but a
+// gunshot, explosion, or kill that just happened nearby is worth facing, so
+// check foes near the freshest audible intel WITHOUT the face-cone gate.
+// Still requires line of sight (a wall between you and the sound means no
+// target, just investigation through the existing hunt goals), and callers
+// must treat the result as heard, not seen: no 'sight' radio ping, no live
+// tracking — memory drift applies like any lost-visual contact.
+export function heardFoe(bot) {
+  const hearing = bot.difficulty.hearing;
+  const spot = bot.game.huntSpot?.(bot.team, bot.body.pos, hearing);
+  if (!spot || spot.kind === 'sight') return null;
+  const age = bot.game.time - spot.t;
+  if (!(age >= 0) || age > 2.5) return null;
+  if (Math.hypot(spot.x - bot.body.pos.x, spot.z - bot.body.pos.z) > hearing) return null;
+  let best = null, bestScore = Infinity;
+  for (const f of bot.game.foesOf(bot.team)) {
+    if (!f.alive) continue;
+    const d = bot.body.pos.distanceTo(f.body.pos);
+    if (d > hearing) continue;
+    // A flag carrier retains an already-close defender, but does not acquire
+    // a new long-range duel that would distract the run home.
+    if (bot.carrier && f !== bot.target && d > 18) continue;
+    // The sound came from the spot: only foes AT the sound count, not
+    // anyone who merely happens to be within earshot elsewhere.
+    if (Math.hypot(f.body.pos.x - spot.x, f.body.pos.z - spot.z) > 10) continue;
+    const score = botTargetScore(d, f.health, f.carrier, f === bot.target);
+    if (score >= bestScore) continue;
+    if (bot.game.losClear(bot.body.eye(bot._eye), f.body.eye(bot._targetEye))) {
+      best = f; bestScore = score;
+    }
+  }
+  return best;
+}
+
 // Shovel a single voxel (debris, edit log, network sync all handled inside).
 export function digVoxel(bot, x, y, z) {
   if (bot.game.world.solid(x, y, z)) return bot.game.digVoxel(bot, x, y, z);

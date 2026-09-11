@@ -5,6 +5,7 @@
 export const TELEMETRY_VERSION = 1;
 export const TELEMETRY_ENDPOINT = 'https://spadefall-turn.spadefall.workers.dev/diagnostics';
 export const TELEMETRY_LIMIT = 12;
+export const TELEMETRY_FLUSH_AT = 8;
 
 const TYPES = Object.freeze({
   connection_failure: {
@@ -16,6 +17,12 @@ const TYPES = Object.freeze({
   frame_budget: { tier: ['medium', 'high'], result: ['pass', 'fail'] },
   migration: { outcome: ['success', 'failure'], reason: ['timeout', 'closed', 'protocol', 'network', 'other'] },
   match_abandon: { reason: ['pagehide', 'network', 'menu', 'other'] },
+  // Product funnel only: a bounded milestone and a coarse elapsed bucket.
+  // It deliberately carries no identifier, mode, map, room, input detail,
+  // position, or free text.
+  funnel: { step: ['opened', 'play_selected', 'playable_match', 'joined',
+    'first_spawn', 'first_shoot', 'first_dig', 'first_place', 'first_ping',
+    'objective', 'first_death', 'match_complete', 'next_match'], },
 });
 
 const bucketSeconds = value => {
@@ -53,6 +60,7 @@ export function sanitizeTelemetryEvent(type, data = {}) {
     out.long = Math.max(0, Math.min(4, Number(data.long) | 0));
   }
   if (type === 'match_abandon') out.time = bucketSeconds(data.seconds);
+  if (type === 'funnel') out.time = bucketSeconds(data.seconds);
   return out;
 }
 
@@ -77,6 +85,9 @@ export class ProductionTelemetry {
     const event = sanitizeTelemetryEvent(type, data);
     if (!event || this.events.length >= TELEMETRY_LIMIT) return false;
     this.events.push(event);
+    // Never silently strand a full ring. Milestones are safe to send and this
+    // keeps a long menu/match from losing its final funnel observations.
+    if (this.events.length >= TELEMETRY_FLUSH_AT) this.flush();
     return true;
   }
 

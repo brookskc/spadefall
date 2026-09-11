@@ -2,7 +2,7 @@
 
 Status: planning and launch-readiness work. This document does not itself enable a CrazyGames release.
 
-Last updated: September 4, 2026.
+Last updated: September 8, 2026.
 
 ## Outcome
 
@@ -51,7 +51,7 @@ Players should reach combat quickly, understand the current objective without re
 - There is no CrazyGames SDK or platform adapter.
 - Progress and settings are currently stored in the browser only.
 - CrazyGames room, invite, account, cloud-save, analytics, and chat-preference APIs are not integrated.
-- The signature per-map voxel mechanics remain design-only.
+- All six signature per-map voxel mechanics are implemented; human first-use and balance validation remains.
 - Multiplayer has not been validated with a full room of real browser clients across target network conditions.
 - Chrome and Edge are not yet represented as an explicit release matrix on 4 GB Chromebook-class hardware.
 - The privacy notice describes GitHub Pages but not CrazyGames processing or platform services.
@@ -62,7 +62,7 @@ Players should reach combat quickly, understand the current objective without re
 
 Goal: establish that unfamiliar players understand and voluntarily replay the game before platform work begins.
 
-- [ ] Complete the Greenbelt and Crown signature-voxel prototypes described in `docs/VOXEL-MECHANIC-PLAN.md`.
+- [x] Implement the six signature-voxel mechanics described in `docs/VOXEL-MECHANIC-PLAN.md`.
 - [ ] Run moderated sessions with at least 20–30 people who have not worked on the game.
 - [ ] Record time to gameplay, time to first combat, time to first useful terrain edit, match completion, second-match starts, and connection failures.
 - [ ] Confirm that at least 70% of first-time matches contain a meaningful terrain action in the first two minutes.
@@ -188,7 +188,7 @@ Goal: make the submission accurately sell the actual play experience.
 - [ ] Produce portal cover art at every required CrazyGames aspect ratio and safe area.
 - [ ] Make the primary image show combat plus terrain deformation, not a static scenic map.
 - [ ] Produce a 10–20 second silent-readable gameplay clip showing breach, push, elimination, and rebuild.
-- [ ] Select screenshots that cover combat, construction/destruction, all three modes, and class variety.
+- [ ] Select screenshots that cover combat, construction/destruction, both public modes, and class variety.
 - [ ] Write a short description centered on the gameplay hook.
 - [ ] Provide exact keyboard and mouse controls.
 - [ ] Describe multiplayer, bots, room size, and guest play accurately.

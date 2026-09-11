@@ -570,7 +570,7 @@
 
   /* Optional first-session orientation. A compact field card, never a modal:
      it does not capture input or pause the fight, and disappears after one
-     minute (or four seconds after all four fundamentals are demonstrated). */
+     minute (or four seconds after its three fundamentals are demonstrated). */
   #firstMinute { display:none; position:absolute; left:22px; top:258px;
     width:min(330px,calc(100vw - 44px)); box-sizing:border-box;
     padding:10px 12px; background:rgba(10,14,22,.82); border-left:3px solid #ffd97a;
@@ -837,8 +837,7 @@
     <div class="prefs home-only" id="standardHostPrefs">
       when you host — mode <select id="modePref">
         <option value="any">any mode</option>
-        <option value="ctf">capture the flag</option>
-        <option value="tdm">team deathmatch</option>
+        <option value="tdm" selected>team deathmatch · flagship</option>
         <option value="koth">king of the hill</option>
       </select>
     </div>

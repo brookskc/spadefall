@@ -7,6 +7,7 @@
 // basic questions before later engagement features change the game.
 
 export const ENGAGEMENT_FEATURES = Object.freeze([
+  'privateContent',
   'firstMinute',
   'voxelStories',
   'deathRecap',

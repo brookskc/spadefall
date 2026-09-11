@@ -106,6 +106,9 @@ export const smgClosingIntent = (gunClass, distance, visible = true) =>
 export const CTF_FINAL_APPROACH_RANGE = 24;
 export const CTF_CLOSE_SUPPORT_RANGE = 14;
 export const CTF_STAGE_FALLBACK_SECONDS = 12;
+// No support anywhere on the field (a split or dead team reports Infinity):
+// waiting the full fallback in the enemy base is just feeding. Grab and go.
+export const CTF_STAGE_LONE_FALLBACK_SECONDS = 6;
 /** @param {{ distanceToFlag?: number, nearestSupportDistance?: number,
  * stagedSeconds?: number, escalation?: boolean }} context */
 export function ctfFinalApproachPolicy({ distanceToFlag, nearestSupportDistance,
@@ -115,8 +118,10 @@ export function ctfFinalApproachPolicy({ distanceToFlag, nearestSupportDistance,
   if (Number.isFinite(nearestSupportDistance)
       && nearestSupportDistance <= CTF_CLOSE_SUPPORT_RANGE)
     return 'advance';
+  const fallback = nearestSupportDistance === Infinity
+    ? CTF_STAGE_LONE_FALLBACK_SECONDS : CTF_STAGE_FALLBACK_SECONDS;
   if (escalation || (Number.isFinite(stagedSeconds)
-      && stagedSeconds >= CTF_STAGE_FALLBACK_SECONDS)) return 'advance';
+      && stagedSeconds >= fallback)) return 'advance';
   return 'stage';
 }
 

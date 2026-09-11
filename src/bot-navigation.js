@@ -265,6 +265,22 @@ function rank(bot) {
   return mates.indexOf(bot);
 }
 
+// Greenbelt's broad shore is useful once the fight has developed, but a
+// random first patrol could send both squads to unrelated beaches. Until a
+// real lead arrives, briefly rally through three own-side midfield lanes.
+// Kept pure so the opening contract is easy to exercise without a world.
+export function greenbeltOpeningRally({ mapIndex, gameMode, time = 0,
+  hasIntel = false, team, tacticalRole, id = 0, sx = 256, sz = 256 }) {
+  if (mapIndex !== 0 || gameMode !== 'tdm' || hasIntel || time >= 24) return null;
+  const roleLane = tacticalRole === 'flank-left' ? 0
+    : tacticalRole === 'flank-right' ? 2
+      : tacticalRole === 'support' || tacticalRole === 'anchor' ? 1
+        : Math.abs(Math.trunc(id)) % 3;
+  const lanes = [0.31, 0.5, 0.69];
+  const ownX = team === 'green' ? sx * 0.43 : sx * 0.57;
+  return { x: ownX, z: sz * lanes[roleLane], lane: roleLane };
+}
+
 // Deathmatch has no flag to chase, so hunt the freshest sign of the enemy
 // (gunfire, kills, sightings — the game's intel feed). No intel? Roam.
 function huntGoal(bot, context) {
@@ -281,6 +297,11 @@ function huntGoal(bot, context) {
     hunt.z = Math.max(2, Math.min(context.SZ - 2, hunt.z));
     return laned(bot, hunt, context);
   }
+  const rally = greenbeltOpeningRally({ mapIndex: g.mapIndex, gameMode: g.gameMode,
+    time: g.time, team: bot.team, tacticalRole: bot.tacticalRole, id: bot.id,
+    sx: context.SX, sz: context.SZ });
+  if (rally) return new context.THREE.Vector3(rally.x,
+    g.world.surface(Math.floor(rally.x), Math.floor(rally.z)), rally.z);
   return patrolGoal(bot, context);
 }
 

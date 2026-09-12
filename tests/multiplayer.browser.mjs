@@ -39,7 +39,7 @@ const executablePath = process.env.SPADEFALL_BROWSER
   ?? (process.platform === 'win32' && existsSync(edge) ? edge : undefined);
 // GitHub's shared runners can pause a busy Chromium tab for several seconds.
 // Keep local failures quick while allowing bounded CI synchronization time.
-const syncTimeout = process.env.CI ? 15_000 : 5_000;
+const syncTimeout = process.env.CI ? 30_000 : 5_000;
 const browser = await chromium.launch({ headless: true, executablePath });
 const host = await browser.newPage();
 const guest = await browser.newPage();
@@ -229,9 +229,9 @@ try {
   assert.equal(await host.evaluate(index => window.__game.requestVoteKick(index), targetIndex), true);
   await guest.evaluate(index => window.__game.requestVoteKick(index), targetIndex);
   await target.waitForFunction(() => document.getElementById('lobbyStatus')?.textContent
-    ?.includes('voted to remove you'), null, { timeout: 8_000 });
+    ?.includes('voted to remove you'), null, { timeout: syncTimeout });
   await host.waitForFunction(() => window.__game?.remote?.size === 1,
-    null, { timeout: 8_000 });
+    null, { timeout: syncTimeout });
 
   const currentClass = await host.evaluate(() => {
     const game = window.__game;

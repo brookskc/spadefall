@@ -37,6 +37,9 @@ const base = `http://127.0.0.1:${port}/?auto=1&code=TEST&ns=${namespace}&map=0&m
 const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const executablePath = process.env.SPADEFALL_BROWSER
   ?? (process.platform === 'win32' && existsSync(edge) ? edge : undefined);
+// GitHub's shared runners can pause a busy Chromium tab for several seconds.
+// Keep local failures quick while allowing bounded CI synchronization time.
+const syncTimeout = process.env.CI ? 15_000 : 5_000;
 const browser = await chromium.launch({ headless: true, executablePath });
 const host = await browser.newPage();
 const guest = await browser.newPage();
@@ -93,12 +96,12 @@ try {
   assert.equal(intermissionClass.homePicked, true,
     'all class controls stay visually synchronized');
   await host.waitForFunction(() => [...window.__game.remote.values()][0]?._pendingClass === 5,
-    null, { timeout: 5_000 });
+    null, { timeout: syncTimeout });
   await guest.evaluate(previous => {
     window.__game.player.selectClass(previous);
   }, intermissionClass.current);
   await host.waitForFunction(previous => [...window.__game.remote.values()][0]?._pendingClass === previous,
-    intermissionClass.current, { timeout: 5_000 });
+    intermissionClass.current, { timeout: syncTimeout });
 
   await host.evaluate(() => { [...window.__game.remote.values()][0].alive = false; });
   await guest.evaluate(() => {
@@ -108,7 +111,7 @@ try {
     document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyB', bubbles: true }));
   });
   await host.waitForFunction(() => [...window.__game.remote.values()][0]?._spawnPreference === 'base',
-    null, { timeout: 5_000 });
+    null, { timeout: syncTimeout });
   await guest.evaluate(() => { window.__game.player.alive = true; });
   await host.evaluate(() => { [...window.__game.remote.values()][0].alive = true; });
 
@@ -118,9 +121,9 @@ try {
     window.__game.requestIntermissionReady();
   });
   await host.waitForFunction(() => window.__game._intermissionReady.size === 1,
-    null, { timeout: 5_000 });
+    null, { timeout: syncTimeout });
   await guest.waitForFunction(() => document.getElementById('readyBtn')?.textContent.includes('1/2'),
-    null, { timeout: 5_000 });
+    null, { timeout: syncTimeout });
   await host.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
   await guest.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
 
@@ -142,13 +145,13 @@ try {
   await host.waitForFunction(x => {
     const remote = [...window.__game.remote.values()][0];
     return remote && Math.abs(remote.body.pos.x - x) < 0.025;
-  }, targetX, { timeout: 5_000 });
+  }, targetX, { timeout: syncTimeout });
 
   await host.evaluate(() => window.__game.net.broadcast({
     t: 'e', k: 'msg', text: 'TWO BROWSER LINK', color: '#fff',
   }));
   await guest.waitForFunction(() => document.getElementById('msg')?.textContent
-    ?.includes('TWO BROWSER LINK'), null, { timeout: 5_000 });
+    ?.includes('TWO BROWSER LINK'), null, { timeout: syncTimeout });
 
   const liveSettings = await host.evaluate(() => {
     document.querySelector('#gfxOpts [data-gfx="low"]').click();

@@ -20,5 +20,13 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:ci
+      # This crosses the public PeerJS signaling service and is diagnostic only.
+      # Cloudflare Pages deployment does not depend on GitHub-hosted signaling.
+      - name: Multiplayer browser smoke (non-blocking)
+        continue-on-error: true
+        run: npm run test:multiplayer
+      - name: Full-room browser stress (non-blocking)
+        continue-on-error: true
+        run: npm run test:stress
       - run: npm run test:bot-sim
       - run: npm run test:fuzz

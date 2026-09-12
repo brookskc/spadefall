@@ -11,7 +11,7 @@
     "test:bot-sim": "node tests/bot-simulation.browser.mjs",
     "test:accessibility": "node tests/accessibility.browser.mjs",
     "test:release-readiness": "node tests/release-readiness.browser.mjs",
-    "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility && npm run test:multiplayer && npm run test:stress",
+    "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility",
     "capture:results": "node tests/capture-results.mjs",
     "lint": "eslint src worker/src \"tests/*.mjs\"",
     "typecheck": "tsc --noEmit -p jsconfig.json"

@@ -360,10 +360,17 @@ function mapgenTests() {
     mapAtmosphere(4).sky[0] === '#365b91'
       && MAPS[4].paletteOverrides.grass === 0x567447
       && MAPS[4].paletteOverrides.stone === 0x515d69);
-  ok('CALDERA uses a contrasting volcanic-twilight sky',
-    mapAtmosphere(5).sky[0] === '#40334f'
-      && mapAtmosphere(5).sky[1] === '#76556a'
-      && mapAtmosphere(5).fog === 0xa47770);
+  ok('CALDERA uses a bright volcanic sky and readable bowl palette',
+    mapAtmosphere(5).sky[0] === '#755b73'
+      && mapAtmosphere(5).sky[1] === '#b98278'
+      && mapAtmosphere(5).fog === 0xc49a88
+      && MAPS[5].paletteOverrides.stone === 0x776d73);
+  ok('FOUNDRY and FAULTLINE have deliberately separate industrial and geological identities',
+    mapAtmosphere(6).sky[0] === '#4c606d'
+      && MAPS[6].paletteOverrides.dirt === 0x8b513a
+      && mapAtmosphere(7).sky[0] === '#5895ad'
+      && MAPS[7].paletteOverrides.sand === 0xd6a464
+      && MAPS[6].paletteOverrides.stone !== MAPS[7].paletteOverrides.stone);
   const ravineOriginal = SEA + 14;
   const ravineSamples = Array.from({ length: PINEFALL_RAVINE_HALF_WIDTH + 1 }, (_, d) =>
     pinefallRavineHeight(ravineOriginal, d));

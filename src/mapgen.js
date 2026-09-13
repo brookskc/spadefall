@@ -92,14 +92,18 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 28, r: 10, label: 'NORTH BOWL' },
       { x: SX / 2, z: SZ / 2 + 28, r: 10, label: 'SOUTH BOWL' },
     ],
-    atmosphere: { sky: ['#40334f', '#76556a', '#c38a73'], fog: 0xa47770, cloud: 0xc7b1ae, water: 0x595866,
-      sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
-    paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
+    // Bright volcanic daylight rather than purple twilight: the bowl walls
+    // and soldiers must stay readable from its low central objective.
+    atmosphere: { sky: ['#755b73', '#b98278', '#f0bd8d'], fog: 0xc49a88, cloud: 0xead2c4, water: 0x657080,
+      sun: [-0.6, 0.78, 0.28], sunTint: [1.16, 1.07, 0.94] },
+    paletteOverrides: { grass: 0x8b785f, dirt: 0x9b604f, sand: 0xd09a71, stone: 0x776d73, moss: 0x6c755f } },
   { key: 'foundry', name: 'FOUNDRY',   modes: ['tdm'],               gen: null,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
-    atmosphere: { sky: ['#4b5966', '#89969b', '#d7c8ae'], fog: 0x9ca4a2, cloud: 0xc7d0ce, water: 0x3e5960,
-      sun: [-0.35, 0.82, 0.18], sunTint: [1.08, 0.98, 0.84] },
-    paletteOverrides: { grass: 0x58655d, dirt: 0x624e42, sand: 0x9c8060, stone: 0x58636a, moss: 0x3f514b } },
+    // Cool steel, pale overcast, and rust make the industrial TDM floor read
+    // nothing like Faultline's sun-baked rock while keeping cover high-value.
+    atmosphere: { sky: ['#4c606d', '#96aab1', '#e1ddd4'], fog: 0xb0b9b9, cloud: 0xe8eceb, water: 0x3b6671,
+      sun: [-0.35, 0.88, 0.18], sunTint: [1.02, 1.04, 1.06] },
+    paletteOverrides: { grass: 0x52686a, dirt: 0x8b513a, sand: 0xbc784a, stone: 0x687781, moss: 0x41645e } },
   { key: 'faultline', name: 'FAULTLINE', modes: ['koth'],            gen: null,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [
@@ -108,9 +112,11 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 + 32, r: 8, label: 'SOUTH' },
       { x: SX / 2 + 32, z: SZ / 2, r: 8, label: 'EAST' },
     ],
-    atmosphere: { sky: ['#3f5864', '#7da0a4', '#d8c2a0'], fog: 0x9aada8, cloud: 0xd3ddda, water: 0x315f69,
-      sun: [0.25, 0.88, -0.42], sunTint: [1.04, 1.02, 0.88] },
-    paletteOverrides: { grass: 0x596c68, dirt: 0x70534a, sand: 0xb38a61, stone: 0x566168, moss: 0x3d554b } },
+    // A warm, high-desert geological identity: sandstone ground, sage seams,
+    // and a clear cyan sky separate the rotating KOTH loop from Foundry.
+    atmosphere: { sky: ['#5895ad', '#a6c9c5', '#efd5a5'], fog: 0xcdbda4, cloud: 0xf4ead8, water: 0x397684,
+      sun: [0.25, 0.92, -0.42], sunTint: [1.12, 1.05, 0.91] },
+    paletteOverrides: { grass: 0x7d8a6d, dirt: 0x9d6049, sand: 0xd6a464, stone: 0x806b5d, moss: 0x5f755b } },
 ];
 
 // The voxel world remains 256×256; an envelope is the authored combat space
@@ -1365,7 +1371,10 @@ function genFaultline(world, seed) {
   applyArenaRim(height, mapEnvelope(7), FLOOR, SEA + 25);
   fillColumns(world, height, (x, z) => {
     const band = noise(x * 0.02 + 31, z * 0.02 + 5);
-    return band > 0.7 ? BLOCK.STONE : band < 0.3 ? BLOCK.DIRT : BLOCK.GRASS;
+    // Sandstone dominates the arena floor. Sage and red-earth seams still
+    // expose its large-scale strata, but the material read is geological,
+    // not the green-grey factory floor used by Foundry.
+    return band > 0.72 ? BLOCK.STONE : band < 0.3 ? BLOCK.DIRT : BLOCK.SAND;
   });
 
   // A solid, low survey foundation breaks the four cross-map sniper lanes.

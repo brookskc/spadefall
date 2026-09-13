@@ -71,6 +71,55 @@ try {
   assert.ok(identity.id);
   assert.ok(identity.roster >= 2, 'guest received the authoritative roster');
 
+  // A fresh-browser guest must traverse the complete authoritative lifecycle:
+  // host damage -> validated death recap -> team-wave countdown -> host spawn
+  // event -> live player with every death-only HUD layer cleared. Previously
+  // this suite tested spawn preferences by hand-toggling alive, so a recap or
+  // protocol regression could strand real players while CI remained green.
+  await guest.evaluate(() => {
+    const game = window.__game;
+    game._auditClientEvent = game._clientEvent.bind(game);
+    game._auditDroppedSpawn = false;
+    game._clientEvent = event => {
+      if (event.k === 'spawn') { game._auditDroppedSpawn = true; return; }
+      game._auditClientEvent(event);
+    };
+  });
+  const death = await host.evaluate(() => {
+    const game = window.__game;
+    const remote = [...game.remote.values()][0];
+    remote.protT = 0;
+    game.damage(remote, 200, game.player, game.player.body.pos,
+      { cause: 'rifle', ignoreProtection: true });
+    return { alive: remote.alive, redeploy: game.respawnTimers.get(remote) };
+  });
+  assert.equal(death.alive, false, 'host records the guest death');
+  assert.ok(death.redeploy > 0 && death.redeploy <= 9,
+    'host schedules the guest on a bounded respawn wave');
+  await guest.waitForFunction(() => !window.__game.player.alive
+    && document.getElementById('deathRecap')?.classList.contains('on')
+    && Number.parseFloat(getComputedStyle(document.getElementById('respawn')).opacity) > 0,
+  null, { timeout: syncTimeout });
+  await guest.waitForFunction(() => window.__game._auditDroppedSpawn
+    && window.__game.player.alive
+    && window.__game.player.health === 100
+    && !document.getElementById('deathRecap')?.classList.contains('on'),
+  null, { timeout: 12_000 });
+  const respawnHud = await guest.evaluate(() => {
+    const game = window.__game;
+    game._clientEvent = game._auditClientEvent;
+    delete game._auditClientEvent;
+    return {
+      recap: document.getElementById('deathRecap').className,
+      countdown: getComputedStyle(document.getElementById('respawn')).opacity,
+      classPick: getComputedStyle(document.getElementById('classPick')).opacity,
+      spawnPick: getComputedStyle(document.getElementById('spawnPick')).opacity,
+    };
+  });
+  assert.deepEqual(respawnHud, {
+    recap: '', countdown: '0', classPick: '0', spawnPick: '0',
+  }, 'respawn clears every death-only HUD layer');
+
   const intermissionClass = await guest.evaluate(() => {
     const game = window.__game;
     const current = game.player.gunClass;
@@ -131,7 +180,11 @@ try {
     null, { timeout: syncTimeout });
   await guest.waitForFunction(() => document.getElementById('readyBtn')?.textContent.includes('1/2'),
     null, { timeout: syncTimeout });
-  await host.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
+  await host.evaluate(() => {
+    window.__game.over = false;
+    window.__game._rotateT = null;
+    window.__game._intermissionReady.clear();
+  });
   await guest.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
 
   await guest.evaluate(() => { window.__game._sendT = 999; });
@@ -257,6 +310,12 @@ try {
   }), nextClass);
   assert.deepEqual(resultsMouse, { released: true, visible: true, pending: nextClass },
     'round end releases capture and its class buttons accept mouse input');
+  await host.evaluate(() => { window.__game._rotateT = 0.05; });
+  await host.waitForFunction(expected => !window.__game.over
+    && window.__game.player.gunClass === expected
+    && document.getElementById('end')?.classList.contains('hidden'),
+  nextClass, { timeout: syncTimeout });
+  await guest.waitForFunction(() => !window.__game.over, null, { timeout: syncTimeout });
 
   const voxelRoute = await host.evaluate(() => {
     const game = window.__game;

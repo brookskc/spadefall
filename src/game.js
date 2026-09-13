@@ -98,9 +98,13 @@ export function combatHistoryDue(accumulator, dt, interval = 1 / 30) {
 
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
+// Results remain interactive long enough to read and vote, but a silent or
+// abandoned browser can no longer hold an otherwise healthy room forever.
+// Everyone ready still advances immediately; this is the bounded fallback.
+const POST_MATCH_TIME = 20;
 const hud = createHud({
   TOOLS, BREATH_MAX, AIRSTRIKE_COST, BASE, SEA, SX, PALETTE,
-  CAP_TIME, HILL_MOVE_WARNING, WIN_SCORE,
+  CAP_TIME, HILL_MOVE_WARNING, WIN_SCORE, POST_MATCH_TIME,
   stats, sfx, deathRecapCopy, ctfObjectiveKind,
   occupiedScoringTeam, nextHillIndex, rankContributionRows, teamCss,
 });
@@ -457,6 +461,7 @@ export class Game {
     this._openingDeployment = false;      // new rounds begin at the authored bases
     this._squadVotes = new Set();
     this._intermissionReady = new Set();
+    this._rotateT = null;
     this._battleChoices = [];
     this._battleVotes = new Map();
     this._donePlayers = new Set();
@@ -690,6 +695,7 @@ export class Game {
     this._clearTeamPings();
     this._squadVotes.clear();
     this._intermissionReady.clear();
+    this._rotateT = null;
     this._battleChoices = [];
     this._battleVotes.clear();
     this._donePlayers.clear();
@@ -3452,9 +3458,13 @@ export class Game {
     hud.terrainEvolution(terrainRecap);
     $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
     hud.classPick(this.player._pendingClass);
+    hud.deathRecap(null);
+    hud.respawn(0);
     const balanceNote = this.teamBalanceEnabled() ? ' · teams balance between rounds' : '';
-    $('endNote').textContent = `choose a battle, then PLAY ANOTHER · waiting for players${balanceNote}`;
-    hud.rotationProgress(0, false);
+    $('endNote').textContent = this.mode === 'client'
+      ? `choose a battle, then PLAY ANOTHER · waiting for host${balanceNote}`
+      : `choose a battle, then PLAY ANOTHER · auto-start in ${POST_MATCH_TIME}s${balanceNote}`;
+    hud.rotationProgress(POST_MATCH_TIME, this.mode !== 'client');
     hud.nextBattles(this, this._battleChoices, this._battleTally, this._myBattleChoice);
     this._publishCommendationState();
     this._publishRivalryState();
@@ -3466,6 +3476,7 @@ export class Game {
     this._publishSquadState();
     this._publishReadyState();
     if (!won) sfx.lose();
+    if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
   }
 
   // Next map in the rotation for the current mode.
@@ -3797,10 +3808,10 @@ export class Game {
     return true;
   }
 
-  _maybeStartNextBattle() {
+  _maybeStartNextBattle(force = false) {
     if (this.mode === 'client' || !this.over) return false;
     const active = this._humanKeys().filter(voter => !this._donePlayers.has(voter));
-    if (!active.length || !active.every(voter => this._intermissionReady.has(voter)))
+    if (!active.length || (!force && !active.every(voter => this._intermissionReady.has(voter))))
       return false;
     const rivalry = rivalryDisposition({ active, opted: [...this._rivalryVotes],
       ready: [...this._intermissionReady] });
@@ -5165,6 +5176,20 @@ export class Game {
         ammo, reloadMs, gunClass] = r;
       if (idx === this.myIdx) {
         if (!alive && this.player.alive) this._clientDied();
+        else if (alive && !this.player.alive) {
+          // The reliable spawn event is the normal lifecycle edge, but the
+          // authoritative snapshot must still be able to heal a missed or
+          // rejected edge. Previously an alive self row updated health and
+          // position without ever flipping Player#alive, leaving the death
+          // camera and recap on screen forever even though the host had
+          // already respawned the soldier.
+          this._serverLife = Math.min(1e6, this._serverLife + 1);
+          this.player.respawn({ x, y, z });
+          this._respawnT = 0;
+          hud.respawn(0);
+          hud.health(this.player);
+          hud.refreshTool(this.player);
+        }
         // No hud.damage()/sfx.hurt() here anymore — damage() is the sole
         // place health ever decreases (verified directly, not assumed),
         // so every drop this would have caught already went through the
@@ -5733,6 +5758,14 @@ export class Game {
       });
       this._firstMinuteView = firstMinuteView;
       hud.firstMinute(firstMinuteView);
+    }
+    if (this.mode !== 'client' && this.over && this._rotateT != null) {
+      this._rotateT = Math.max(0, this._rotateT - dt);
+      hud.rotationProgress(this._rotateT, true);
+      if (this._rotateT <= 0) {
+        this._rotateT = null;
+        this._maybeStartNextBattle(true);
+      }
     }
     if (presentation.network) hud.ping(this);
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost

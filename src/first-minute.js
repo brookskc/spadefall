@@ -1,7 +1,7 @@
 // first-minute.js — optional, non-modal field orientation for one session.
 //
 // The guide teaches the smallest useful Spadefall loop without freezing play:
-// move, fire, dig a route, and build cover. It owns no DOM or gameplay
+// move, fire, and reshape one voxel. It owns no DOM or gameplay
 // state, so normal matches are identical when the feature flag is off.
 
 export const FIRST_MINUTE_DURATION = 60;
@@ -115,8 +115,8 @@ export class FirstMinuteGuide {
       place: this.actions.has('place'),
       // Communication remains a useful optional shortcut, never a gate.
     };
-    progress.terrain = progress.dig && progress.place;
-    const complete = progress.move && progress.fire && progress.dig && progress.place;
+    progress.terrain = progress.dig || progress.place;
+    const complete = progress.move && progress.fire && progress.terrain;
     if (complete && this.completedAt == null) this.completedAt = elapsed;
     if (complete && elapsed - this.completedAt >= 4) {
       this.active = false;
@@ -127,13 +127,8 @@ export class FirstMinuteGuide {
     let hint = !progress.move ? firstMinuteMoveHint(this.mode)
       : !progress.fire ? 'LEFT MOUSE · RIGHT MOUSE AIM' : 'PUSH WITH YOUR SQUAD';
     if (progress.move && progress.fire && !progress.terrain) {
-      if (!progress.dig) {
-        prompt = 'OPEN A ROUTE';
-        hint = '2 / SPADE · AIM AT A BLOCK · LMB TO DIG';
-      } else {
-        prompt = 'BUILD YOUR COVER';
-        hint = '3 / BLOCKS · AIM AT A SURFACE · LMB TO BUILD';
-      }
+      prompt = 'RESHAPE THE FIGHT';
+      hint = '2 / SPADE TO DIG · 3 / BLOCKS TO BUILD';
     } else if (complete) {
       prompt = 'FIELD READY';
       hint = 'TERRAIN IS A TOOL · MAKE THE PLAY';

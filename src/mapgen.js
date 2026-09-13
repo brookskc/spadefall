@@ -92,18 +92,16 @@ export const MAPS = [
       { x: SX / 2, z: SZ / 2 - 28, r: 10, label: 'NORTH BOWL' },
       { x: SX / 2, z: SZ / 2 + 28, r: 10, label: 'SOUTH BOWL' },
     ],
-    // Bright volcanic daylight rather than purple twilight: the bowl walls
-    // and soldiers must stay readable from its low central objective.
-    atmosphere: { sky: ['#755b73', '#b98278', '#f0bd8d'], fog: 0xc49a88, cloud: 0xead2c4, water: 0x657080,
-      sun: [-0.6, 0.78, 0.28], sunTint: [1.16, 1.07, 0.94] },
-    paletteOverrides: { grass: 0x8b785f, dirt: 0x9b604f, sand: 0xd09a71, stone: 0x776d73, moss: 0x6c755f } },
+    atmosphere: { sky: ['#40334f', '#76556a', '#c38a73'], fog: 0xa47770, cloud: 0xc7b1ae, water: 0x595866,
+      sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
+    paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
   { key: 'foundry', name: 'FOUNDRY',   modes: ['tdm'],               gen: null,
-    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'rect', kind: 'rim' },
     // Cool steel, pale overcast, and rust make the industrial TDM floor read
     // nothing like Faultline's sun-baked rock while keeping cover high-value.
-    atmosphere: { sky: ['#4c606d', '#96aab1', '#e1ddd4'], fog: 0xb0b9b9, cloud: 0xe8eceb, water: 0x3b6671,
-      sun: [-0.35, 0.88, 0.18], sunTint: [1.02, 1.04, 1.06] },
-    paletteOverrides: { grass: 0x52686a, dirt: 0x8b513a, sand: 0xbc784a, stone: 0x687781, moss: 0x41645e } },
+    atmosphere: { sky: ['#708791', '#b1c1c4', '#ece5d8'], fog: 0xc2c8c5, cloud: 0xf1f3ef, water: 0x477681,
+      sun: [-0.35, 0.92, 0.18], sunTint: [1.06, 1.07, 1.08] },
+    paletteOverrides: { grass: 0x607577, dirt: 0x955b42, sand: 0xc88652, stone: 0x74838b, moss: 0x4d7069 } },
   { key: 'faultline', name: 'FAULTLINE', modes: ['koth'],            gen: null,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [

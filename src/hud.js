@@ -181,7 +181,7 @@ export function createHud(deps = {}) {
     const mark = done => done ? '■' : '□';
     $('firstMinuteProgress').textContent = [
       `${mark(view.progress.move)} MOVE`, `${mark(view.progress.fire)} FIRE`,
-      `${mark(view.progress.dig)} DIG`, `${mark(view.progress.place)} BUILD`,
+      `${mark(view.progress.terrain)} RESHAPE`,
     ].join('  ·  ');
   },
   score(g) {
@@ -205,11 +205,8 @@ export function createHud(deps = {}) {
     let target = null, label = '';
     const guide = g._firstMinuteView;
     if (guide?.visible && guide.progress?.move && guide.progress?.fire
-        && !guide.progress?.dig) {
+        && !guide.progress?.terrain) {
       target = g.tutorialTerrainTarget?.('dig'); label = 'DIG TUTORIAL';
-    } else if (guide?.visible && guide.progress?.move && guide.progress?.fire
-        && guide.progress?.dig && !guide.progress?.place) {
-      target = g.tutorialTerrainTarget?.('place'); label = 'BUILD TUTORIAL';
     } else if (g.hill) { target = g.hill.pos; label = g.hill.label ?? 'HILL'; }
     else if (g.flags) {
       const enemy = p.team === 'green' ? 'blue' : 'green';
@@ -487,7 +484,7 @@ export function createHud(deps = {}) {
     const blocks = Math.ceil(remaining / POST_MATCH_TIME * rail.children.length);
     for (let i = 0; i < rail.children.length; i++)
       rail.children[i].classList.toggle('on', i < blocks);
-    label.textContent = 'WAITING FOR PLAYERS';
+    label.textContent = `NEXT BATTLE IN ${Math.ceil(remaining)}s · ALL READY SKIPS`;
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);

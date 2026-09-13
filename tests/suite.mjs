@@ -196,7 +196,8 @@ function mapgenTests() {
     ok(`${name}: has the expected authored combat dimensions`,
       ctfFamily
         ? width === 224 && depth === 160 && envelope.shape === 'rect'
-        : width === 192 && depth === 192 && envelope.shape === 'ellipse',
+        : width === 192 && depth === 192
+          && envelope.shape === (m === 6 ? 'rect' : 'ellipse'),
       `${width}x${depth}`);
     for (const team of ['green', 'blue'])
       ok(`${name}: ${team} base stays inside its combat envelope`,
@@ -360,16 +361,17 @@ function mapgenTests() {
     mapAtmosphere(4).sky[0] === '#365b91'
       && MAPS[4].paletteOverrides.grass === 0x567447
       && MAPS[4].paletteOverrides.stone === 0x515d69);
-  ok('CALDERA uses a bright volcanic sky and readable bowl palette',
-    mapAtmosphere(5).sky[0] === '#755b73'
-      && mapAtmosphere(5).sky[1] === '#b98278'
-      && mapAtmosphere(5).fog === 0xc49a88
-      && MAPS[5].paletteOverrides.stone === 0x776d73);
+  ok('CALDERA uses a contrasting volcanic-twilight sky',
+    mapAtmosphere(5).sky[0] === '#40334f'
+      && mapAtmosphere(5).sky[1] === '#76556a'
+      && mapAtmosphere(5).fog === 0xa47770);
   ok('FOUNDRY and FAULTLINE have deliberately separate industrial and geological identities',
-    mapAtmosphere(6).sky[0] === '#4c606d'
-      && MAPS[6].paletteOverrides.dirt === 0x8b513a
+    mapAtmosphere(6).sky[0] === '#708791'
+      && MAPS[6].paletteOverrides.dirt === 0x955b42
+      && MAPS[6].envelope.shape === 'rect'
       && mapAtmosphere(7).sky[0] === '#5895ad'
       && MAPS[7].paletteOverrides.sand === 0xd6a464
+      && MAPS[7].envelope.shape === 'ellipse'
       && MAPS[6].paletteOverrides.stone !== MAPS[7].paletteOverrides.stone);
   const ravineOriginal = SEA + 14;
   const ravineSamples = Array.from({ length: PINEFALL_RAVINE_HALF_WIDTH + 1 }, (_, d) =>
@@ -2057,23 +2059,18 @@ function firstMinuteTests() {
       && view.progress.fire);
   view = guide.update({ matchSecond: 102, x: 13, z: 10 });
   ok('completed actions are skipped rather than forcing a rigid tutorial order',
-    view.progress.move && view.progress.fire && view.prompt === 'OPEN A ROUTE'
-      && view.hint.includes('2 / SPADE'));
+    view.progress.move && view.progress.fire && view.prompt === 'RESHAPE THE FIGHT'
+      && view.hint.includes('2 / SPADE') && view.hint.includes('3 / BLOCKS'));
   guide.mark('dig');
   view = guide.update({ matchSecond: 103, x: 13, z: 10 });
-  ok('successful digging advances to the explicit build lesson',
-    view.progress.dig && !view.progress.place && view.prompt === 'BUILD YOUR COVER'
-      && view.hint.includes('3 / BLOCKS') && !view.complete);
-  guide.mark('place');
-  view = guide.update({ matchSecond: 104, x: 13, z: 10 });
-  ok('only successful digging and building complete the terrain lesson',
-    view.progress.dig && view.progress.place && view.progress.terrain
+  ok('one successful terrain action completes the lightweight field lesson',
+    view.progress.dig && !view.progress.place && view.progress.terrain
       && view.prompt === 'FIELD READY' && view.complete);
   ok('unknown inputs cannot advance the guide', !guide.mark('open-menu'));
-  view = guide.update({ matchSecond: 105, x: 13, z: 10 });
+  view = guide.update({ matchSecond: 104, x: 13, z: 10 });
   ok('all fundamentals produce a short field-ready confirmation',
     view.complete && view.prompt === 'FIELD READY');
-  view = guide.update({ matchSecond: 109, x: 13, z: 10 });
+  view = guide.update({ matchSecond: 108, x: 13, z: 10 });
   ok('the completed card clears itself after four seconds', !view.visible && !guide.active);
 
   const joinedLate = new FirstMinuteGuide();

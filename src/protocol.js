@@ -5,7 +5,7 @@ import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
 
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -73,7 +73,8 @@ export function validClientMessage(d) {
     resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n', 'life'],
     shoot: ['t', 'k', 'n', 'life', 'd', 'o'], dig: ['t', 'k', 'n', 'life', 'd', 'o'],
     place: ['t', 'k', 'n', 'life', 'd', 'o'], nade: ['t', 'k', 'n', 'life', 'd', 'o'],
-    spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'],
+    spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'], vote: ['t', 'k', 'choice'],
+    done: ['t', 'k'],
   };
   if (!actionKeys[d.k] || !exactKeys(d, actionKeys[d.k], ['t', 'k'])) return false;
   if (SECURED_ACTIONS.includes(d.k)
@@ -85,6 +86,8 @@ export function validClientMessage(d) {
   if (d.k === 'mark') return validPingDirection(d.d);
   if (d.k === 'squad') return true;
   if (d.k === 'ready') return true;
+  if (d.k === 'vote') return Number.isInteger(d.choice) && d.choice >= 0 && d.choice <= 2;
+  if (d.k === 'done') return true;
   if (d.k === 'spawnpref') return d.pref === 'front' || d.pref === 'base';
   if (d.k === 'votekick') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
   if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
@@ -143,7 +146,7 @@ function validSnapshot(d) {
 function validEvent(d) {
   if (!shortString(d.k, 20)) return false;
   const eventKeys = {
-    edit: ['t', 'k', 'x', 'y', 'z', 'v', 'wr', 'wh'],
+    edit: ['t', 'k', 'x', 'y', 'z', 'v', 'wr', 'wh', 'aid', 'actor'],
     boom: ['t', 'k', 'x', 'y', 'z', 'r', 'strikeId', 'wr', 'wh'],
     telegraph: ['t', 'k', 'x', 'y', 'z', 'yaw', 'remaining', 'owner', 'id'],
     died: ['t', 'k', 'rt', 'recap'], envdmg: ['t', 'k', 'cause'],
@@ -156,6 +159,7 @@ function validEvent(d) {
     mark: ['t', 'k', 'id', 'name', 'team', 'x', 'y', 'z', 'kind'],
     squad: ['t', 'k', 'voters'],
     ready: ['t', 'k', 'voters'],
+    choices: ['t', 'k', 'choices', 'votes', 'ready'],
     votekick: ['t', 'k', 'active', 'target', 'name', 'voters', 'needed', 'remaining'],
     spawn: ['t', 'k', 'x', 'y', 'z', 'yaw', 'life'], corr: ['t', 'k', 'x', 'y', 'z'],
     kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
@@ -167,7 +171,13 @@ function validEvent(d) {
       && ((d.wr !== undefined && (!Number.isSafeInteger(d.wr) || d.wr < 1))
         || (d.wh !== undefined && (!Number.isInteger(d.wh) || d.wh < 0 || d.wh > 0xffffffff)))) return false;
   switch (d.k) {
-    case 'edit': return [d.x, d.y, d.z, d.v].every(finite);
+    case 'edit': {
+      const noTerrainAck = d.aid === undefined && d.actor === undefined;
+      const validTerrainAck = Number.isSafeInteger(d.aid) && d.aid >= 1
+        && Number.isSafeInteger(d.actor) && d.actor >= 0 && d.actor <= 10000;
+      return [d.x, d.y, d.z, d.v].every(finite)
+        && (noTerrainAck || validTerrainAck);
+    }
     case 'boom': return [d.x, d.y, d.z, d.r].every(finite)
       && (d.strikeId === undefined || (Number.isInteger(d.strikeId) && d.strikeId >= 0));
     case 'telegraph': return [d.x, d.y, d.z, d.yaw, d.remaining, d.owner].every(finite)
@@ -199,6 +209,14 @@ function validEvent(d) {
       && new Set(d.voters).size === d.voters.length;
     case 'ready': return Array.isArray(d.voters) && d.voters.length <= 10
       && d.voters.every(v => shortString(v, 16)) && new Set(d.voters).size === d.voters.length;
+    case 'choices': return Array.isArray(d.choices) && d.choices.length === 3
+      && d.choices.every(row => Array.isArray(row) && row.length === 2
+        && shortString(row[0], 4) && ['tdm', 'koth', 'ctf'].includes(row[0])
+        && Number.isInteger(row[1]) && row[1] >= 0 && row[1] < 6)
+      && Array.isArray(d.votes) && d.votes.length === 3
+      && d.votes.every(v => Number.isInteger(v) && v >= 0 && v <= 10)
+      && Array.isArray(d.ready) && d.ready.length <= 10
+      && d.ready.every(v => shortString(v, 16)) && new Set(d.ready).size === d.ready.length;
     case 'votekick': return d.active === false
       ? exactKeys(d, ['t', 'k', 'active'], ['t', 'k', 'active'])
       : d.active === true && Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000

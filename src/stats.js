@@ -5,6 +5,8 @@
 import { RECORD_FIELDS, updatePersonalBests } from './match-report.js';
 import { masteryProgress } from './mastery.js';
 import { normalizeSpecialties, topSpecialty } from './combat-flow.js';
+import { applyTerrainAction, contractSnapshot, normalizeBadges,
+  normalizeContractProgress, normalizeSelectedBadge } from './contracts.js';
 
 const KEY = 'tos.stats';
 
@@ -32,6 +34,8 @@ function load() {
       for (const field of RECORD_FIELDS)
         records[mode][field.key] = Math.max(0, Number(raw.records?.[mode]?.[field.key]) || 0);
     }
+    const contracts = normalizeContractProgress(raw.contracts ?? raw.terrainContracts);
+    const badges = normalizeBadges(raw.badges ?? raw.unlockedBadges, contracts);
     return {
       kills: raw.kills | 0, deaths: raw.deaths | 0,
       matches: raw.matches | 0, wins: raw.wins | 0,
@@ -39,10 +43,13 @@ function load() {
       gunColor: Number.isFinite(raw.gunColor) ? raw.gunColor : DEFAULT_HEX,
       specialties: normalizeSpecialties(raw.specialties),
       records,
+      contracts, badges,
+      selectedBadge: normalizeSelectedBadge(raw.selectedBadge ?? raw.badge, badges),
     };
   } catch {
     return { kills: 0, deaths: 0, matches: 0, wins: 0, masteryPoints: 0, gunColor: DEFAULT_HEX,
-      specialties: normalizeSpecialties(), records: { ctf: {}, tdm: {}, koth: {} } };
+      specialties: normalizeSpecialties(), records: { ctf: {}, tdm: {}, koth: {} },
+      contracts: normalizeContractProgress(), badges: [], selectedBadge: null };
   }
 }
 function save(s) {
@@ -55,7 +62,8 @@ let state = load();
 
 export const stats = {
   get() { return { ...state, specialties: { ...state.specialties }, records: Object.fromEntries(
-    Object.entries(state.records).map(([mode, row]) => [mode, { ...row }])) }; },
+    Object.entries(state.records).map(([mode, row]) => [mode, { ...row }])),
+  contracts: { ...state.contracts }, badges: [...state.badges] }; },
   unlocked() { return GUN_COLORS.filter(c => state.kills >= c.kills); },
   addKill() { state.kills++; save(state); },
   addDeath() { state.deaths++; save(state); },
@@ -81,6 +89,28 @@ export const stats = {
   },
   mastery() { return masteryProgress(state.masteryPoints); },
   gunColor() { return state.gunColor; },
+  contracts() { return contractSnapshot(state.contracts, state.badges); },
+  badges() { return [...state.badges]; },
+  selectedBadge() { return state.selectedBadge; },
+  recordTerrainAction(action) {
+    const result = applyTerrainAction(state.contracts, action);
+    state.contracts = result.progress;
+    const priorBadges = new Set(state.badges);
+    state.badges = normalizeBadges([...priorBadges, ...result.unlocked], state.contracts);
+    save(state);
+    return {
+      ...result,
+      unlocked: result.unlocked.filter(badge => !priorBadges.has(badge)),
+      contracts: contractSnapshot(state.contracts, state.badges),
+    };
+  },
+  setBadge(badge) {
+    const next = normalizeSelectedBadge(badge, state.badges);
+    if (badge !== null && next === null) return false;
+    state.selectedBadge = next;
+    save(state);
+    return true;
+  },
   // Refuses a color the kill count hasn't actually unlocked yet — the menu
   // never offers one, but this is the real gate regardless of what built
   // the click.

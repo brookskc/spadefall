@@ -721,7 +721,13 @@ export class Bot {
     }
     if (this.stuck >= 1 && !(digging && hi)) b.jump();
     if (this.stuck >= 4) { // wedged on something unshovelled — sidestep
-      this.wander.set((Math.random() - .5) * 30, 0, (Math.random() - .5) * 30);
+      // Preserve forward intent while stepping around the obstruction. A
+      // fully random 30-block wander could send a re-engaging soldier back
+      // toward base (or into a second dead end), which inflated the tail of
+      // post-contact return times without improving its route quality.
+      const side = this.id % 2 ? -1 : 1;
+      this.wander.set(dir.x * 8 - dir.z * side * 20, 0,
+        dir.z * 8 + dir.x * side * 20);
       this.wanderT = 2;
       this.stuck = 0;
       this.exit = null;      // abandon the exit pick that led us here

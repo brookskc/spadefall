@@ -115,11 +115,18 @@ try {
   await guest.evaluate(() => { window.__game.player.alive = true; });
   await host.evaluate(() => { [...window.__game.remote.values()][0].alive = true; });
 
-  await host.evaluate(() => { window.__game.over = true; });
-  await guest.evaluate(() => {
-    window.__game.over = true;
-    window.__game.requestIntermissionReady();
+  // Enter results through the real authoritative path so the continuation
+  // message carries the required three-card battle slate. The previous
+  // fixture toggled `over` directly, which can only manufacture an invalid
+  // empty choices event now that continuation is explicit.
+  await host.evaluate(() => {
+    const game = window.__game;
+    game.captures.green = 3;
+    game._end('green');
   });
+  await guest.waitForFunction(() => window.__game.over
+    && window.__game._battleChoices.length === 3, null, { timeout: syncTimeout });
+  await guest.evaluate(() => { window.__game.requestIntermissionReady(); });
   await host.waitForFunction(() => window.__game._intermissionReady.size === 1,
     null, { timeout: syncTimeout });
   await guest.waitForFunction(() => document.getElementById('readyBtn')?.textContent.includes('1/2'),

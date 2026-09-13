@@ -292,8 +292,12 @@ function huntGoal(bot, context) {
     // off for the whole team so nobody else camps an empty corner.
     if (d < 9 && !bot.target) { g.consumeIntel(bot.team, spot, 16); return patrolGoal(bot, context); }
     const hunt = new context.THREE.Vector3(spot.x, g.world.surface(spot.x | 0, spot.z | 0), spot.z);
-    if (bot.tacticalRole === 'flank-left') hunt.z -= 12;
-    if (bot.tacticalRole === 'flank-right') hunt.z += 12;
+    // Keep flank pressure broad without sending a re-engaging bot into a
+    // distant lateral cul-de-sac after a kill. The frontline and spawn
+    // safety rules still own where a redeploy may occur; this only shortens
+    // the tactical lane offset while hunting a fresh, authoritative ping.
+    if (bot.tacticalRole === 'flank-left') hunt.z -= 8;
+    if (bot.tacticalRole === 'flank-right') hunt.z += 8;
     hunt.z = Math.max(2, Math.min(context.SZ - 2, hunt.z));
     return laned(bot, hunt, context);
   }

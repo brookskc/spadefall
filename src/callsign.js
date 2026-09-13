@@ -39,3 +39,13 @@ export function sanitizeCallsign(value, fallback = 'Player') {
   const name = normalizeCallsign(value);
   return name && !callsignHasProfanity(name) ? name : normalizeCallsign(fallback) || 'Player';
 }
+
+// Network/game display names may carry one of the fixed cosmetic contract
+// tags. Keep the raw callsign rules (including profanity handling) for the
+// body, but retain the tag instead of passing the decorated string through
+// the 12-character input sanitizer.
+export function sanitizeDisplayName(value, fallback = 'Player') {
+  const match = String(value ?? '').match(/^\[(BR|BD|VX)\]\s+([\s\S]*)$/);
+  if (!match) return sanitizeCallsign(value, fallback);
+  return `[${match[1]}] ${sanitizeCallsign(match[2], fallback)}`;
+}

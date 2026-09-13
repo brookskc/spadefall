@@ -1,7 +1,7 @@
 // first-minute.js — optional, non-modal field orientation for one session.
 //
 // The guide teaches the smallest useful Spadefall loop without freezing play:
-// move, fire, reshape one voxel, and communicate. It owns no DOM or gameplay
+// move, fire, dig a route, and build cover. It owns no DOM or gameplay
 // state, so normal matches are identical when the feature flag is off.
 
 export const FIRST_MINUTE_DURATION = 60;
@@ -9,10 +9,37 @@ export const FIRST_MINUTE_MOVE_DISTANCE = 3;
 
 const ACTIONS = new Set(['shoot', 'dig', 'place', 'ping']);
 
+// Terrain lesson acknowledgements are deliberately tiny pure helpers so the
+// client cannot credit an input before the ordered, actor-scoped edit arrives.
+export function consumeTerrainAck(pending, event, actorIdx) {
+  if (!Number.isSafeInteger(event?.aid) || !Number.isSafeInteger(event?.actor)
+      || !Number.isSafeInteger(actorIdx) || event.actor !== actorIdx) return null;
+  const action = pending.get(event.aid);
+  if (!action) return null;
+  pending.delete(event.aid);
+  return (event.v === 0 && action === 'dig')
+    || (event.v !== 0 && action === 'place') ? action : null;
+}
+
+export function clearAckedTerrainActions(pending, ack) {
+  if (!Number.isSafeInteger(ack)) return 0;
+  let cleared = 0;
+  for (const seq of pending.keys()) {
+    if (seq <= ack) { pending.delete(seq); cleared++; }
+  }
+  return cleared;
+}
+
 export function firstMinuteObjective(mode) {
   if (mode === 'tdm') return 'OUTSCORE THE ENEMY TEAM';
   if (mode === 'koth') return 'OCCUPY THE HILL WITH YOUR SQUAD';
   return 'STEAL THEIR FLAG AND BRING IT HOME';
+}
+
+export function firstMinuteMoveHint(mode) {
+  return mode === 'tdm'
+    ? 'WASD · MOVE WITH YOUR TEAM TOWARD MIDFIELD'
+    : 'WASD · FOLLOW THE GOLD OBJECTIVE ARROW';
 }
 
 // One terse, map-specific line makes the authored voxel decision visible in
@@ -82,10 +109,12 @@ export class FirstMinuteGuide {
     const progress = {
       move: this.actions.has('move'),
       fire: this.actions.has('shoot'),
-      terrain: this.actions.has('dig') || this.actions.has('place'),
+      dig: this.actions.has('dig'),
+      place: this.actions.has('place'),
       // Communication remains a useful optional shortcut, never a gate.
     };
-    const complete = progress.move && progress.fire && progress.terrain;
+    progress.terrain = progress.dig && progress.place;
+    const complete = progress.move && progress.fire && progress.dig && progress.place;
     if (complete && this.completedAt == null) this.completedAt = elapsed;
     if (complete && elapsed - this.completedAt >= 4) {
       this.active = false;
@@ -93,11 +122,16 @@ export class FirstMinuteGuide {
     }
 
     let prompt = 'MOVE AND FIRE';
-    let hint = !progress.move ? 'WASD · FOLLOW THE GOLD ARROW'
+    let hint = !progress.move ? firstMinuteMoveHint(this.mode)
       : !progress.fire ? 'LEFT MOUSE · RIGHT MOUSE AIM' : 'PUSH WITH YOUR SQUAD';
     if (progress.move && progress.fire && !progress.terrain) {
-      prompt = 'RESHAPE THE FIGHT';
-      hint = firstMinuteTerrainCue(this.mapIndex);
+      if (!progress.dig) {
+        prompt = 'OPEN A ROUTE';
+        hint = '2 / SPADE · AIM AT A BLOCK · LMB TO DIG';
+      } else {
+        prompt = 'BUILD YOUR COVER';
+        hint = '3 / BLOCKS · AIM AT A SURFACE · LMB TO BUILD';
+      }
     } else if (complete) {
       prompt = 'FIELD READY';
       hint = 'TERRAIN IS A TOOL · MAKE THE PLAY';
@@ -108,6 +142,7 @@ export class FirstMinuteGuide {
       prompt,
       hint,
       objective: firstMinuteObjective(this.mode),
+      terrainCue: firstMinuteTerrainCue(this.mapIndex),
       progress,
       complete,
     };

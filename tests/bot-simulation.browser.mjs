@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { publicContentAvailable } from '../src/content-gating.js';
 
 const { chromium } = createRequire(import.meta.url)('playwright');
 const root = normalize(join(fileURLToPath(new URL('.', import.meta.url)), '..'));
@@ -24,7 +25,7 @@ const requestedMaps = new Set((process.env.SPADE_BOT_SIM_MAPS ?? '0,1,2,3,4,5')
   .split(',').map(Number).filter(Number.isInteger));
 const cases = [
   ...[0, 1, 2].map(map => ['ctf', map]),
-  ...[0, 1, 2, 3, 4, 5].map(map => ['tdm', map]),
+  ...[0, 1, 2, 3, 4].map(map => ['tdm', map]),
   ...[3, 4, 5].map(map => ['koth', map]),
 ].filter(([mode, map]) => requestedModes.has(mode) && requestedMaps.has(map))
   .flatMap(([mode, map]) => [0x1a2b3c4d, 0x5e6f7788].map(seed => ({ mode, map, seed })));
@@ -87,10 +88,15 @@ try {
     await page.goto(`${origin}/?auto=1&map=${scenario.map}&mode=${scenario.mode}`,
       { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__game?.world);
-    const row = await page.evaluate(({ scenario, seconds, step }) => {
+    const publicRoom = publicContentAvailable(scenario.mode, scenario.map);
+    const row = await page.evaluate(({ scenario, seconds, step, publicRoom }) => {
       const g = window.__game;
       g.mode = 'solo';
       g.gameMode = scenario.mode;
+      // Exercise the same compact public-room context used by quick match
+      // for the TDM/KOTH pacing and re-engagement contract. CTF remains in
+      // the matrix as a control because its pacing is intentionally unchanged.
+      g.publicRoom = publicRoom;
       // Game time is deliberately monotonic in production (for presentation
       // scheduling). Keep each simulation round's measurements local.
       const beganAt = g.time;
@@ -100,7 +106,7 @@ try {
       // engagement is an even 5v5 bot room.
       g.player.alive = false;
       g.player.vmRoot.visible = false;
-      g.bots.push(g._newBot('green'));
+      g.bots.push(g._newBot(g.player.team));
       const m = { deaths: 0, spawnDeaths: 0, edits: 0, digs: 0, builds: 0,
         stuck: 0, contacts: [], firstDeathAt: null, reengage: [], deathsByClass: {}, killsByClass: {},
         pickups: 0, returns: 0, captures: 0, flagTransitions: 0, hillOccupied: 0,
@@ -378,7 +384,7 @@ try {
         reengageMedian: percentile(sorted(m.reengage), .5), reengageP90: percentile(sorted(m.reengage), .9),
         botLives: g.bots.length, botKd: kd, ctfRuns: m.ctfRuns,
         editsPerMatch: m.edits, telemetry: g.botTelemetry(), faults: window.__spadefallDiagnostics?.faults ?? [] };
-    }, { scenario, seconds, step });
+    }, { scenario, seconds, step, publicRoom });
     row.browserFaults = faults;
     browserFaults.push(...faults);
     rows.push(row);
@@ -510,6 +516,12 @@ try {
   assert.ok(report.spawnDeathRate < .15, `spawn deaths ${report.spawnDeathRate.toFixed(3)}`);
   assert.ok(report.averageEdits < 1000, `terrain edits ${report.averageEdits.toFixed(1)}/round`);
   assert.ok(report.worstFirstContact <= 90, `first contact ${report.worstFirstContact.toFixed(1)}s`);
+  const quickCombatRows = rows.filter(row => publicContentAvailable(row.mode, row.map));
+  if (quickCombatRows.length) {
+    const worstQuickReengage = Math.max(...quickCombatRows.map(row => row.reengageP90 ?? Infinity));
+    assert.ok(worstQuickReengage <= 40,
+      `public TDM/KOTH re-engagement p90 ${worstQuickReengage.toFixed(1)}s`);
+  }
   if (seconds >= 600 && byMode.ctf.rounds && ctfRuns.length) {
     const progressed = ctfRuns.filter(run => run.startHomeDistance - run.closestHomeDistance >= 16);
     assert.ok(progressed.length >= Math.max(1, Math.ceil(ctfRuns.length * 0.5)),

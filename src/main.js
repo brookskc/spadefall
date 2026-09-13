@@ -21,13 +21,17 @@ import { PROTOCOL_VERSION } from './protocol.js';
 import { RuntimeHealth, resourceDrift } from './runtime-health.js';
 import { EngagementTracker, parseEngagementFeatures } from './engagement.js';
 import { callsignIssue, normalizeCallsign } from './callsign.js';
+import { decorateCallsign } from './contracts.js';
 import { topSpecialty } from './combat-flow.js';
 import { BINDING_LABELS } from './controls.js';
 import { AUTO_GFX_BENCHMARK_VERSION,
   FirstSessionGraphicsBenchmark } from './performance-auto.js';
 import { ProductionTelemetry, errorFingerprint } from './telemetry.js';
+import { keyboardMouseUnsupported } from './device-support.js';
 
 const $ = id => document.getElementById(id);
+const touchOnlyDevice = keyboardMouseUnsupported();
+if (touchOnlyDevice) $('deviceWarning')?.classList.add('on');
 // Legacy visual controls retain their look, but are reachable and activatable
 // with a keyboard until their markup can be retired in a visual refresh.
 for (const el of document.querySelectorAll('.opt, .plink, .play')) {
@@ -117,6 +121,27 @@ window.__game = game; // debugging/testing handle
 window.__renderer = renderer;
 game.onRoundEnd = () => {
   if (document.pointerLockElement === renderer.domElement) document.exitPointerLock?.();
+};
+game.onDone = () => {
+  const oldNet = net;
+  net = null;
+  game.net = null;
+  destroyPeerQuietly(oldNet);
+  game.mode = 'solo';
+  game.publicRoom = false;
+  roomCode = null;
+  sessionLive = false;
+  netDead = false;
+  connecting = false;
+  matchmaking = false;
+  searchCanceled = false;
+  $('end').classList.add('hidden');
+  showInvite();
+  game.rebuild(Math.floor(Math.random() * 1e9), applyHostPrefs());
+  setPlaying(false);
+  bailToMenu();
+  showPlay('DEPLOY');
+  status('session ended — ready when you are');
 };
 game.player.vmRoot.visible = false; // hidden until first deploy
 let lastCaption = null;
@@ -227,8 +252,11 @@ const CALLSIGNS = ['Ace', 'Deuce', 'Trey', 'Joker', 'King', 'Queen', 'Jack', 'Te
 function rawName() {
   return normalizeCallsign($('nameInput').value);
 }
+function randomCallsign() {
+  return CALLSIGNS[Math.floor(Math.random() * CALLSIGNS.length)] + Math.floor(Math.random() * 90 + 10);
+}
 function callsign() {
-  return rawName() || CALLSIGNS[Math.floor(Math.random() * CALLSIGNS.length)] + Math.floor(Math.random() * 90 + 10);
+  return decorateCallsign(rawName() || randomCallsign(), stats.selectedBadge());
 }
 function ensureCallsign() {
   const issue = callsignIssue($('nameInput').value);
@@ -238,7 +266,7 @@ function ensureCallsign() {
     $('nameInput').focus();
     return false;
   }
-  if (issue === 'empty') $('nameInput').value = callsign();
+  if (issue === 'empty') $('nameInput').value = randomCallsign();
   $('nameInput').value = rawName();
   try { localStorage.setItem('tos.name', $('nameInput').value); } catch { /* best effort */ }
   return true;
@@ -311,6 +339,9 @@ function setPlaying(v) {
     if (game.mode !== 'client' || game.myId) {
       const started = engagement.beginMatch(game.engagementContext(engagementSource));
       if (started) {
+        const team = game.player.team?.toUpperCase() ?? 'GREEN';
+        const enemy = game.player.team === 'blue' ? 'GREEN' : 'BLUE';
+        game.hud.message(`YOUR TEAM · ${team}  /  ENEMY · ${enemy}`, '#ffd97a');
         game.funnel('playable_match');
         if (game._completedFunnelMatch) game.funnel('next_match');
         game._completedFunnelMatch = false;
@@ -355,6 +386,9 @@ $('playBtn').addEventListener('click', () => {
   stopRotationCountdown(); // clicking through is just skipping the wait
   engagement.record('lobby_action', { action: 'deploy' });
   funnel('play_selected');
+  // Solo has no network handshake to carry identity; assign the decorated
+  // display callsign at the same entry boundary as host/join/quick/browse.
+  game.player.name = callsign();
   deploy();
 });
 
@@ -376,7 +410,7 @@ function adoptHost(n, code, opts = {}) {
     onOpen: () => {
       if (opts.public) {
         const num = +code.slice(3) + 1;
-        status(`hosting <b>PUBLIC ROOM ${num}</b> — quick-match players will drop in`);
+        status(`STARTING BOT-FILLED 5v5 · hosting <b>PUBLIC ROOM ${num}</b>`);
         $('roomcode').querySelector('b').textContent = 'PUBLIC ' + num;
       } else {
         status(`room code <b>${code}</b> — share it`);
@@ -646,6 +680,7 @@ const modePref = $('modePref');
 // the first thing you do or the fiftieth.
 {
   const statsLine = $('statsLine'), masteryLine = $('masteryLine'), gunColors = $('gunColors');
+  const terrainContracts = $('terrainContracts'), terrainBadges = $('terrainBadges');
   function renderStats() {
     const s = stats.get();
     const kd = (s.kills / Math.max(1, s.deaths)).toFixed(2);
@@ -682,6 +717,46 @@ const modePref = $('modePref');
       }
       gunColors.appendChild(sw);
     }
+    if (terrainContracts) {
+      terrainContracts.innerHTML = '';
+      for (const contract of stats.contracts()) {
+        const row = document.createElement('div');
+        row.className = 'terrainContract';
+        const label = document.createElement('span');
+        label.textContent = `${contract.name} · ${contract.copy}`;
+        const count = document.createElement('b');
+        count.textContent = `${contract.current}/${contract.target}`;
+        const bar = document.createElement('progress');
+        bar.max = contract.target; bar.value = contract.current;
+        bar.setAttribute('aria-label', `${contract.copy} ${contract.current}/${contract.target}`);
+        row.append(label, count, bar);
+        terrainContracts.appendChild(row);
+      }
+    }
+    if (terrainBadges) {
+      terrainBadges.innerHTML = '';
+      const selected = stats.selectedBadge();
+      const unlocked = new Set(stats.badges());
+      for (const contract of stats.contracts()) {
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'badgeChoice';
+        button.textContent = contract.badge;
+        button.title = unlocked.has(contract.badge)
+          ? `equip ${contract.badge}` : `complete ${contract.name} to unlock`;
+        if (!unlocked.has(contract.badge)) {
+          button.classList.add('locked'); button.disabled = true;
+        } else {
+          button.classList.toggle('equipped', selected === contract.badge);
+          button.addEventListener('click', () => { stats.setBadge(contract.badge); renderStats(); });
+        }
+        terrainBadges.appendChild(button);
+      }
+      const clear = document.createElement('button');
+      clear.type = 'button'; clear.className = 'badgeChoice' + (!selected ? ' equipped' : '');
+      clear.textContent = 'CLEAR'; clear.title = 'clear callsign badge';
+      clear.addEventListener('click', () => { stats.setBadge(null); renderStats(); });
+      terrainBadges.appendChild(clear);
+    }
   }
   game.onStatsChanged = renderStats;
   renderStats();
@@ -703,19 +778,12 @@ const modePref = $('modePref');
       const idx = Number(el.dataset.cls);
       if (!game.player.selectClass(idx, { applyNow: true })) return;
       renderStartClass();
-      // If automatic rotation lost pointer lock, choosing the next class is
-      // also the fresh browser gesture needed to resume. No second DEPLOY
-      // click should be required.
-      if ($('menu').classList.contains('rotating')
-          && document.pointerLockElement !== renderer.domElement) deployAuto();
     });
   }
   renderStartClass();
 }
 
-// Results class choice: the click itself is also the user gesture that can
-// re-arm pointer lock after Escape. The result screen stays up until the
-// actual rotation callback hides it.
+// Results class choice remains available before an explicit PLAY ANOTHER.
 for (const el of document.querySelectorAll('#endClassOpts .opt')) {
   el.addEventListener('click', () => {
     if (!game.player.selectClass(Number(el.dataset.cls))) return;
@@ -1077,6 +1145,11 @@ const recoverPrivateSetup = (stage, error) => {
 
 $('quickBtn').addEventListener('click', async () => {
   if (net || matchmaking || connecting) return;
+  if (touchOnlyDevice) {
+    $('deviceWarning')?.classList.add('on');
+    status('keyboard + mouse required — quick match is unavailable on touch-only devices');
+    return;
+  }
   if (!ensureCallsign()) return;
   engagementSource = 'quick';
   funnel('play_selected');
@@ -1088,19 +1161,20 @@ $('quickBtn').addEventListener('click', async () => {
   const lock = renderer.domElement.requestPointerLock(); // gesture-valid only now
   lock?.catch?.(() => {}); // refused → DEPLOY fallback below
   $('menu').classList.add('searching');
-  status('searching for a public room…');
+  status('FINDING A ROOM…');
   let result = null;
   try {
     let r = await Net.quickScan(game.player.name, teamPref(), qmTimeout);
     result = r;
     if (r.kind === 'full-all') { // one retry: a room may have just opened up
-      status('all rooms full — rescanning…');
+      status('ROOMS FULL — RESCANNING…');
       await new Promise(res => setTimeout(res, 1500));
       r = await Net.quickScan(game.player.name, teamPref(), qmTimeout);
       result = r;
     }
     if (searchCanceled) { destroyPeerQuietly(r.net); return; } // bailed with Esc mid-search
     $('menu').classList.remove('searching');
+    status('STARTING BOT-FILLED MATCH…');
     if (r.kind === 'join') {
       migrationGen = 0;
       game.mode = 'client';
@@ -1213,7 +1287,7 @@ async function scanRooms() {
     browseGuest = r.guest; // kept warm for the join knock
     if (!r.rooms.length) {
       browseSt.innerHTML = browsePage === 0
-        ? 'no public rooms right now — hit <b>QUICK MATCH</b> and one starts with you as host'
+        ? 'no public rooms right now — hit <b>PLAY NOW · 5v5</b> and one starts with you as host'
         : `no active rooms on page ${browsePage + 1}`;
       return;
     }
@@ -1317,56 +1391,10 @@ if (/^[A-Z0-9]{4}(?:-M[1-9]\d*)?$/.test(invitedCode) && !params.get('mp')) {
     : `squad invite ready — enter a callsign and join <b>${invitedCode}</b>`);
 }
 
-// Map rotation: the room moves to the next map after each match. The old
-// PLAY AGAIN reloaded the page, which for the host tore the whole room down
-// mid-rotation.
-//
-// Rotation used to end on the DEPLOY button and wait there indefinitely. The
-// room had already built the next map and picked the teams; the only thing
-// standing between the player and the match was a click that carried no
-// decision. Now the countdown takes you in on its own, and the window exists
-// for the one choice that IS worth making between rounds: your class.
-const ROTATION_DEPLOY_SECONDS = 6;
-let rotateTimer = null;
-
+// Post-match continuation: the room stays on the result until players make
+// an explicit battle choice and press PLAY ANOTHER.
 function stopRotationCountdown() {
-  if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; }
   $('menu').classList.remove('rotating');
-}
-
-// Pointer lock normally wants a user gesture. Re-requesting it moments after
-// the game itself released it usually succeeds, but any browser is free to
-// refuse — so a refusal must land the player back on a working DEPLOY button
-// rather than stranded in a menu that has stopped counting.
-function deployAuto() {
-  initAudio();
-  let lock;
-  try { lock = renderer.domElement.requestPointerLock(); }
-  catch { lock = Promise.reject(new Error('refused')); }
-  Promise.resolve(lock).catch(() => {
-    showPlay('DEPLOY');
-    status('press <b>DEPLOY</b> to drop in');
-  });
-}
-
-function startRotationCountdown() {
-  stopRotationCountdown();
-  let left = ROTATION_DEPLOY_SECONDS;
-  $('menu').classList.add('rotating');
-  $('playOptions').open = true;
-  const tick = () => {
-    if (playing) return stopRotationCountdown(); // already dropped in
-    if (left <= 0) {
-      stopRotationCountdown();
-      showPlay('DEPLOY');
-      deployAuto();
-      return;
-    }
-    showPlay(`DEPLOYING IN ${left}`);
-    left--;
-  };
-  tick();
-  rotateTimer = setInterval(tick, 1000);
 }
 
 game.onRestart = mapName => {
@@ -1374,14 +1402,13 @@ game.onRestart = mapName => {
   $('end').classList.add('hidden');
   $('pausedTitle').textContent = '— MATCH OVER —';
   if (document.pointerLockElement === renderer.domElement) {
-    stopRotationCountdown();
     setPlaying(true);
     status(`new map — <b>${mapName}</b>`);
     return;
   }
   if (playing) setPlaying(false);
   status(`new map — <b>${mapName}</b> · pick a class`);
-  startRotationCountdown();
+  showPlay('DEPLOY');
 };
 
 // Tab (and Shift+Tab) can force pointer lock closed on some browsers as an
@@ -1504,7 +1531,7 @@ if (params.get('mp') === 'host') {
 } else if (params.get('mp') === 'browse') {
   setTimeout(() => $('browseBtn').click(), 400);
 } else if (params.get('invite') === '1' && invitedCode) {
-  if (!rawName()) $('nameInput').value = callsign();
+  if (!rawName()) $('nameInput').value = randomCallsign();
   setTimeout(() => $('joinBtn').click(), 500);
 }
 

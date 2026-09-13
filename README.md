@@ -16,14 +16,14 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
-| Team Deathmatch | First to 50 kills | Greenbelt, Beachhead, Pinefall, Dunes, Caldera |
-| King of the Hill | Capture and occupy rotating points for 120 seconds | Dunes, Caldera |
+| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall, Dunes |
+| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Dunes, Caldera |
 
 Capture the Flag and the Crown map are retired from public play. Both remain playable in private rooms started with the `privateContent` feature for development and testing.
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
-After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. The room automatically advances to the next map after the intermission; players can choose their next class and ask teammates to stay together as a squad.
+After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players choose from three mode/map cards and explicitly select PLAY ANOTHER or DONE; there is no forced rotation.
 
 ## Loadouts and tools
 

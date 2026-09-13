@@ -34,6 +34,8 @@ import { actionSequenceDisposition, aimYawDelta, authorizeReload,
 import { RuntimeHealth, evaluateReleaseBudgets, percentile,
   resourceDrift } from '../src/runtime-health.js';
 import { modeScoreLimit } from '../src/match-modes.js';
+import { nextBattleChoices, resolveBattleVote, validBattleChoice,
+  validBattleChoices } from '../src/next-battle.js';
 import { PresentationSchedule } from '../src/presentation.js';
 import { AUDIO_QA_CONTRACT, SOUND_META, reloadPitch, sfx, spatialAudioMix, spatialVerticality,
   voxelSurface } from '../src/audio.js';
@@ -70,12 +72,14 @@ import { masteryProgress } from '../src/mastery.js';
 import { staySquadGroups, staySquadState, voteKickVotesNeeded,
   validPingDirection } from '../src/social.js';
 import { callsignHasProfanity, callsignIssue, normalizeCallsign,
-  sanitizeCallsign } from '../src/callsign.js';
+  sanitizeCallsign, sanitizeDisplayName } from '../src/callsign.js';
 import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
 import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
 import { FirstMinuteGuide, firstMinuteObjective,
-  firstMinuteTerrainCue } from '../src/first-minute.js';
+  firstMinuteTerrainCue, firstMinuteMoveHint, consumeTerrainAck,
+  clearAckedTerrainActions } from '../src/first-minute.js';
+import { keyboardMouseUnsupported } from '../src/device-support.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
@@ -92,6 +96,9 @@ import { chooseSpawn } from '../src/spawn-controller.js';
 import { ctfFlagInteraction } from '../src/objectives.js';
 import { advanceMatchClock } from '../src/match-lifecycle.js';
 import { contentAvailable, publicContentAvailable } from '../src/content-gating.js';
+import { TERRAIN_CONTRACTS, applyTerrainAction, contractSnapshot,
+  decorateCallsign, normalizeBadges, normalizeContractProgress,
+  normalizeSelectedBadge } from '../src/contracts.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -272,12 +279,14 @@ function mapgenTests() {
     JSON.stringify(Object.fromEntries(beachSurfaceCounts ?? [])));
   ok('mapsForMode(ctf) = [0,1,2]', JSON.stringify(mapsForMode('ctf')) === '[0,1,2]');
   ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
-  ok('mapsForMode(tdm) covers every map',
-    mapsForMode('tdm').length === MAPS.length, JSON.stringify(mapsForMode('tdm')));
-  ok('public rotation excludes CTF and CROWN while internal rotations remain intact',
+  ok('CALDERA is KOTH-only while TDM retains its other five maps',
+    JSON.stringify(MAPS[5].modes) === '["koth"]'
+      && JSON.stringify(mapsForMode('tdm')) === '[0,1,2,3,4]',
+    JSON.stringify(mapsForMode('tdm')));
+  ok('public rotation excludes CTF, CROWN, and TDM CALDERA',
     JSON.stringify(mapsForMode('ctf', { publicOnly: true })) === '[]'
       && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[3,5]'
-      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,3,5]'
+      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,3]'
       && mapsForMode('tdm').includes(4));
   ok('private content requires its explicit feature outside public paths',
     !publicContentAvailable('ctf', 0) && !publicContentAvailable('tdm', 4)
@@ -833,10 +842,18 @@ function multiplayerRuleTests() {
   ok('respawn preferences and intermission readiness are strict bounded actions',
     validClientMessage({ t: 'a', k: 'spawnpref', pref: 'base' })
       && validClientMessage({ t: 'a', k: 'ready' })
+      && validClientMessage({ t: 'a', k: 'vote', choice: 2 })
+      && validClientMessage({ t: 'a', k: 'done' })
       && !validClientMessage({ t: 'a', k: 'spawnpref', pref: 'enemy' })
-      && !validClientMessage({ t: 'a', k: 'ready', fast: true }));
+      && !validClientMessage({ t: 'a', k: 'ready', fast: true })
+      && !validClientMessage({ t: 'a', k: 'vote', choice: 3 })
+      && !validClientMessage({ t: 'a', k: 'done', extra: true }));
   ok('ready rosters and headshot feedback are bounded server events',
     validServerMessage({ t: 'e', k: 'ready', voters: ['p0', 'p2'] })
+      && validServerMessage({ t: 'e', k: 'choices',
+        choices: [['tdm', 1], ['koth', 3], ['tdm', 2]], votes: [1, 0, 2], ready: ['p0'] })
+      && !validServerMessage({ t: 'e', k: 'choices',
+        choices: [['tdm', 1]], votes: [1], ready: [] })
       && validServerMessage({ t: 'e', k: 'hit', kill: true, head: 1 })
       && !validServerMessage({ t: 'e', k: 'hit', kill: true, head: 2 }));
   const migratedWelcome = { t: 'w', id: 'peer', team: 'green', seed: 1, map: 0, mode: 'ctf',
@@ -1424,6 +1441,37 @@ function pacingRuleTests() {
   ok('mode-specific regulation clocks match the pacing plan',
     modeMatchSeconds('ctf') === 720 && modeMatchSeconds('tdm') === 540
       && modeMatchSeconds('koth') === 600);
+  ok('public quick-play uses compact TDM/KOTH clocks and score caps',
+    modeMatchSeconds('tdm', { publicRoom: true }) === 330
+      && modeMatchSeconds('koth', { publicRoom: true }) === 360
+      && modeScoreLimit('tdm', { publicRoom: true }) === 35
+      && modeScoreLimit('koth', { publicRoom: true }) === 90);
+  ok('private defaults, CTF, and explicit clock overrides stay compatible',
+    modeMatchSeconds('tdm', { publicRoom: false }) === 540
+      && modeMatchSeconds('koth', { publicRoom: false }) === 600
+      && modeMatchSeconds('ctf', { publicRoom: true }) === 720
+      && modeMatchSeconds('tdm', { publicRoom: true, override: 17 }) === 17
+      && modeScoreLimit('ctf', { publicRoom: true }) === 3);
+  const publicChoices = nextBattleChoices({ maps: MAPS, mode: 'tdm', mapIndex: 0,
+    publicRoom: true, seed: 77 });
+  ok('public next-battle choices are three unique valid cards with a mode switch',
+    publicChoices.length === 3
+      && new Set(publicChoices.map(choice => `${choice.mode}:${choice.map}`)).size === 3
+      && publicChoices.every(choice => validBattleChoice(choice, MAPS, { publicRoom: true }))
+      && validBattleChoices(publicChoices, MAPS, { publicRoom: true })
+      && new Set(publicChoices.map(choice => choice.mode)).size === 2);
+  ok('duplicate or single-mode public battle slates fail the catalogue boundary',
+    !validBattleChoices([publicChoices[0], publicChoices[0], publicChoices[1]], MAPS,
+      { publicRoom: true })
+      && !validBattleChoices(publicChoices.map((choice, index) => ({
+        ...choice, mode: 'tdm', map: [0, 1, 2][index],
+      })), MAPS, { publicRoom: true }));
+  const resolved = resolveBattleVote(publicChoices,
+    [{ actor: 'p0', choice: 1 }, { actor: 'p1', choice: 1 }, { actor: 'p2', choice: 0 }],
+    ['p0', 'p1', 'p2']);
+  ok('next-battle tally resolves highest count with deterministic lowest-index ties',
+    resolved.index === 1 && resolveBattleVote(publicChoices,
+      [{ actor: 'p0', choice: 0 }, { actor: 'p1', choice: 1 }], ['p0', 'p1']).index === 0);
   ok('deaths in one TDM wave share its six-second boundary',
     Math.abs(respawnWaveDelay('tdm', 12.2) - 5.8) < 1e-9
       && Math.abs(respawnWaveDelay('tdm', 14.5) - 3.5) < 1e-9);
@@ -1892,6 +1940,10 @@ function firstMinuteTests() {
     firstMinuteObjective('ctf').includes('FLAG')
       && firstMinuteObjective('tdm').includes('OUTSCORE')
       && firstMinuteObjective('koth').includes('HILL'));
+  ok('TDM orientation sends players to teammates instead of a missing arrow',
+    firstMinuteMoveHint('tdm').includes('MIDFIELD')
+      && !firstMinuteMoveHint('tdm').includes('GOLD ARROW')
+      && firstMinuteMoveHint('ctf').includes('GOLD OBJECTIVE ARROW'));
   ok('signature maps teach their authored voxel decision in one line',
     firstMinuteTerrainCue(0).includes('MIDFIELD BELT')
       && firstMinuteTerrainCue(1).includes('SEAWALL')
@@ -1911,16 +1963,23 @@ function firstMinuteTests() {
       && view.progress.fire);
   view = guide.update({ matchSecond: 102, x: 13, z: 10 });
   ok('completed actions are skipped rather than forcing a rigid tutorial order',
-    view.progress.move && view.progress.fire && view.prompt === 'RESHAPE THE FIGHT');
-  guide.mark('place');
+    view.progress.move && view.progress.fire && view.prompt === 'OPEN A ROUTE'
+      && view.hint.includes('2 / SPADE'));
+  guide.mark('dig');
   view = guide.update({ matchSecond: 103, x: 13, z: 10 });
-  ok('either digging or building satisfies the signature voxel interaction',
-    view.progress.terrain && view.prompt === 'FIELD READY' && view.complete);
-  ok('unknown inputs cannot advance the guide', !guide.mark('open-menu'));
+  ok('successful digging advances to the explicit build lesson',
+    view.progress.dig && !view.progress.place && view.prompt === 'BUILD YOUR COVER'
+      && view.hint.includes('3 / BLOCKS') && !view.complete);
+  guide.mark('place');
   view = guide.update({ matchSecond: 104, x: 13, z: 10 });
+  ok('only successful digging and building complete the terrain lesson',
+    view.progress.dig && view.progress.place && view.progress.terrain
+      && view.prompt === 'FIELD READY' && view.complete);
+  ok('unknown inputs cannot advance the guide', !guide.mark('open-menu'));
+  view = guide.update({ matchSecond: 105, x: 13, z: 10 });
   ok('all fundamentals produce a short field-ready confirmation',
     view.complete && view.prompt === 'FIELD READY');
-  view = guide.update({ matchSecond: 108, x: 13, z: 10 });
+  view = guide.update({ matchSecond: 109, x: 13, z: 10 });
   ok('the completed card clears itself after four seconds', !view.visible && !guide.active);
 
   const joinedLate = new FirstMinuteGuide();
@@ -1932,6 +1991,52 @@ function firstMinuteTests() {
   ok('the timeout is measured from deployment, even in a match joined late',
     joinedLate.update({ matchSecond: 359, x: 0, z: 0 }).visible
       && !joinedLate.update({ matchSecond: 360, x: 0, z: 0 }).visible);
+}
+
+function terrainContractTests() {
+  group('terrain contracts: bounded cosmetic progression');
+  ok('exactly three terrain contracts expose session-scale targets',
+    TERRAIN_CONTRACTS.length === 3
+      && TERRAIN_CONTRACTS.map(c => c.target).join(',') === '10,10,30');
+  const clamped = normalizeContractProgress({ dig: -4, place: 99, terrain: 1e9 });
+  ok('contract migration clamps malformed and oversized progress',
+    clamped.dig === 0 && clamped.place === 10 && clamped.terrain === 30);
+  let progress = normalizeContractProgress({});
+  for (let i = 0; i < 10; i++) progress = applyTerrainAction(progress, 'dig').progress;
+  ok('successful dig progress unlocks the route badge at ten',
+    contractSnapshot(progress).find(c => c.id === 'route')?.complete
+      && normalizeBadges([], progress).includes('[BR]'));
+  const rejected = applyTerrainAction(progress, 'air');
+  ok('unknown intent cannot advance a contract',
+    JSON.stringify(rejected.progress) === JSON.stringify(progress) && !rejected.completed.length);
+  ok('selected badge accepts only an unlocked fixed choice',
+    normalizeSelectedBadge('[BR]', ['[BR]']) === '[BR]'
+      && normalizeSelectedBadge('[VX]', ['[BR]']) === null);
+  ok('callsign decoration preserves the twelve-character raw input',
+    decorateCallsign('abcdefghijkl', '[VX]') === '[VX] abcdefghijkl'
+      && sanitizeDisplayName('[VX] abcdefghijkl') === '[VX] abcdefghijkl'
+      && decorateCallsign('abcdefghijkl', '[VX]').length < 64);
+}
+
+function deviceSupportTests() {
+  group('device support gating');
+  const nav = { maxTouchPoints: 5 };
+  ok('touch-only coarse devices are warned before quick match',
+    keyboardMouseUnsupported({ navigatorLike: nav,
+      matchMediaLike: q => ({ matches: q === '(pointer: coarse)' }) }));
+  ok('touch laptops with a fine pointer remain usable',
+    !keyboardMouseUnsupported({ navigatorLike: nav,
+      matchMediaLike: q => ({ matches: q === '(pointer: coarse)' || q === '(pointer: fine)' }) }));
+  ok('ordinary mouse devices are not blocked',
+    !keyboardMouseUnsupported({ navigatorLike: { maxTouchPoints: 0 },
+      matchMediaLike: () => ({ matches: true }) }));
+  const pending = new Map([[4, 'dig'], [5, 'place']]);
+  ok('terrain acknowledgements are scoped to the acting roster member',
+    consumeTerrainAck(pending, { aid: 4, actor: 8, v: 0 }, 9) === null
+      && pending.has(4)
+      && consumeTerrainAck(pending, { aid: 4, actor: 9, v: 0 }, 9) === 'dig');
+  ok('authoritative action ack clears denied terrain attempts without leaking state',
+    clearAckedTerrainActions(pending, 5) === 1 && pending.size === 0);
 }
 
 function voxelStoryTests() {
@@ -3312,9 +3417,11 @@ export async function run() {
   kothRuleTests();
   streakRuleTests();
   matchReportTests();
+  terrainContractTests();
   socialProgressionTests();
   engagementFoundationTests();
   firstMinuteTests();
+  deviceSupportTests();
   voxelStoryTests();
   deathRecapTests();
   stayAsSquadTests();

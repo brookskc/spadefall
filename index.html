@@ -72,6 +72,16 @@
   .swatch.equipped { border-color:#ffd97a; }
   .swatch .need { position:absolute; left:50%; top:26px; transform:translateX(-50%);
     font-size:9px; white-space:nowrap; opacity:.8; letter-spacing:1px; }
+  #terrainContracts { margin:12px auto 0; max-width:420px; display:grid; gap:5px; text-align:left; }
+  .terrainContract { display:grid; grid-template-columns:1fr auto; gap:2px 8px; font-size:10px; letter-spacing:1px; }
+  .terrainContract span { opacity:.7; }
+  .terrainContract b { color:#ffd97a; font-weight:500; }
+  .terrainContract progress { grid-column:1 / -1; width:100%; height:4px; accent-color:#a7c58d; }
+  #terrainBadges { margin-top:8px; display:flex; justify-content:center; flex-wrap:wrap; gap:5px; }
+  .badgeChoice { padding:3px 7px; border:1px solid rgba(255,255,255,.2); background:transparent;
+    color:#fff; font:inherit; font-size:10px; letter-spacing:1px; cursor:pointer; }
+  .badgeChoice:hover, .badgeChoice.equipped { border-color:#ffd97a; color:#ffd97a; }
+  .badgeChoice.locked { opacity:.35; cursor:default; }
 
   /* ---------- room browser ---------- */
   #browser .btitle { font-size:30px; font-weight:800; letter-spacing:6px;
@@ -102,6 +112,10 @@
     outline:none; }
   #lobbyStatus { margin-top:16px; font-size:14px; letter-spacing:1px; color:#ffd97a;
     min-height:20px; }
+  #quickMeta { margin-top:7px; font-size:10px; letter-spacing:1.4px; color:#ffd97a; opacity:.72; }
+  #deviceWarning { display:none; max-width:340px; margin-top:10px; color:#ffb4a8;
+    font-size:11px; line-height:1.45; letter-spacing:1px; }
+  #deviceWarning.on { display:block; }
   #mapname { position:absolute; left:22px; bottom:18px; font-size:12px;
     letter-spacing:4px; opacity:.45; text-transform:uppercase; }
   #mapname b { color:#ffd97a; font-weight:600; }
@@ -237,7 +251,7 @@
   .medal b { font-size:11px; }
   .medal span { font-size:10px; opacity:.58; }
   .noMedals { font-size:10px; opacity:.52; }
-  #endBests, #endMastery { display:inline; font-size:10px; line-height:1.6; opacity:.7; }
+  #endBests, #endMastery, #endContracts { display:inline; font-size:10px; line-height:1.6; opacity:.7; }
   #endBests::after { content:"  /  "; opacity:.45; }
   #endBests.new { color:var(--outcome); opacity:1; }
   #endMastery { color:#d9e3e4; }
@@ -293,6 +307,15 @@
   #squadReady { display:none; }
   #squadReady.on { display:block; }
   #squadReady small { display:block; margin-top:5px; font-size:10px; line-height:1.3; opacity:.6; }
+  #nextBattles { display:grid; grid-template-columns:1fr; gap:6px; margin-top:14px; }
+  .battleCard { display:grid; grid-template-columns:48px 1fr auto; align-items:center; gap:7px;
+    padding:8px 7px; color:#fff; text-align:left; background:rgba(4,7,9,.28);
+    border:1px solid rgba(255,255,255,.4); font:700 10px "Segoe UI",system-ui,sans-serif; cursor:pointer; }
+  .battleCard:hover { background:rgba(255,255,255,.1); }
+  .battleCard.selected, .battleCard:disabled { color:var(--outcome); opacity:.8; }
+  .battleCard b { font-size:10px; letter-spacing:.7px; }
+  .battleCard span { font-size:11px; }
+  .battleCard small { font-size:9px; opacity:.7; }
   #roundActions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:12px; }
   #roundActions button { padding:8px 5px; color:#fff; background:rgba(4,7,9,.28);
     border:1px solid rgba(255,255,255,.56); font:700 10px "Segoe UI",system-ui,sans-serif;
@@ -328,6 +351,8 @@
       border-bottom:1px solid rgba(255,255,255,.3); }
     .classGun { display:block; width:54px; height:28px; margin:auto; }
     #squadBtn { width:auto; margin-right:6px; }
+    #nextBattles { grid-template-columns:repeat(3,1fr); }
+    .battleCard { display:flex; flex-direction:column; align-items:flex-start; min-height:62px; }
     #endNote { display:inline-block; margin-left:8px; border:0; }
     #endStats { grid-template-columns:repeat(2,1fr); row-gap:8px; }
     .reportStat:nth-child(2) { border-right:0; }
@@ -570,7 +595,7 @@
 
   /* Optional first-session orientation. A compact field card, never a modal:
      it does not capture input or pause the fight, and disappears after one
-     minute (or four seconds after its three fundamentals are demonstrated). */
+     minute (or four seconds after its four fundamentals are demonstrated). */
   #firstMinute { display:none; position:absolute; left:22px; top:258px;
     width:min(330px,calc(100vw - 44px)); box-sizing:border-box;
     padding:10px 12px; background:rgba(10,14,22,.82); border-left:3px solid #ffd97a;
@@ -625,8 +650,10 @@
      there instead of keyboard, since the home screen isn't pointer-locked
      and has a real cursor to click with). */
   #classPick { position:absolute; left:50%; top:64%; transform:translateX(-50%);
-    display:flex; gap:18px; font-size:12px; letter-spacing:2px; opacity:0;
+    display:flex; flex-direction:column; align-items:center; gap:8px; font-size:12px; letter-spacing:2px; opacity:0;
     text-transform:uppercase; }
+  #classPick .lbl { font-size:10px; letter-spacing:2px; color:#ffd97a; opacity:.75; }
+  #classPick .opts { display:flex; gap:18px; }
   #classPick .opt, #startClassPick .opt { opacity:.5; }
   #classPick .opt.picked, #startClassPick .opt.picked { opacity:1; color:#ffd97a; }
   #spawnPick { position:absolute; left:50%; top:68%; transform:translateX(-50%);
@@ -786,9 +813,12 @@
     </div>
     <div id="respawn"></div>
     <div id="classPick">
-      <div class="opt" data-cls="0">1 RIFLE</div>
-      <div class="opt" data-cls="1">2 SMG</div>
-      <div class="opt" data-cls="5">3 SNIPER</div>
+      <div class="lbl">NEXT LIFE CLASS</div>
+      <div class="opts">
+        <div class="opt" data-cls="0">1 RIFLE</div>
+        <div class="opt" data-cls="1">2 SMG</div>
+        <div class="opt" data-cls="5">3 SNIPER</div>
+      </div>
     </div>
     <div id="spawnPick"><span class="picked">F FRONT</span> · <span>B BASE</span></div>
     <div id="chat">
@@ -805,7 +835,7 @@
   <div class="screen" id="menu">
     <div class="title"><span class="spade">SPADE</span><span class="fall">FALL</span></div>
     <div class="subtitle">destructible voxel combat in your browser</div>
-    <input id="nameInput" class="home-only" maxlength="12" placeholder="ENTER CALLSIGN">
+    <input id="nameInput" class="home-only" maxlength="12" placeholder="CALLSIGN (OPTIONAL)">
     <div id="pausedTitle" class="only-paused">— PAUSED —</div>
     <div id="roomcode">ROOM <b>····</b></div>
     <div class="play" id="playBtn">DEPLOY</div>
@@ -815,10 +845,12 @@
       <div id="safetyPlayers"></div>
       <small>Three humans minimum. The elected host cannot be removed by peer vote; leave an unsafe room.</small>
     </div>
-    <div class="play accent home-only" id="quickBtn">QUICK MATCH</div>
+    <div class="play accent home-only" id="quickBtn">PLAY NOW · 5v5</div>
+    <div id="quickMeta" class="home-only">INSTANT MATCH · BOTS FILL EMPTY SEATS</div>
+    <div id="deviceWarning" class="home-only" role="alert">KEYBOARD + MOUSE REQUIRED — TOUCH-ONLY DEVICES CAN’T ENTER A MATCH.</div>
     <div id="searching" class="only-searching">
-      SEARCHING FOR A PUBLIC ROOM<span class="dots"><span>.</span><span>.</span><span>.</span></span>
-      <div class="searchsub">esc to cancel</div>
+      FINDING A ROOM<span class="dots"><span>.</span><span>.</span><span>.</span></span>
+      <div class="searchsub">then starting a bot-filled 5v5 · esc to cancel</div>
     </div>
     <div id="lobbyStatus"></div>
     <div class="browselink" id="inviteRow" style="display:none">
@@ -845,6 +877,8 @@
       <div id="statsLine">0 K · 0 D · MATCHES 0 · WINS 0</div>
       <div id="masteryLine">RECRUIT MASTERY · 0 / 1000</div>
       <div id="gunColors"></div>
+      <div id="terrainContracts" aria-label="Terrain contracts"></div>
+      <div id="terrainBadges" aria-label="Callsign badges"></div>
     </div>
     <div class="prefs home-only" id="startClassPick">
       <div class="lbl">starting class</div>
@@ -869,7 +903,7 @@
       <div class="controls">
         <div><b>W A S D</b> move · <b>W HOLD</b> sprint · <b>SHIFT</b> sprint/slide · <b>CTRL</b> crouch</div>
         <div><b>MOUSE</b> look · <b>LMB</b> use tool · <b>RMB</b> aim · <b>R</b> reload</div>
-        <div><b>1 · Q · E</b> gun · <b>2</b> spade · <b>3</b> block · <b>4</b> grenade</div>
+        <div><b>1</b> gun · <b>Q / E</b> cycle tools · <b>2</b> spade · <b>3</b> blocks · <b>4</b> grenade</div>
         <div><b>G</b> squad ping · <b>TAB</b> scores · <b>Y</b> team chat · <b>M</b> mute</div>
       </div>
     </details>
@@ -970,6 +1004,7 @@
             <div id="endStats"></div>
             <div id="endMedals"></div>
             <div><span id="endBests"></span><span id="endMastery"></span></div>
+            <div id="endContracts" aria-label="Terrain contract progress"></div>
           </div>
           <div id="endFacts">
             <div id="endStory">
@@ -990,7 +1025,7 @@
         </section>
         <aside id="endIntermission">
           <div id="endClassPick">
-            <div class="lbl">NEXT CLASS <span class="hint">1 / 2 / 3 TO CHOOSE</span></div>
+            <div class="lbl">NEXT LIFE CLASS <span class="hint">1 / 2 / 3 TO CHOOSE</span></div>
             <div id="endClassOpts">
               <button class="opt" type="button" data-cls="0">
                 <svg class="classGun" viewBox="0 0 82 40" aria-hidden="true">
@@ -1029,20 +1064,22 @@
             <button id="squadBtn" type="button">STAY AS SQUAD · 0/1</button>
             <small>Your teammates already carry into the next round.</small>
           </div>
+          <div id="nextBattles" aria-label="Next battle choices"></div>
           <div id="roundActions">
             <button id="readyBtn" type="button">READY FOR NEXT · 0/1</button>
+            <button id="doneBtn" type="button">DONE · RETURN HOME</button>
             <button id="shareResultBtn" type="button">COPY RESULT</button>
           </div>
-          <div id="endNote">rotating to the next map…</div>
+          <div id="endNote">choose a battle, then PLAY ANOTHER</div>
           <div id="endProgress" aria-label="Intermission progress">
             <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
           </div>
-          <span id="endProgressLabel">ROTATION IN 10 SEC</span>
+          <span id="endProgressLabel">WAITING FOR PLAYERS</span>
         </aside>
       </div>
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=36"></script>
+  <script type="module" src="./src/main.js?v=37"></script>
 </body>
 </html>

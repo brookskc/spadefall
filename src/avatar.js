@@ -70,6 +70,9 @@ export class Avatar {
   setTool(tool) { setSoldierTool(this.parts, tool); }
   setHealth(health) {
     if (!Number.isFinite(health)) return;
+    // Clamp at the single choke point: remote rows are finite-validated but
+    // unbounded, and an out-of-range value here corrupts the health bar.
+    health = Math.min(100, Math.max(0, health));
     if (this.alive && Number.isFinite(this.health) && health < this.health)
       triggerSoldierHit(this.parts);
     this.health = health;

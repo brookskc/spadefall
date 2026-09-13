@@ -68,6 +68,8 @@ try {
       return {
         name: horizontalFit(name),
         quick: horizontalFit(quick),
+        quickCopy: document.getElementById('quickBtn')?.textContent.includes('PLAY NOW')
+          && document.getElementById('quickMeta')?.textContent.includes('BOTS FILL EMPTY SEATS'),
         menuWidth: document.getElementById('menu').scrollWidth <= innerWidth + 1,
         keyboardQuick: tabbable.some(el => el.id === 'quickBtn'),
       };
@@ -75,7 +77,7 @@ try {
     // The 360px case is deliberately a non-supported smoke: its critical
     // entry controls must remain usable, but the desktop-only decorative
     // backdrop labels are not a mobile-support promise.
-    assert.ok(lobby.name && lobby.quick && lobby.keyboardQuick && (smoke || lobby.menuWidth),
+    assert.ok(lobby.name && lobby.quick && lobby.quickCopy && lobby.keyboardQuick && (smoke || lobby.menuWidth),
       `lobby layout ${tier} ${viewport.width}x${viewport.height}: ${JSON.stringify(lobby)}`);
 
     await page.evaluate(value => {

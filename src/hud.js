@@ -1,4 +1,4 @@
-import { holdClock } from './match-modes.js';
+import { holdClock, modeScoreLimit } from './match-modes.js';
 
 export function matchClockPresentation(overtime, remaining) {
   return {
@@ -38,7 +38,7 @@ const MULTIKILL = {
 export function createHud(deps = {}) {
   const {
     TOOLS, BREATH_MAX, AIRSTRIKE_COST, BASE, SEA, SX, PALETTE,
-    CAP_TIME, HILL_MOVE_WARNING, HOLD_LIMIT, KILL_LIMIT, WIN_SCORE,
+    CAP_TIME, HILL_MOVE_WARNING, WIN_SCORE,
     POST_MATCH_TIME, stats, sfx, deathRecapCopy, ctfObjectiveKind,
     occupiedScoringTeam, nextHillIndex, rankContributionRows, teamCss = team => team,
   } = deps;
@@ -93,9 +93,27 @@ export function createHud(deps = {}) {
   ready(count, total, mine = false) {
     const button = $('readyBtn');
     if (!button) return;
-    button.textContent = mine ? `READY · ${count}/${total}` : `READY FOR NEXT · ${count}/${total}`;
+    button.textContent = mine ? `PLAY ANOTHER · ${count}/${total}` : `PLAY ANOTHER · ${count}/${total}`;
     button.classList.toggle('voted', mine);
     button.disabled = mine;
+  },
+  nextBattles(g, choices = [], counts = [], mine = null) {
+    const root = $('nextBattles');
+    if (!root) return;
+    root.innerHTML = '';
+    for (let i = 0; i < 3; i++) {
+      const choice = choices[i];
+      if (!choice) continue;
+      const button = getDom().createElement('button');
+      button.type = 'button';
+      button.className = 'battleCard' + (mine === i ? ' selected' : '');
+      button.dataset.choice = String(i);
+      button.innerHTML = `<b>${choice.mode.toUpperCase()}</b><span>${choice.name}</span>`
+        + `<small>${counts[i] ?? 0} VOTE${counts[i] === 1 ? '' : 'S'}</small>`;
+      button.disabled = mine !== null;
+      button.addEventListener('click', () => g.requestBattleVote(i));
+      root.appendChild(button);
+    }
   },
   // Round trip to the host, piggybacked on traffic that already exists (see
   // the 'ts' field on the client uplink and its echo in _broadcastSnapshot)
@@ -152,11 +170,12 @@ export function createHud(deps = {}) {
     if (!view?.visible) return;
     $('firstMinutePrompt').textContent = view.prompt;
     $('firstMinuteHint').textContent = view.hint;
-    $('firstMinuteObjective').textContent = `OBJECTIVE · ${view.objective}`;
+    $('firstMinuteObjective').textContent = `OBJECTIVE · ${view.objective}`
+      + (view.terrainCue ? ` · FIELD CUE · ${view.terrainCue}` : '');
     const mark = done => done ? '■' : '□';
     $('firstMinuteProgress').textContent = [
       `${mark(view.progress.move)} MOVE`, `${mark(view.progress.fire)} FIRE`,
-      `${mark(view.progress.terrain)} TERRAIN`,
+      `${mark(view.progress.dig)} DIG`, `${mark(view.progress.place)} BUILD`,
     ].join('  ·  ');
   },
   score(g) {
@@ -178,7 +197,14 @@ export function createHud(deps = {}) {
     if (!el) return;
     const p = g.player;
     let target = null, label = '';
-    if (g.hill) { target = g.hill.pos; label = g.hill.label ?? 'HILL'; }
+    const guide = g._firstMinuteView;
+    if (guide?.visible && guide.progress?.move && guide.progress?.fire
+        && !guide.progress?.dig) {
+      target = g.tutorialTerrainTarget?.('dig'); label = 'DIG TUTORIAL';
+    } else if (guide?.visible && guide.progress?.move && guide.progress?.fire
+        && guide.progress?.dig && !guide.progress?.place) {
+      target = g.tutorialTerrainTarget?.('place'); label = 'BUILD TUTORIAL';
+    } else if (g.hill) { target = g.hill.pos; label = g.hill.label ?? 'HILL'; }
     else if (g.flags) {
       const enemy = p.team === 'green' ? 'blue' : 'green';
       const ownFlag = g.flags[p.team], enemyFlag = g.flags[enemy];
@@ -233,7 +259,8 @@ export function createHud(deps = {}) {
         : h.progress > 0.1 ? `${h.capTeam.toUpperCase()} CAPTURING ${Math.round(h.progress / CAP_TIME * 100)}%`
         : scoring ? `${scoring.toUpperCase()} OCCUPIES THE HILL`
         : h.owner ? `${h.owner.toUpperCase()} CONTROLS · HILL VACANT — NO SCORE`
-        : `capture and occupy for ${holdClock(HOLD_LIMIT)} to win`;
+        : `capture and occupy for ${holdClock(modeScoreLimit('koth', {
+          publicRoom: g.publicRoom }))} to win`;
       const moving = !g.overtime && h.rotateIn <= HILL_MOVE_WARNING
         ? ` · MOVES IN ${Math.max(1, Math.ceil(h.rotateIn))}` : '';
       const text = state + moving;
@@ -241,7 +268,8 @@ export function createHud(deps = {}) {
       return;
     }
     if (!g.flags) { // team deathmatch: kills are the score
-      const text = `first to ${KILL_LIMIT} kills`;
+      const text = `first to ${modeScoreLimit('tdm', {
+        publicRoom: g.publicRoom })} kills`;
       if (text !== this._lastFlags) { this._lastFlags = text; $('flagstate').textContent = text; }
       return;
     }
@@ -314,8 +342,15 @@ export function createHud(deps = {}) {
       ? `${recordUpdate.newMasteryTier.name} MASTERY RANK UNLOCKED`
       : mastery.next
         ? `${mastery.tier.name} MASTERY · ${mastery.remaining} SCORE TO ${mastery.next.name}`
-        : `${mastery.tier.name} MASTERY · MAXIMUM RANK`)
+      : `${mastery.tier.name} MASTERY · MAXIMUM RANK`)
       + (recordUpdate.specialty ? ` · ${recordUpdate.specialty.toUpperCase()} SPECIALTY` : '');
+    const endContracts = $('endContracts');
+    if (endContracts) {
+      endContracts.textContent = stats.contracts()
+        .map(contract => `${contract.badge} ${contract.current}/${contract.target}`)
+        .join(' · ')
+        + (stats.selectedBadge() ? ` · EQUIPPED ${stats.selectedBadge()}` : '');
+    }
   },
   voxelStory(story) {
     const el = $('endStory');
@@ -357,7 +392,7 @@ export function createHud(deps = {}) {
     const blocks = Math.ceil(remaining / POST_MATCH_TIME * rail.children.length);
     for (let i = 0; i < rail.children.length; i++)
       rail.children[i].classList.toggle('on', i < blocks);
-    label.textContent = `ROTATION IN ${Math.ceil(remaining)} SEC`;
+    label.textContent = 'WAITING FOR PLAYERS';
   },
   statsShow(g) {
     $('statsbody').innerHTML = this.kdTable(g);
@@ -434,7 +469,7 @@ export function createHud(deps = {}) {
   },
   respawn(t) {
     $('respawn').style.opacity = t > 0 ? 1 : 0;
-    if (t > 0) $('respawn').textContent = `TEAM WAVE IN ${Math.ceil(t)}…`;
+    if (t > 0) $('respawn').textContent = `AUTO-RESPAWN · TEAM WAVE IN ${Math.ceil(t)}…`;
     $('classPick').style.opacity = t > 0 ? 1 : 0;
     $('spawnPick').style.opacity = t > 0 ? 1 : 0;
     if (!(t > 0)) this.deathRecap(null);

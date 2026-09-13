@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { VoxelWorld, SEA, SX, SY, SZ, BLOCK, PALETTE, skyGradient } from './world.js';
 import { generateMap, BASE, MAPS, mapsForMode, mapAtmosphere,
   clampToEnvelope, envelopeContains, mapEnvelope, signatureProtectedAreas } from './mapgen.js';
-import { publicContentAvailable } from './content-gating.js';
+import { contentAvailable, publicContentAvailable } from './content-gating.js';
 import { Player, TOOLS, GUN_CLASSES } from './player.js';
 import { Bot, reserveBotId } from './bots.js';
 import { Effects } from './effects.js';
@@ -23,7 +23,7 @@ import { PROTOCOL_VERSION, validClientMessage, validServerMessage } from './prot
 import { teamHex } from './settings.js';
 import { BREATH_MAX, fallDamageForImpact, impactSpeedForFallDistance,
   resetEnvironmentalState, stepBreath } from './environment.js';
-import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
+import { CTF_SPAWN, FLAG_RETURN_TIME, KOTH_SPAWN, PUBLIC_TDM_SPAWN, TDM_SPAWN, ctfAnchorAllowed,
   ctfFrontlineAllowed, ctfMedianForwardProgress, ctfObjectiveKind, ctfWaveProgress,
   kothAnchorAllowed, kothCandidateDirectionalAllowed, kothMedianApproachDepth,
   kothWaveApproachDepth,
@@ -40,7 +40,7 @@ import { buildMatchReport } from './match-report.js';
 import { staySquadGroups, staySquadState,
   TEAM_PING_COOLDOWN, TEAM_PING_LIMIT, TEAM_PING_RANGE, TEAM_PING_TTL,
   VOTE_KICK_COOLDOWN, VOTE_KICK_DURATION, voteKickVotesNeeded } from './social.js';
-import { sanitizeCallsign } from './callsign.js';
+import { sanitizeDisplayName } from './callsign.js';
 import { assignBotRoles, botsForSquadOrder, botDifficultyCode, botDifficultyKey,
   botTelemetrySummary, ctfFinalApproachPolicy, scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
@@ -48,14 +48,17 @@ import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
 import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
   authorizeWeaponFire, integritySummary, recordIntegrityViolation,
   settleReload } from './security.js';
-import { FirstMinuteGuide } from './first-minute.js';
+import { FirstMinuteGuide, consumeTerrainAck,
+  clearAckedTerrainActions } from './first-minute.js';
 import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
+import { NEXT_BATTLE_CHOICES, nextBattleChoices, resolveBattleVote,
+  validBattleChoice, validBattleChoices } from './next-battle.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
 import { balanceHumanTeams } from './team-balance.js';
 import { da, dx, dy, qa, qx, qy, rowsEqual as rowsEq,
   mergeSnapshot } from './replication.js';
 import { collapseKey, unsupportedCollapseCells } from './simulation.js';
-import { CAP_TIME, HILL_CYCLE, HOLD_LIMIT, KILL_LIMIT, MATCH_TIME_OVERRIDE,
+import { CAP_TIME, HILL_CYCLE, MATCH_TIME_OVERRIDE,
   WIN_SCORE, holdClock, modeScoreLimit } from './match-modes.js';
 import { PresentationSchedule } from './presentation.js';
 import { contactCue, ctfEscalation, intensityCue,
@@ -86,13 +89,12 @@ export function combatHistoryDue(accumulator, dt, interval = 1 / 30) {
     && Math.max(0, accumulator) + Math.max(0, dt) >= interval;
 }
 
-const POST_MATCH_TIME = 10;
 const QUERY = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 const teamCss = team => '#' + teamHex(team).toString(16).padStart(6, '0');
 const hud = createHud({
   TOOLS, BREATH_MAX, AIRSTRIKE_COST, BASE, SEA, SX, PALETTE,
-  CAP_TIME, HILL_MOVE_WARNING, HOLD_LIMIT, KILL_LIMIT, WIN_SCORE,
-  POST_MATCH_TIME, stats, sfx, deathRecapCopy, ctfObjectiveKind,
+  CAP_TIME, HILL_MOVE_WARNING, WIN_SCORE,
+  stats, sfx, deathRecapCopy, ctfObjectiveKind,
   occupiedScoringTeam, nextHillIndex, rankContributionRows, teamCss,
 });
 // A client declares the host dead after this much snapshot silence. Chosen
@@ -350,7 +352,7 @@ const nameSpan = e => `<span style="color:${teamCss(e.team)}">${e.name}</span>`;
 
 // Names arrive over the network and land in HTML (kill feed) and canvas
 // (nametags): keep them to the same alphabet the callsign box enforces.
-const cleanName = n => sanitizeCallsign(n);
+const cleanName = n => sanitizeDisplayName(n);
 
 // Feed rows arrive as host-composed HTML and land in innerHTML — and the
 // host is untrusted input like anyone else (a malicious room host could
@@ -414,6 +416,7 @@ export class Game {
     this._resyncAt = { state: 0, world: 0 };
     this._sendT = 0;
     this._actionSeq = 0;                  // client combat replay protection
+    this._pendingTerrainActions = new Map(); // client action -> authoritative edit
     this._serverLife = 1;                 // rejects stale pre-respawn uplinks/actions
     this._lastWeaponActionSeq = 0;
     this._lastHealth = 100;
@@ -435,6 +438,11 @@ export class Game {
     this._openingDeployment = false;      // new rounds begin at the authored bases
     this._squadVotes = new Set();
     this._intermissionReady = new Set();
+    this._battleChoices = [];
+    this._battleVotes = new Map();
+    this._donePlayers = new Set();
+    this._myBattleChoice = null;
+    this._battleTally = [0, 0, 0];
     this._contactState = new Map();
     this._recentDeaths = [];
     this._ctfProgressAt = 0;
@@ -485,15 +493,18 @@ export class Game {
     this.chat = new Chat(this);
     $('squadBtn')?.addEventListener('click', () => this.requestStayAsSquad());
     $('readyBtn')?.addEventListener('click', () => this.requestIntermissionReady());
+    $('doneBtn')?.addEventListener('click', () => this.requestDone());
     $('shareResultBtn')?.addEventListener('click', () => this.onShareResult?.(this._resultShareText));
 
     if (this.mode !== 'client') this._spawnBots();
 
     this.gameMode = 'tdm';             // Fresh installs begin in the flagship mode.
-    this.publicRoom = false;
+    this.publicRoom = opts.publicRoom === true;
     this.privateContent = !!this.engagementFeatures.privateContent;
     this.matchElapsed = 0;
-    this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
+    this.matchRemaining = modeMatchSeconds(this.gameMode, {
+      publicRoom: this.publicRoom, override: MATCH_TIME_OVERRIDE,
+    });
     this.overtime = false;
     this.winner = null;
     this.hill = null;                  // koth: occupied rotating objective state
@@ -632,6 +643,7 @@ export class Game {
 
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
+    this._pendingTerrainActions.clear();
     this._funnelSeen.clear();
     this._entityFrameActive = false;
     this.voxelStory?.reset();
@@ -639,6 +651,11 @@ export class Game {
     this._clearTeamPings();
     this._squadVotes.clear();
     this._intermissionReady.clear();
+    this._battleChoices = [];
+    this._battleVotes.clear();
+    this._donePlayers.clear();
+    this._myBattleChoice = null;
+    this._battleTally = [0, 0, 0];
     this._contactState.clear();
     this._recentDeaths = [];
     this._ctfProgressAt = this.time;
@@ -709,7 +726,9 @@ export class Game {
     this._openingDeployment = false;
     this.captures = { green: 0, blue: 0 };
     this.matchElapsed = 0;
-    this.matchRemaining = MATCH_TIME_OVERRIDE ?? modeMatchSeconds(this.gameMode);
+    this.matchRemaining = modeMatchSeconds(this.gameMode, {
+      publicRoom: this.publicRoom, override: MATCH_TIME_OVERRIDE,
+    });
     this.overtime = false;
     this.winner = null;
     this.editLog = [];
@@ -1241,9 +1260,10 @@ export class Game {
       // qualified squad lanes. A team concentrated in one lane may still
       // reinforce there, but it never erases the map's lateral alternatives.
       const lanes = anchors.length ? [...fallbackLanes, ...anchors] : fallbackLanes;
+      const spawnPolicy = this.publicRoom ? PUBLIC_TDM_SPAWN : TDM_SPAWN;
       for (let i = 0; i < 36; i++) {
-        const behind = TDM_SPAWN.behindFrontMin
-          + Math.random() * (TDM_SPAWN.behindFrontMax - TDM_SPAWN.behindFrontMin);
+        const behind = spawnPolicy.behindFrontMin
+          + Math.random() * (spawnPolicy.behindFrontMax - spawnPolicy.behindFrontMin);
         // There is always an allied row here, so the median is finite; keep a
         // defensive lower-band fallback for malformed/reconnecting bodies.
         const advance = tdmWaveProgress(frontProgress ?? TDM_SPAWN.minProgress,
@@ -1589,15 +1609,25 @@ export class Game {
       this._lastWeaponActionSeq = this._sendAction('reload');
   }
   requestDig(p) {
-    this._recordLocalAction(p, 'dig');
-    if (this.mode !== 'client') return this.playerDig(p);
-    this._sendAction('dig', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    if (this.mode !== 'client') {
+      const accepted = this.playerDig(p);
+      if (accepted) this._recordLocalAction(p, 'dig');
+      return accepted;
+    }
+    const n = this._sendAction('dig', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    this._pendingTerrainActions.set(n, 'dig');
+    return n;
   }
   requestPlace(p) {
-    this._recordLocalAction(p, 'place');
-    if (this.mode !== 'client') return this.playerPlace(p);
-    if (p.blocks <= 0) { sfx.click(); return; }
-    this._sendAction('place', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    if (this.mode !== 'client') {
+      const accepted = this.playerPlace(p);
+      if (accepted) this._recordLocalAction(p, 'place');
+      return accepted;
+    }
+    if (p.blocks <= 0) { sfx.click(); return false; }
+    const n = this._sendAction('place', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    this._pendingTerrainActions.set(n, 'place');
+    return n;
   }
   requestNade(p) {
     this._recordLocalAction(p, 'grenade');
@@ -1905,9 +1935,53 @@ export class Game {
     }) ?? false;
   }
 
+  // Find a nearby, actually editable voxel for the first-minute marker. The
+  // probe is deterministic from the player's current facing and never points
+  // at protected map foundations or an occupied build cell.
+  tutorialTerrainTarget(kind = 'dig') {
+    if (!this.player?.alive || !this.world) return null;
+    const eye = this.player.body.eye();
+    const yaw = this.player.yaw;
+    const rays = [0, -0.35, 0.35, -0.7, 0.7, -1.1, 1.1].map(offset =>
+      new THREE.Vector3(Math.cos(yaw + offset), -0.08,
+        -Math.sin(yaw + offset)).normalize());
+    for (const dir of rays) {
+      const hit = this.world.raycast(eye, dir, kind === 'dig' ? 5 : 6);
+      if (!hit) continue;
+      if (kind === 'dig') {
+        if (this.world.get(hit.x, hit.y, hit.z)
+            && !this._protectedVoxelReason(hit.x, hit.y, hit.z))
+          return { x: hit.x + 0.5, y: hit.y + 0.5, z: hit.z + 0.5 };
+        continue;
+      }
+      const x = hit.x + hit.nx, y = hit.y + hit.ny, z = hit.z + hit.nz;
+      if (!this.world.get(x, y, z) && !this._protectedBuildReason(x, y, z)) {
+        const occupied = this.entities().some(e => e.alive
+          && x + 1 > e.body.pos.x - e.body.half.x && x < e.body.pos.x + e.body.half.x
+          && z + 1 > e.body.pos.z - e.body.half.x && z < e.body.pos.z + e.body.half.x
+          && y + 1 > e.body.pos.y && y < e.body.pos.y + e.body.half.h);
+        if (!occupied) return { x: x + 0.5, y: y + 0.5, z: z + 0.5 };
+      }
+    }
+    return null;
+  }
+
   _recordLocalAction(p, action) {
     if (p !== this.player) return;
     this._noteAction(p);
+    // Terrain contracts are advanced only here, after the authoritative
+    // success path (solo/host validation or a client edit acknowledgement).
+    // This keeps clicks into air, rejected builds, remote edits, and intent
+    // packets out of persistent progression.
+    if (action === 'dig' || action === 'place') {
+      const contractUpdate = stats.recordTerrainAction(action);
+      if (contractUpdate.unlocked.length) {
+        const tags = contractUpdate.unlocked.join(' · ');
+        this.messageTo(this.player,
+          `CONTRACT COMPLETE · ${tags} BADGE UNLOCKED · AVAILABLE NEXT SESSION`, '#ffd97a');
+      }
+      this.onStatsChanged?.();
+    }
     this.engagement?.action(action, this.matchElapsed);
     const step = { shoot: 'first_shoot', dig: 'first_dig', place: 'first_place', ping: 'first_ping' }[action];
     if (step) this.funnel(step);
@@ -2180,7 +2254,9 @@ export class Game {
     if (this.gameMode === 'tdm' && killer && killer !== victim && !this.over) {
       this.captures[killer.team]++;
       hud.score(this);
-      if (this.captures[killer.team] >= KILL_LIMIT) this._end(killer.team);
+      if (this.captures[killer.team] >= modeScoreLimit('tdm', {
+        publicRoom: this.publicRoom,
+      })) this._end(killer.team);
       else this._checkOvertimeEnd();
     }
 
@@ -2215,7 +2291,15 @@ export class Game {
     this.navRevision++;
     if (this.mode === 'host') {
       this._appendWorldEdit([x, y, z, v]);
-      this.net.broadcast(this._worldStamp({ t: 'e', k: 'edit', x, y, z, v }));
+      const stamp = { t: 'e', k: 'edit', x, y, z, v };
+      // Carry the accepted action sequence only for a remote player. Clients
+      // use it as an authoritative terrain-lesson acknowledgement; without
+      // this stamp a guest would have to guess which edit was theirs.
+      if (Number.isSafeInteger(who?._lastActionSeq) && who.isRemote) {
+        stamp.aid = who._lastActionSeq;
+        if (Number.isSafeInteger(who.ridx)) stamp.actor = who.ridx;
+      }
+      this.net.broadcast(this._worldStamp(stamp));
     }
     if (!v) this._collapseFrom([{ x, y, z }], who); // cut the legs out? it falls
     return true;
@@ -2340,22 +2424,25 @@ export class Game {
         else sfx.at('spadeHit', e.body.eye());
         if (this.damage(e, 45, p, null, { cause: 'spade' }))
           this._hitFeedback(p, !e.alive); // e was drawn from the alive-only loop above
-        return;
+        return false;
       }
     }
-    if (hit) this.digVoxel(p, hit.x, hit.y, hit.z);
-    else if (p === this.player) sfx.swing();
+    if (hit) return this.digVoxel(p, hit.x, hit.y, hit.z);
+    if (p === this.player) sfx.swing();
+    return false;
   }
 
   playerPlace(p, origin = null, dir = null) {
     this._noteAction(p);
-    if (p.blocks <= 0) { if (p === this.player) sfx.click(); return; }
+    if (p.blocks <= 0) { if (p === this.player) sfx.click(); return false; }
     origin = origin ?? p.body.eye();
     dir = dir ?? p.lookDir();
     const hit = this.world.raycast(origin, dir, 6);
-    if (!hit) return;
+    if (!hit) return false;
     const x = hit.x + hit.nx, y = hit.y + hit.ny, z = hit.z + hit.nz;
-    if (this.tryBuild(p, x, y, z) && p === this.player) { sfx.place(); hud.refreshTool(p); }
+    const accepted = this.tryBuild(p, x, y, z);
+    if (accepted && p === this.player) { sfx.place(); hud.refreshTool(p); }
+    return accepted;
   }
 
   // Shared placement rules for players and bots: cell must be empty, nobody
@@ -2952,7 +3039,9 @@ export class Game {
       this.captures[scoring] += dt; // occupied seconds (floats; displayed as clocks)
       for (const e of present[scoring]) this._award(e,
         CONTRIBUTION.hillHoldPerSecond * dt, { objective: dt }, false);
-      if (this.captures[scoring] >= HOLD_LIMIT) this._end(scoring);
+      if (this.captures[scoring] >= modeScoreLimit('koth', {
+        publicRoom: this.publicRoom,
+      })) this._end(scoring);
     }
     hud.score(this);
     this._updateHillVisual();
@@ -3010,17 +3099,37 @@ export class Game {
         hud.voxelStory(voxelBattleStory(authoritativeStory));
       return;
     }
+    // A player can join while the room is already on results. In that case
+    // the reliable choices event can arrive before the first authoritative
+    // snapshot supplies the final score/clock needed to justify `_end` on
+    // the client. Preserve that already-validated intermission state instead
+    // of clearing it when the snapshot finally opens the results screen.
+    const keepClientIntermission = this.mode === 'client'
+      && validBattleChoices(this._battleChoices, MAPS,
+        { publicRoom: this.publicRoom, privateContent: this.privateContent });
+    const retainedChoices = keepClientIntermission ? this._battleChoices : [];
+    const retainedTally = keepClientIntermission ? this._battleTally.slice(0, 3) : [0, 0, 0];
+    const retainedReady = keepClientIntermission ? new Set(this._intermissionReady) : new Set();
+    const retainedMine = keepClientIntermission ? this._myBattleChoice : null;
     this._broadcastScoreboard(true);
     this.over = true;
     this.winner = winner;
     this._squadVotes.clear();
-    this._intermissionReady.clear();
+    this._intermissionReady = retainedReady;
+    this._battleVotes.clear();
+    this._donePlayers.clear();
+    this._battleChoices = this.mode === 'client' ? retainedChoices : nextBattleChoices({
+      maps: MAPS, mode: this.gameMode, mapIndex: this.mapIndex,
+      publicRoom: this.publicRoom, privateContent: this.privateContent, seed: this.seed });
+    this._battleTally = retainedTally;
+    this._myBattleChoice = retainedMine;
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     if (this.mode === 'host') {
       const event = { t: 'e', k: 'end', winner };
       if (storyMetrics) event.story = storyMetrics;
       this.net.broadcast(event);
+      this._publishBattleChoices();
     }
     const report = buildMatchReport(this._kdKey(this.player), this.kd.entries());
     const botScores = [...this.kd].filter(([key]) => key.startsWith('b')).map(([, row]) => row.score)
@@ -3050,7 +3159,6 @@ export class Game {
     $('endTitle').textContent = won ? 'VICTORY' : 'DEFEAT';
     $('end').dataset.outcome = won ? 'victory' : 'defeat';
     $('end').dataset.map = MAPS[this.mapIndex]?.key ?? 'island';
-    const next = MAPS[this._nextMap()].name;
     $('endGreenScore').textContent = this.hill
       ? holdClock(this.captures.green) : Math.floor(this.captures.green ?? 0);
     $('endBlueScore').textContent = this.hill
@@ -3067,11 +3175,9 @@ export class Game {
     $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
     hud.classPick(this.player._pendingClass);
     const balanceNote = this.teamBalanceEnabled() ? ' · teams balance between rounds' : '';
-    $('endNote').textContent = (this.mode === 'client'
-      ? `next map · ${next} · waiting for host`
-      : `next map · ${next}`) + balanceNote;
-    hud.rotationProgress(this.mode === 'client' ? 0 : POST_MATCH_TIME,
-      this.mode !== 'client');
+    $('endNote').textContent = `choose a battle, then PLAY ANOTHER · waiting for players${balanceNote}`;
+    hud.rotationProgress(0, false);
+    hud.nextBattles(this, this._battleChoices, this._battleTally, this._myBattleChoice);
     $('end').classList.remove('hidden');
     this.player.vmRoot.visible = false;
     // Results contain real choices. Release captured mouse input before the
@@ -3080,8 +3186,6 @@ export class Game {
     this._publishSquadState();
     this._publishReadyState();
     if (!won) sfx.lose();
-    // The room rotates maps on its own a few seconds after the final capture.
-    if (this.mode !== 'client') this._rotateT = POST_MATCH_TIME;
   }
 
   // Next map in the rotation for the current mode.
@@ -3111,7 +3215,13 @@ export class Game {
     this._restartRound(map, seed);
   }
 
-  _restartRound(map, seed) {
+  _restartRound(map, seed, mode = this.gameMode) {
+    if (!['ctf', 'tdm', 'koth'].includes(mode)) return false;
+    if (!Number.isInteger(map) || !MAPS[map]
+        || !MAPS[map].modes.includes(mode)
+        || !contentAvailable(mode, map, { publicOnly: this.publicRoom,
+          privateContent: this.privateContent })) return false;
+    this.gameMode = mode;
     this._activeSquads = staySquadGroups(this._humanSquadRows(), [...this._squadVotes]);
     // Normal rounds rotate everyone green<->blue. With Phase 8 enabled, that
     // full side flip is the preferred baseline but a sufficiently lopsided
@@ -3134,6 +3244,7 @@ export class Game {
     if (balance.adjusted)
       this.message('TEAMS BALANCED FOR THE NEXT ROUND · CONFIRMED SQUADS KEPT TOGETHER', '#ffd97a');
     this.onRestart?.(MAPS[map].name);
+    return true;
   }
 
   teamBalanceEnabled() {
@@ -3281,13 +3392,82 @@ export class Game {
       this.net.broadcast({ t: 'e', k: 'squad', voters });
   }
 
+  _battleChoiceRows() {
+    return this._battleChoices.map(choice => [choice.mode, choice.map]);
+  }
+
+  _battleCounts() {
+    const counts = Array.from({ length: NEXT_BATTLE_CHOICES }, () => 0);
+    for (const index of this._battleVotes.values())
+      if (Number.isInteger(index) && index >= 0 && index < counts.length) counts[index]++;
+    return counts;
+  }
+
+  _publishBattleChoices() {
+    const counts = this._battleCounts();
+    this._battleTally = counts;
+    const ready = [...this._intermissionReady].filter(key => !this._donePlayers.has(key));
+    hud.nextBattles(this, this._battleChoices, counts,
+      this._battleVotes.get(this._kdKey(this.player)) ?? null);
+    hud.ready(ready.length, this._humanKeys().filter(key => !this._donePlayers.has(key)).length,
+      this._intermissionReady.has(this._kdKey(this.player)));
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'choices',
+      choices: this._battleChoiceRows(), votes: counts, ready });
+  }
+
+  requestBattleVote(choice) {
+    if (!this.over || !Number.isInteger(choice) || choice < 0 || choice >= NEXT_BATTLE_CHOICES)
+      return false;
+    if (this.mode === 'client') {
+      const sent = !!this.net?.send({ t: 'a', k: 'vote', choice });
+      if (sent) { this._myBattleChoice = choice; hud.nextBattles(this, this._battleChoices,
+        this._battleTally, choice); }
+      return sent;
+    }
+    return this._hostBattleVote(this.player, choice);
+  }
+
+  _hostBattleVote(player, choice) {
+    const key = this._kdKey(player);
+    if (this.mode === 'client' || !this.over || this._donePlayers.has(key)
+        || !Number.isInteger(choice) || !this._battleChoices[choice]
+        || !validBattleChoice(this._battleChoices[choice], MAPS,
+          { publicRoom: this.publicRoom, privateContent: this.privateContent })) return false;
+    if (this._battleVotes.has(key)) return false;
+    this._battleVotes.set(key, choice);
+    this._publishBattleChoices();
+    return true;
+  }
+
+  _maybeStartNextBattle() {
+    if (this.mode === 'client' || !this.over) return false;
+    const active = this._humanKeys().filter(voter => !this._donePlayers.has(voter));
+    if (!active.length || !active.every(voter => this._intermissionReady.has(voter)))
+      return false;
+    const votes = [...this._battleVotes.entries()].map(([actor, choice]) => ({ actor, choice }));
+    const resolved = resolveBattleVote(this._battleChoices, votes, active);
+    if (!resolved) return false;
+    this._battleVotes.clear();
+    this._intermissionReady.clear();
+    return this._restartRound(resolved.choice.map, Math.floor(Math.random() * 1e9),
+      resolved.choice.mode);
+  }
+
+  _hostContinue(player) {
+    const key = this._kdKey(player);
+    if (this.mode === 'client' || !this.over || this._donePlayers.has(key)) return false;
+    if (!this._battleVotes.has(key)) this._battleVotes.set(key, 0);
+    this._intermissionReady.add(key);
+    this._publishBattleChoices();
+    this._maybeStartNextBattle();
+    return true;
+  }
+
   _publishReadyState() {
-    const voters = [...this._intermissionReady];
-    hud.ready(voters.length, this._humanKeys().length,
+    const voters = [...this._intermissionReady].filter(key => !this._donePlayers.has(key));
+    hud.ready(voters.length, this._humanKeys().filter(key => !this._donePlayers.has(key)).length,
       this._intermissionReady.has(this._kdKey(this.player)));
     if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'ready', voters });
-    if (this.mode !== 'client' && voters.length >= this._humanKeys().length)
-      this._rotateT = Math.min(this._rotateT ?? 1, .75);
   }
 
   requestIntermissionReady() {
@@ -3295,9 +3475,14 @@ export class Game {
     this._recordLocalAction(this.player, 'ready');
     this.engagement?.record('continuation', { action: 'ready' });
     if (this.mode === 'client') return !!this.net?.send({ t: 'a', k: 'ready' });
-    const key = this._kdKey(this.player);
-    this._intermissionReady.add(key);
-    this._publishReadyState();
+    return this._hostContinue(this.player);
+  }
+
+  requestDone() {
+    if (!this.over) return false;
+    this.engagement?.record('continuation', { action: 'done' });
+    if (this.mode === 'client') this.net?.send({ t: 'a', k: 'done' });
+    this.onDone?.();
     return true;
   }
 
@@ -3505,9 +3690,23 @@ export class Game {
       return;
     }
     if (d.t === 'a' && d.k === 'ready') {
+      if (this.over) this._hostContinue(p);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'vote') {
+      if (this.over) this._hostBattleVote(p, d.choice);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'done') {
       if (this.over) {
-        this._intermissionReady.add(this._kdKey(p));
-        this._publishReadyState();
+        const key = this._kdKey(p);
+        this._donePlayers.add(key);
+        this._intermissionReady.delete(key);
+        this._battleVotes.delete(key);
+        p._noReconnect = true;
+        this._publishBattleChoices();
+        this._maybeStartNextBattle();
+        this.net.kick(id);
       }
       return;
     }
@@ -3843,6 +4042,8 @@ export class Game {
       { t: 'e', k: 'votekick', ...this.voteKickState() });
     if (this.over) {
       this.net.sendTo(id, { t: 'e', k: 'end', winner: this.winner });
+      this.net.sendTo(id, { t: 'e', k: 'choices', choices: this._battleChoiceRows(),
+        votes: this._battleCounts(), ready: [...this._intermissionReady] });
       if (this.engagementFeatures.stayAsSquad)
         this.net.sendTo(id, { t: 'e', k: 'squad', voters: [...this._squadVotes] });
       this.net.sendTo(id, { t: 'e', k: 'ready', voters: [...this._intermissionReady] });
@@ -4077,7 +4278,6 @@ export class Game {
     // gets its rotation.
     if (!this.player.alive) this.respawnTimers.set(this.player,
       respawnWaveDelay(this.gameMode, this.matchElapsed));
-    if (this.over) this._rotateT = 2;
     // Stragglers get a minute to find the new room before their roster entry
     // lapses and any later knock is treated as a fresh join.
     setTimeout(() => {
@@ -4179,7 +4379,11 @@ export class Game {
     if (canRecover) this._reserveDisconnectedPlayer(p, respawnLeft);
     else if (!this.over) this.bots.push(this._newBot(p.team));
     this.net.broadcast(this._rosterMsg()); // seat emptied, bot filled in
-    if (this.over) this._publishSquadState();
+    if (this.over) {
+      this._publishSquadState();
+      this._publishBattleChoices();
+      this._maybeStartNextBattle();
+    }
     this._checkAbandoned();
   }
 
@@ -4555,6 +4759,14 @@ export class Game {
     // maps — iterated whole below — are the real picture. If the host drops,
     // promoteToHost rebuilds the match from exactly these.
     mergeSnapshot(this._fullP, this._fullB, d);
+    // The reliable host->client channel preserves the order of an accepted
+    // edit event followed by this snapshot. Therefore an action at or below
+    // the host's ack has either produced its stamped edit (and was consumed
+    // above) or was authoritatively denied; drop the latter so failed/no-op
+    // attempts cannot accumulate forever.
+    if (Number.isSafeInteger(d.ack)) {
+      clearAckedTerrainActions(this._pendingTerrainActions, d.ack);
+    }
     this._syncAirstrikeRows(d.a ?? []);
     if (d.tb !== undefined) this._teamBalanceHostEnabled = d.tb === 1;
     const want = new Set();
@@ -4569,9 +4781,14 @@ export class Game {
         // new explicit 'dmgdir' message above, which carries the actual
         // source position this snapshot-diff never had. Firing both would
         // have doubled the flash/sound on every single hit.
-        this._lastHealth = health;
-        this.player.health = health;
-        this.player.blocks = blocks;
+        // Semantic bounds: shape validation only guarantees finite numbers,
+        // so clamp the self row into the legal loadout (0-100 health, 0-99
+        // blocks, mag-sized ammo, 0-3 grenades). A hostile host can still
+        // damage you — that IS its job — but it cannot buff you to 9999
+        // or corrupt the HUD with out-of-range values.
+        this._lastHealth = Math.min(100, Math.max(0, health));
+        this.player.health = this._lastHealth;
+        this.player.blocks = Math.min(99, Math.max(0, blocks));
         this.player.carrier = !!carrier;
         if (GUN_CLASSES.includes(gunClass)) {
           this.player.gunClass = gunClass;
@@ -4586,7 +4803,8 @@ export class Game {
         const ammoChanged = weaponAcked && Number.isInteger(ammo)
           && GUN_CLASSES.includes(this.player.gunClass)
           && this.player.ammo[this.player.gunClass] !== ammo;
-        if (ammoChanged) this.player.ammo[this.player.gunClass] = ammo;
+        if (ammoChanged) this.player.ammo[this.player.gunClass] =
+          Math.min(TOOLS[this.player.gunClass]?.mag ?? 10, Math.max(0, ammo));
         if (Number.isFinite(reloadMs)) {
           if (reloadMs > 0 && this.player.reloading <= 0)
             this.player.reloading = reloadMs / 1000;
@@ -4598,8 +4816,12 @@ export class Game {
         // Ordinary movement remains client-predicted, but a large divergence
         // means the host rejected a report or corrected state. Snap only then;
         // applying every 15Hz row would make normal movement visibly stutter.
-        if (Math.hypot(this.player.body.pos.x - x, this.player.body.pos.y - y,
-                       this.player.body.pos.z - z) > 4) {
+        // Upper bound: a correction bigger than the whole arena is forged or
+        // hopelessly desynced — hold position and wait for a resync instead
+        // of teleporting across the map on one packet.
+        const div = Math.hypot(this.player.body.pos.x - x, this.player.body.pos.y - y,
+          this.player.body.pos.z - z);
+        if (div > 4 && div < 60) {
           this.player.body.pos.set(x, y, z);
           this.player.body.vel.set(0, 0, 0);
         }
@@ -4607,7 +4829,7 @@ export class Game {
         // the client already counted). Without this the HUD drifts and the
         // belt eventually reads full while every throw is silently rejected.
         if (nades !== undefined && nades !== this.player.grenades) {
-          this.player.grenades = nades;
+          this.player.grenades = Math.min(3, Math.max(0, Math.floor(nades)));
           if (this.player.tool === 4) hud.refreshTool(this.player);
         }
         hud.health(this.player);
@@ -4655,9 +4877,11 @@ export class Game {
     if (d.f && this.flags)
       for (const team of ['green', 'blue']) {
         const f = d.f[team[0]], flag = this.flags[team];
-        flag.state = stateName[f[0]];
+        // Shape validation only guarantees finite indices: an out-of-range
+        // state would land as undefined and corrupt flag logic downstream.
+        if (stateName[f[0]] !== undefined) flag.state = stateName[f[0]];
         flag.pos.set(dx(f[1]), dy(f[2]), dx(f[3]));
-        flag.dropTimer = f[4];
+        flag.dropTimer = Math.max(0, f[4]);
       }
     this._hillRow = d.h ?? null; // kept raw: a promoted replica restores it
     if (d.h && this.hill) {
@@ -4678,18 +4902,53 @@ export class Game {
         frontlineBonus: d.ct[0] ? 8 : 0 };
       this._ctfProgressAt = this.time - d.ct[1] / 10;
     }
-    this.captures.green = d.c[0];
-    this.captures.blue = d.c[1];
+    // Scoreboard integrity: a hostile host's cheapest win is a forged
+    // finale — captures jumping to the limit or a bare 'over' flag at 0-0.
+    // Captures never decrease mid-round, never exceed the mode limit, and
+    // never jump faster than play allows (integers +1 for CTF, small
+    // catch-up steps for TDM/KOTH after a gap). Full snapshots and
+    // decreases are baselines instead: late joins, resyncs, and round
+    // resets. Forging a win now takes sustained plausible traffic.
+    const scoreCap = modeScoreLimit(this.gameMode, { publicRoom: this.publicRoom });
+    const scoreJump = this.gameMode === 'ctf' ? 1 : 5;
+    const scoreKeys = ['green', 'blue'];
+    let scoreGrew = false;
+    for (let i = 0; i < 2; i++) {
+      const raw = Math.max(0, d.c[i]);
+      const prev = this.captures[scoreKeys[i]] ?? 0;
+      let next;
+      if (d.full || raw < prev) next = Math.min(scoreCap, raw);
+      else {
+        next = Math.max(prev, Math.min(scoreCap, Math.min(prev + scoreJump, raw)));
+        if (next > prev) scoreGrew = true;
+      }
+      this.captures[scoreKeys[i]] = next;
+    }
     if (d.m) {
-      this.matchRemaining = d.m[0] / 10;
+      // Match clock is capped well above the longest legitimate override:
+      // a host that keeps resetting the clock only buys bounded extensions.
+      this.matchRemaining = Math.min(3900, d.m[0] / 10);
       this.overtime = !!d.m[1];
       this.matchElapsed = d.m[2] / 10;
     }
     this.winner = d.w ?? null;
     hud.score(this);
-    const limit = modeScoreLimit(this.gameMode);
-    if (d.o && !this.over) this._end(d.w ?? (d.c[0] >= limit ? 'green'
-      : d.c[1] >= limit ? 'blue' : scoreLeader(this.captures) ?? 'green'));
+    const limit = modeScoreLimit(this.gameMode, { publicRoom: this.publicRoom });
+    // A finale is honored only when the sanitized scoreboard or the clock
+    // justifies it: limit reached, clock expired outside overtime, or the
+    // score grew on this snapshot (custom-limit hosts end through growth).
+    // Anything else is a forged 0-0 finale — ignore it and keep playing.
+    const limitReached = this.captures.green >= limit || this.captures.blue >= limit;
+    const clockExpired = d.m ? d.m[0] <= 0 : this.matchRemaining <= 0;
+    const overtimeNow = d.m ? !!d.m[1] : this.overtime;
+    const finaleJustified = limitReached || (clockExpired && !overtimeNow) || scoreGrew;
+    // When the limit decides it, the scoreboard names the winner — a d.w
+    // naming anyone else is contradicted on its face. Clock and growth
+    // finales accept the host's call with the scoreboard as fallback.
+    const limitWinner = this.captures.green >= limit ? 'green'
+      : this.captures.blue >= limit ? 'blue' : null;
+    if (d.o && !this.over && finaleJustified) this._end(limitWinner
+      ?? d.w ?? scoreLeader(this.captures) ?? 'green');
     this._lastGrenades = d.g;
   }
 
@@ -4718,6 +4977,8 @@ export class Game {
         this.voxelStory?.recordEdit(before, this.world.get(d.x, d.y, d.z));
         this._appendWorldEdit([d.x, d.y, d.z, d.v]); // migration: late joiners get it from us
         if (!d.v && before) this.effects.blockBurst([{ x: d.x, y: d.y, z: d.z, v: before }]);
+        const action = consumeTerrainAck(this._pendingTerrainActions, d, this.myIdx);
+        if (action) this._recordLocalAction(this.player, action);
         break;
       }
       case 'boom': {
@@ -4813,13 +5074,31 @@ export class Game {
         hud.ready(d.voters.length, this._humanKeys().length,
           this._intermissionReady.has(this._kdKey(this.player)));
         break;
+      case 'choices': {
+        const choices = d.choices.map(([mode, map]) => ({ mode, map,
+          name: MAPS[map]?.name, key: MAPS[map]?.key }));
+        if (!validBattleChoices(choices, MAPS,
+          { publicRoom: this.publicRoom, privateContent: this.privateContent })) break;
+        this._battleChoices = choices;
+        this._intermissionReady = new Set(d.ready);
+        const mine = this._myBattleChoice;
+        this._battleTally = d.votes.slice();
+        hud.nextBattles(this, choices, d.votes, mine);
+        hud.ready(d.ready.length, this._humanKeys().length,
+          d.ready.includes(this._kdKey(this.player)));
+        break;
+      }
       case 'votekick':
         this._voteKick = d.active ? { target: d.target, name: d.name,
           voters: new Set(d.voters), needed: d.needed, remaining: d.remaining } : null;
         this.onVoteKickState?.(this.voteKickState());
         break;
       case 'corr':
-        if ([d.x, d.y, d.z].every(Number.isFinite)) {
+        // Host nudges are small by nature. A correction bigger than the
+        // whole arena is a teleport attempt — hold position instead.
+        if ([d.x, d.y, d.z].every(Number.isFinite)
+            && Math.hypot(this.player.body.pos.x - d.x, this.player.body.pos.y - d.y,
+              this.player.body.pos.z - d.z) < 60) {
           this.player.body.pos.set(d.x, d.y, d.z);
           this.player.body.vel.set(0, 0, 0);
         }
@@ -4836,12 +5115,34 @@ export class Game {
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
         break;
-      case 'end': this._end(d.winner, d.story); break;
-      case 'restart':
-        this.gameMode = d.mode;
-        this.rebuild(d.seed, d.map);
-        this.onRestart?.(MAPS[d.map].name);
+      case 'end': {
+        // Same finale justification as snapshots, minus their growth
+        // signal (this event carries no score): a bare end at 0-0 with time
+        // on the clock is forged. Custom-limit hosts still land through the
+        // snapshot path, which does carry score growth.
+        const endLimit = modeScoreLimit(this.gameMode, { publicRoom: this.publicRoom });
+        if (this.captures.green >= endLimit || this.captures.blue >= endLimit
+            || (this.matchRemaining <= 0 && !this.overtime)) this._end(d.winner, d.story);
         break;
+      }
+      case 'restart': {
+        // Round restarts are host-driven, but a hostile host can spam them
+        // (the round never progresses) or force retired content (a public
+        // room shoved into CTF/Crown past the catalogue gate). Reject both
+        // client-side; legitimate rotations are minutes apart.
+        const restartCatalogueOk = ['ctf', 'tdm', 'koth'].includes(d.mode)
+          && mapsForMode(d.mode, { publicOnly: this.publicRoom,
+            privateContent: this.privateContent }).includes(d.map);
+        const nowMs = Date.now();
+        if (restartCatalogueOk && (this._lastRestartMs === undefined
+            || nowMs - this._lastRestartMs >= 10000)) {
+          this._lastRestartMs = nowMs;
+          this.gameMode = d.mode;
+          this.rebuild(d.seed, d.map);
+          this.onRestart?.(MAPS[d.map].name);
+        }
+        break;
+      }
     }
     if ((d.k === 'edit' || d.k === 'boom' || d.k === 'col') && d.wh !== undefined
         && (d.wh >>> 0) !== (this._worldHash >>> 0)) this._requestResync('world');
@@ -5013,14 +5314,16 @@ export class Game {
     if (presentation.slow) {
       hud.minimap(this);
       hud.streakStatus(this.player);
-      hud.firstMinute(this.firstMinuteGuide?.update({
+      const firstMinuteView = this.firstMinuteGuide?.update({
         matchSecond: this.matchElapsed,
         x: this.player.body.pos.x,
         z: this.player.body.pos.z,
         alive: this.player.alive && !this.player.aiming && !this.player._piloting
           && this.player._fallingT <= 0,
         over: this.over,
-      }));
+      });
+      this._firstMinuteView = firstMinuteView;
+      hud.firstMinute(firstMinuteView);
     }
     if (presentation.network) hud.ping(this);
     // The scoreboard mirrors the held key exactly: if a Tab keyup gets lost
@@ -5152,10 +5455,6 @@ export class Game {
       if (this.flags) this._updateFlags(dt);
       if (this.hill) this._updateHill(dt);
       this._updateMatchClock(dt);
-    } else if (this._rotateT != null) {
-      this._rotateT -= dt;
-      hud.rotationProgress(this._rotateT, true);
-      if (this._rotateT <= 0) { this._rotateT = null; this._rotate(); }
     }
     this._scoreBroadcastT -= dt;
     if (this._scoreBroadcastT <= 0) {

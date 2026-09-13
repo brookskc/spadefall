@@ -2,6 +2,7 @@
 
 export const RESPAWN_WAVE = Object.freeze({ ctf: 7, tdm: 6, koth: 7 });
 export const MATCH_DURATION = Object.freeze({ ctf: 12 * 60, tdm: 9 * 60, koth: 10 * 60 });
+export const PUBLIC_MATCH_DURATION = Object.freeze({ ctf: 12 * 60, tdm: 330, koth: 360 });
 export const FLAG_RETURN_TIME = 15;
 export const CTF_SPAWN = Object.freeze({
   anchorGrace: 3,
@@ -42,9 +43,20 @@ export const TDM_SPAWN = Object.freeze({
   anchorSupportRadius: 22,
   anchorEnemyClearance: 20,
 });
+// Public quick-play shortens only the safe setback behind a qualified allied
+// front. Its own-half, midfield buffer, LOS, support, and recent-death checks
+// remain those of TDM_SPAWN; private/solo keeps the established 10–20m band.
+export const PUBLIC_TDM_SPAWN = Object.freeze({
+  behindFrontMin: 6,
+  behindFrontMax: 14,
+});
 
 export const modeWaveSeconds = mode => RESPAWN_WAVE[mode] ?? RESPAWN_WAVE.ctf;
-export const modeMatchSeconds = mode => MATCH_DURATION[mode] ?? MATCH_DURATION.ctf;
+export const modeMatchSeconds = (mode, { publicRoom = false, override = null } = {}) => {
+  if (Number.isFinite(override)) return override;
+  return (publicRoom ? PUBLIC_MATCH_DURATION : MATCH_DURATION)[mode]
+    ?? MATCH_DURATION.ctf;
+};
 
 // Deaths land on shared round-time boundaries instead of starting isolated
 // countdowns. A tiny grace window avoids a visually confusing instant

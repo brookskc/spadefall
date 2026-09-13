@@ -79,7 +79,7 @@ export const MAPS = [
     atmosphere: { sky: ['#365b91', '#7899bf', '#c9d7df'], fog: 0xa6b4bf, cloud: 0xe7edf0, water: 0x2f5e78,
       sun: [0.35, 1, -0.55], sunTint: [1.08, 1.04, 0.94] },
     paletteOverrides: { grass: 0x567447, dirt: 0x604636, sand: 0xb29a68, stone: 0x515d69, moss: 0x334f3c } },
-  { key: 'caldera', name: 'CALDERA',   modes: ['koth', 'tdm'],       gen: null,
+  { key: 'caldera', name: 'CALDERA',   modes: ['koth'],              gen: null,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [
       { x: SX / 2, z: SZ / 2, r: 10, label: 'KNOLL' },

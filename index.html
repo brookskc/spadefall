@@ -183,6 +183,12 @@
     letter-spacing:2px; opacity:.5; text-align:right; }
   #ping.warn { opacity:.85; color:#ffd97a; }
   #ping.bad { opacity:.9; color:#e05a4e; }
+  #pingSelector { display:none; position:absolute; left:50%; top:19%;
+    transform:translateX(-50%); padding:7px 10px; color:rgba(255,255,255,.8);
+    background:rgba(8,12,16,.78); border:1px solid rgba(255,217,122,.45);
+    font-size:10px; letter-spacing:.06em; pointer-events:none; }
+  #pingSelector.on { display:flex; gap:12px; }
+  #pingSelector .picked { color:#ffd97a; font-weight:800; }
   /* Same corner-label treatment as #ping, directly below it — opt-in
      (off by default, toggled via style.display in JS, same pattern
      #airstrikeReady already uses), so it never competes for attention
@@ -270,6 +276,32 @@
   .impactMetric span { display:block; margin-top:3px; font-size:10px; letter-spacing:.8px; opacity:.7; }
   .impactMetric::after { content:""; display:block; width:var(--fill); height:5px; margin-top:5px;
     background:repeating-linear-gradient(90deg,var(--terrain) 0 7px,transparent 7px 10px); }
+  #endEvolution, #endRoles, #endCommend { margin-top:8px; padding:7px 0; border-top:1px solid rgba(255,255,255,.2); }
+  .endSectionLabel { display:block; margin-bottom:5px; font-size:9px; font-weight:800; letter-spacing:1.5px; color:var(--outcome); }
+  #endEvolution small { opacity:.65; font-size:10px; }
+  #endEvolution b { margin-right:6px; font-size:10px; }
+  .terrainPair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:6px; max-width:280px; }
+  .terrainSample { margin:0; min-width:0; }
+  .terrainSample canvas { display:block; width:100%; max-width:126px; aspect-ratio:1; image-rendering:pixelated; background:#0c141c; border:1px solid rgba(255,255,255,.32); }
+  .terrainSample figcaption { margin-top:3px; font-size:9px; letter-spacing:1.5px; opacity:.7; }
+  .terrainFallback { display:block; margin-top:4px; font-size:9px; letter-spacing:.7px; opacity:.55; }
+  #endRoles { display:flex; flex-wrap:wrap; gap:4px 12px; }
+  #endRoles .endSectionLabel { flex-basis:100%; }
+  .roleRow { display:inline-flex; gap:5px; align-items:baseline; font-size:10px; opacity:.74; }
+  .roleRow.me { opacity:1; color:var(--outcome); }
+  .roleRow small { font-size:9px; letter-spacing:1px; }
+  #endCommend { display:flex; flex-wrap:wrap; gap:5px; }
+  #endCommend .endSectionLabel { flex-basis:100%; }
+  .commendBtn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; min-width:112px; padding:5px 7px; color:inherit; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.2); cursor:pointer; }
+  .commendBtn:hover:not(:disabled) { background:rgba(255,255,255,.13); }
+  .commendBtn:disabled { opacity:.55; cursor:default; }
+  .commendBtn small { font-size:9px; opacity:.7; }
+  .endMuted { opacity:.58; font-size:10px; }
+  #endRivalry { display:none; margin-top:10px; }
+  #endRivalry.on { display:block; }
+  #rivalryBtn { width:100%; padding:9px 8px; color:#ffd97a; background:rgba(255,217,122,.08); border:1px solid rgba(255,217,122,.55); font-weight:800; font-size:10px; letter-spacing:1px; cursor:pointer; }
+  #rivalryBtn:hover:not(:disabled) { background:rgba(255,217,122,.16); }
+  #rivalryBtn:disabled { opacity:.6; cursor:default; }
   #endBoardLabel { margin-top:7px; padding:7px 0 5px; font-size:11px; font-weight:800; letter-spacing:1.5px; }
   #endBoard { min-height:0; flex:0 1 auto; max-height:min(46vh,410px); overflow:auto; background:rgba(4,7,9,.52);
     border-top:1px solid rgba(232,236,242,.56); border-bottom:1px solid rgba(232,236,242,.56); }
@@ -778,6 +810,7 @@
     </div>
     <div id="scopeNotches"></div>
     <div id="ping"></div>
+    <div id="pingSelector" aria-live="polite"></div>
     <div id="fps"></div>
     <div id="perf"></div>
     <canvas id="minimap" width="192" height="192"></canvas>
@@ -903,8 +936,8 @@
       <div class="controls">
         <div><b>W A S D</b> move · <b>W HOLD</b> sprint · <b>SHIFT</b> sprint/slide · <b>CTRL</b> crouch</div>
         <div><b>MOUSE</b> look · <b>LMB</b> use tool · <b>RMB</b> aim · <b>R</b> reload</div>
-        <div><b>1</b> gun · <b>Q / E</b> cycle tools · <b>2</b> spade · <b>3</b> blocks · <b>4</b> grenade</div>
-        <div><b>G</b> squad ping · <b>TAB</b> scores · <b>Y</b> team chat · <b>M</b> mute</div>
+        <div><b>1</b> gun · <b>Q / E</b> cycle tools · <b>2</b> spade · <b>3</b> blocks · <b>4</b> grenade · <b>V</b> blueprint</div>
+        <div><b>G</b> ping · hold <b>G</b> + <b>1–5</b> intent · <b>TAB</b> scores · <b>Y</b> team chat · <b>M</b> mute</div>
       </div>
     </details>
     <div class="support home-only">
@@ -1019,6 +1052,9 @@
                 <div class="impactMetric"><b id="impactCrush">0</b><span>CRUSHED</span></div>
               </div>
             </div>
+            <div id="endEvolution" aria-label="Battlefield evolution"></div>
+            <div id="endRoles" aria-label="Team roles"></div>
+            <div id="endCommend" aria-label="Teammate commendations"></div>
           </div>
           <div id="endBoardLabel">SCOREBOARD</div>
           <div id="endBoard"></div>
@@ -1065,6 +1101,9 @@
             <small>Your teammates already carry into the next round.</small>
           </div>
           <div id="nextBattles" aria-label="Next battle choices"></div>
+          <div id="endRivalry">
+            <button id="rivalryBtn" type="button">RUN IT BACK · SAME MAP + SEED</button>
+          </div>
           <div id="roundActions">
             <button id="readyBtn" type="button">READY FOR NEXT · 0/1</button>
             <button id="doneBtn" type="button">DONE · RETURN HOME</button>
@@ -1080,6 +1119,6 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=37"></script>
+  <script type="module" src="./src/main.js?v=38"></script>
 </body>
 </html>

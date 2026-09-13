@@ -117,6 +117,17 @@ try {
     assert.deepEqual(faults, [], `browser faults at ${viewport.width}x${viewport.height}`);
     await page.close();
   }
+  const blueprintPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const blueprintFaults = [];
+  blueprintPage.on('pageerror', error => blueprintFaults.push(error.message));
+  await blueprintPage.goto(`${origin}/?blueprintqa=1&blueprint=RAMP&map=0&mode=tdm`,
+    { waitUntil: 'domcontentloaded' });
+  await blueprintPage.waitForFunction(() => window.__blueprintQa, null, { timeout: 15_000 });
+  const blueprintView = await blueprintPage.evaluate(() => window.__blueprintQa());
+  assert.equal(blueprintView.kind, 'RAMP');
+  assert.ok(blueprintView.cells >= 0 && blueprintView.cells <= 3);
+  assert.deepEqual(blueprintFaults, [], 'blueprint selector/ghost browser hook');
+  await blueprintPage.close();
   console.log('release readiness: visible lobby/HUD and graphics-tier matrix passed');
 } finally {
   await browser.close();

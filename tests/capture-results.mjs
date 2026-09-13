@@ -58,6 +58,14 @@ try {
         playerMarkers: document.querySelectorAll('#endBoard .playerMarker').length,
         impact: [...document.querySelectorAll('#endImpactMetrics b')]
           .map(node => Number(node.textContent)),
+        rolesPresent: document.querySelectorAll('#endRoles .roleRow').length > 0,
+        evolutionPresent: document.querySelector('#endEvolution')?.textContent.includes('BATTLEFIELD EVOLUTION'),
+        evolutionChanged: document.querySelector('#endEvolution')?.textContent.match(/(\d+)\/\d+ SAMPLED/)?.[1],
+        terrainPair: [...document.querySelectorAll('#endEvolution .terrainSample')]
+          .map(node => ({ label: node.querySelector('figcaption')?.textContent,
+            width: node.querySelector('canvas')?.width, height: node.querySelector('canvas')?.height,
+            aria: node.querySelector('canvas')?.getAttribute('aria-label') })),
+        rivalryHidden: getComputedStyle(document.querySelector('#endRivalry')).display === 'none',
         battleCards: document.querySelectorAll('#nextBattles .battleCard').length,
         ready: document.querySelector('#readyBtn')?.textContent,
         done: document.querySelector('#doneBtn')?.textContent,
@@ -72,6 +80,11 @@ try {
     if (state.map !== 'island' || state.groups.join('|') !== 'GREEN FORCE|BLUE FORCE'
         || state.player !== 'You' || state.playerMarkers !== 0
         || state.impact.join(',') !== '0,52,18,34,1'
+        || !state.rolesPresent || !state.evolutionPresent || Number(state.evolutionChanged) < 1
+        || JSON.stringify(state.terrainPair) !== JSON.stringify([
+          { label: 'START', width: 16, height: 16, aria: 'START terrain sample, 16 by 16 cells' },
+          { label: 'FINISH', width: 16, height: 16, aria: 'FINISH terrain sample, 16 by 16 cells' }])
+        || !state.rivalryHidden
         || state.battleCards !== 3 || state.countdownDisplay !== 'none'
         || !state.ready?.startsWith('PLAY ANOTHER')
         || !state.done?.startsWith('DONE') || state.share !== 'COPY RESULT'

@@ -444,7 +444,8 @@ try {
   }
   const ctfOutcomes = Object.fromEntries(['capture', 'death_drop', 'drop', 'other']
     .map(outcome => [outcome, ctfRuns.filter(run => run.outcome === outcome).length]));
-  const report = { seconds, rounds: rows.length, aggregate, byMode,
+  const report = { seconds, rounds: rows.length,
+    botUpdateOrder: 'deterministic-rotating-roster', aggregate, byMode,
     ctf: { runs: ctfRuns.length, outcomes: ctfOutcomes,
       approachedHome: ctfRuns.filter(run => run.approachedHome).length,
       returnedDrops: ctfRuns.filter(run => run.returnAssociation).length,

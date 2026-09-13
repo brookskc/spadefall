@@ -10,6 +10,10 @@ export const DEATH_RECAP_CAUSES = Object.freeze([
 
 const CAUSES = new Set(DEATH_RECAP_CAUSES);
 const TEAM = new Set(['green', 'blue']);
+export const DEATH_RECAP_FACTS = Object.freeze(['exposed', 'isolated', 'recent_breach']);
+export const DEATH_RECAP_DIRECTIONS = Object.freeze(['north', 'south', 'east', 'west']);
+const FACTS = new Set(DEATH_RECAP_FACTS);
+const DIRECTIONS = new Set(DEATH_RECAP_DIRECTIONS);
 const WEAPON_LABEL = Object.freeze({
   rifle: 'RIFLE',
   smg: 'SMG',
@@ -25,6 +29,10 @@ const boundedInteger = (value, min, max) => Number.isInteger(value)
 
 export function validDeathRecap(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (Object.keys(value).some(key => ![
+    'cause', 'attacker', 'team', 'distance', 'health', 'headshot', 'self',
+    'fact', 'direction',
+  ].includes(key))) return false;
   if (!CAUSES.has(value.cause) || typeof value.self !== 'boolean'
       || typeof value.headshot !== 'boolean') return false;
   if (!(value.attacker === null || (typeof value.attacker === 'string'
@@ -36,12 +44,18 @@ export function validDeathRecap(value) {
   if (value.attacker === null && value.team !== null) return false;
   if (value.attacker === null && value.health !== null) return false;
   if (!['rifle', 'smg', 'sniper'].includes(value.cause) && value.headshot) return false;
+  if (value.fact !== undefined && value.fact !== null && !FACTS.has(value.fact)) return false;
+  if (value.direction !== undefined && value.direction !== null && !DIRECTIONS.has(value.direction)) return false;
+  // Evidence is optional for legacy packets, but any adaptation fact or
+  // directional reference is meaningful only for an attacker-backed death.
+  if ((value.fact != null || value.direction != null)
+      && value.attacker === null) return false;
   return true;
 }
 
 export function makeDeathRecap({
   cause = 'unknown', attacker = null, team = null, distance = null,
-  health = null, headshot = false, self = false,
+  health = null, headshot = false, self = false, fact = null, direction = null,
 } = {}) {
   const cleanCause = CAUSES.has(cause) ? cause : 'unknown';
   const cleanSelf = !!self;
@@ -61,6 +75,8 @@ export function makeDeathRecap({
     headshot: ['rifle', 'smg', 'sniper'].includes(cleanCause) && !!headshot,
     self: cleanSelf,
   };
+  if (cleanAttacker && FACTS.has(fact)) recap.fact = fact;
+  if (cleanAttacker && DIRECTIONS.has(direction)) recap.direction = direction;
   return validDeathRecap(recap) ? recap : null;
 }
 
@@ -81,6 +97,10 @@ export function deathRecapCopy(recap) {
   if (recap.headshot) facts.push('HEADSHOT');
   if (recap.distance !== null) facts.push(`${recap.distance}m`);
   if (recap.health !== null) facts.push(`${recap.health} HP LEFT`);
+  if (recap.fact === 'exposed') facts.push('EXPOSED');
+  else if (recap.fact === 'isolated') facts.push('ISOLATED');
+  else if (recap.fact === 'recent_breach') facts.push('RECENT BREACH');
+  if (recap.direction) facts.push(`FROM ${recap.direction.toUpperCase()}`);
 
   if (recap.self) return {
     label: 'DEATH RECAP', title: 'SELF-INFLICTED', detail: facts.join(' · '), team: null,

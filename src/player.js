@@ -10,6 +10,9 @@ import { Controls } from './controls.js';
 import { nextReloadCue } from './reload-timeline.js';
 import { resetEnvironmentalState } from './environment.js';
 import { autoSprint } from './combat-flow.js';
+import { cycleBlueprint } from './blueprints.js';
+
+const PING_INTENTS = Object.freeze(['ATTACK', 'DEFEND', 'BREACH', 'BUILD_COVER', 'ROTATE']);
 
 // kick: degrees of aim climb per shot (recoil). aimSpread: hip-fire spread
 // multiplier while sighted. The SMG's small kick compounds at 10 rounds/s —
@@ -95,6 +98,10 @@ export class Player {
     this._crouchToggled = false;
     this._aimToggled = false;
     this._forwardHeld = 0;
+    this._pingHoldTimer = null;
+    this._pingSelectorOpen = false;
+    this._pingIntent = 0;
+    this.blueprintKind = 'SINGLE';
     this._spawnPreference = 'front';
     this.mouseDown = [false, false, false];
     // One gun class per life — the other two simply aren't in the belt
@@ -211,6 +218,28 @@ export class Player {
         e.preventDefault();
       this.keys[e.code] = true;
       this.controls.set(e.code, true);
+      // A quick tap remains the original generic ping. Holding G for a short
+      // beat opens a five-item, number-key selector; selection is sent only
+      // on release, so it cannot create multiple markers while held.
+      if (this.controls.matches('ping', e.code) && document.pointerLockElement === dom) {
+        if (!e.repeat) {
+          this._pingSelectorOpen = false;
+          this._pingIntent = 0;
+          clearTimeout(this._pingHoldTimer);
+          this._pingHoldTimer = setTimeout(() => {
+            if (!this.controls.down('ping')) return;
+            this._pingSelectorOpen = true;
+            this.game.hud.pingSelector?.(true, this._pingIntent, PING_INTENTS);
+          }, 220);
+        }
+        return;
+      }
+      if (this._pingSelectorOpen && /^Digit[1-5]$/.test(e.code)) {
+        e.preventDefault();
+        this._pingIntent = Number(e.code.slice(-1)) - 1;
+        this.game.hud.pingSelector?.(true, this._pingIntent, PING_INTENTS);
+        return;
+      }
       if (e.repeat) return; // one-shot actions below: only on the initial press
       // TAB scoreboard works while dead too — the redeploy wait is exactly
       // when you want it. preventDefault keeps browser focus in the page —
@@ -275,6 +304,20 @@ export class Player {
     addEventListener('keyup', e => {
       this.keys[e.code] = false;
       this.controls.set(e.code, false);
+      if (this.controls.matches('ping', e.code)) {
+        clearTimeout(this._pingHoldTimer);
+        const intent = this._pingSelectorOpen ? PING_INTENTS[this._pingIntent] : null;
+        this._pingSelectorOpen = false;
+        this.game.hud.pingSelector?.(false, 0, PING_INTENTS);
+        if (document.pointerLockElement === dom)
+          this.game.requestTeamPing(this, intent);
+        return;
+      }
+      if (this.controls.matches('blueprint', e.code) && this.tool === 3
+          && document.pointerLockElement === dom) {
+        this.cycleBlueprint();
+        return;
+      }
       if (this.controls.matches('scoreboard', e.code)) this.game.hud.statsHide();
     });
     // A click only counts if the pointer was already locked when it landed.
@@ -290,6 +333,9 @@ export class Player {
     });
     addEventListener('mouseup', e => { this.mouseDown[e.button] = false; this.controls.set(`Mouse${e.button}`, false); });
     document.addEventListener('pointerlockchange', () => {
+      clearTimeout(this._pingHoldTimer);
+      this._pingSelectorOpen = false;
+      this.game.hud.pingSelector?.(false, 0, PING_INTENTS);
       this.mouseDown = [false, false, false];
       this.controls.set('Mouse0', false); this.controls.set('Mouse1', false); this.controls.set('Mouse2', false);
       if (document.pointerLockElement !== dom) {
@@ -512,6 +558,12 @@ export class Player {
     const key = TOOLS[this.tool].key;
     // Dry on frags? Show the empty hand, not a phantom grenade.
     this.vm[key === 'nade' && this.grenades <= 0 ? 'empty' : key].visible = true;
+  }
+
+  cycleBlueprint() {
+    this.blueprintKind = cycleBlueprint(this.blueprintKind);
+    this.game.hud.refreshTool(this);
+    return this.blueprintKind;
   }
 
   // ---------------- per-frame ----------------

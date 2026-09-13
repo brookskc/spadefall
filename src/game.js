@@ -42,7 +42,8 @@ import { staySquadGroups, staySquadState,
   VOTE_KICK_COOLDOWN, VOTE_KICK_DURATION, voteKickVotesNeeded } from './social.js';
 import { sanitizeDisplayName } from './callsign.js';
 import { assignBotRoles, botsForSquadOrder, botDifficultyCode, botDifficultyKey,
-  botTelemetrySummary, ctfFinalApproachPolicy, scheduleBotBrains } from './bot-rules.js';
+  botTelemetrySummary, ctfFinalApproachPolicy, rotatingBotOrder,
+  scheduleBotBrains } from './bot-rules.js';
 import { WORLD_HASH_SEED, advanceWorldHash, snapshotDisposition,
   worldEventDisposition, worldLogHash } from './network-sync.js';
 import { SECURED_ACTIONS, actionSequenceDisposition, aimYawDelta, authorizeReload,
@@ -54,6 +55,7 @@ import { VoxelStoryTracker, voxelBattleStory } from './voxel-stories.js';
 import { NEXT_BATTLE_CHOICES, nextBattleChoices, resolveBattleVote,
   validBattleChoice, validBattleChoices } from './next-battle.js';
 import { deathRecapCopy, makeDeathRecap } from './death-recap.js';
+import { blueprintCells, validBlueprintKind } from './blueprints.js';
 import { balanceHumanTeams } from './team-balance.js';
 import { da, dx, dy, qa, qx, qy, rowsEqual as rowsEq,
   mergeSnapshot } from './replication.js';
@@ -62,7 +64,9 @@ import { CAP_TIME, HILL_CYCLE, MATCH_TIME_OVERRIDE,
   WIN_SCORE, holdClock, modeScoreLimit } from './match-modes.js';
 import { PresentationSchedule } from './presentation.js';
 import { contactCue, ctfEscalation, intensityCue,
-  nextBotDifficulty, usefulVoxelAction } from './combat-flow.js';
+  nextBotDifficulty } from './combat-flow.js';
+import { EngineeringLedger } from './engineering.js';
+import { PlaytestMetrics, PLAYTEST_SPAWN_WINDOW_SECONDS } from './playtest-metrics.js';
 import { observeSnapshotRtt, recordPose, rewindSecondsForRtt,
   samplePose } from './lag-compensation.js';
 import { RECONNECT_GRACE_MS, reservationMatches, validResumeToken } from './reconnect.js';
@@ -70,6 +74,9 @@ import { createHud } from './hud.js';
 import { chooseSpawn } from './spawn-controller.js';
 import { ctfFlagInteraction } from './objectives.js';
 import { advanceMatchClock } from './match-lifecycle.js';
+import { classifyRoles, normalizeCommendationState,
+  recordCommendation, rivalryDisposition, terrainEvolution, terrainHighlights,
+  terrainSample } from './postmatch.js';
 
 export { qa, qx, qy, mergeSnapshot, unsupportedCollapseCells };
 
@@ -425,6 +432,17 @@ export class Game {
     this.teamPings = [];                 // short-lived, team-only tactical marks
     this._nextTeamPingId = 1;
     this.botOrders = { green: null, blue: null };
+    this.engineering = new EngineeringLedger();
+    this._engineeringMessageAt = new Map();
+    this._openRoutes = [];
+    const ghostGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this._blueprintGhost = {
+      group: new THREE.Group(), geometry: ghostGeometry,
+      valid: new THREE.MeshBasicMaterial({ color: 0x7fe39a, transparent: true, opacity: .34 }),
+      invalid: new THREE.MeshBasicMaterial({ color: 0xf06d62, transparent: true, opacity: .3 }),
+      meshes: [],
+    };
+    this.scene.add(this._blueprintGhost.group);
     this.navRevision = 0;                // invalidates bot route snapshots after edits
     this._audioTarget = new THREE.Vector3();
     this._audioDirection = new THREE.Vector3();
@@ -434,6 +452,7 @@ export class Game {
     this._audioOccluded = pos => this._isSoundOccluded(pos);
     this._botTacticsT = 0;
     this._botBrainCursor = 0;
+    this._botUpdateFrame = 0;
     this._botThinkSet = null;
     this._openingDeployment = false;      // new rounds begin at the authored bases
     this._squadVotes = new Set();
@@ -443,6 +462,12 @@ export class Game {
     this._donePlayers = new Set();
     this._myBattleChoice = null;
     this._battleTally = [0, 0, 0];
+    this._roleRows = [];
+    this._commendVoters = new Set();
+    this._commendCounts = new Map();
+    this._rivalryVotes = new Set();
+    this._terrainStartSample = null;
+    this._terrainEvolution = null;
     this._contactState = new Map();
     this._recentDeaths = [];
     this._ctfProgressAt = 0;
@@ -468,6 +493,7 @@ export class Game {
     this.world = new VoxelWorld(scene);
     this.mapIndex = 0;                   // MAPS rotation position
     generateMap(this.world, this.seed, this.mapIndex);
+    this._terrainStartSample = terrainSample(this.world, { width: 16, depth: 16 });
     this._applyMapAtmosphere(this.mapIndex);
     this.world.onEdit = (x, z) => hud.mapDirty(x, z);
     hud.mapInit(this.world);
@@ -494,6 +520,11 @@ export class Game {
     $('squadBtn')?.addEventListener('click', () => this.requestStayAsSquad());
     $('readyBtn')?.addEventListener('click', () => this.requestIntermissionReady());
     $('doneBtn')?.addEventListener('click', () => this.requestDone());
+    $('rivalryBtn')?.addEventListener('click', () => this.requestRivalry());
+    $('endCommend')?.addEventListener('click', e => {
+      const target = e.target.closest?.('[data-target]')?.dataset.target;
+      if (target) this.requestCommend(target);
+    });
     $('shareResultBtn')?.addEventListener('click', () => this.onShareResult?.(this._resultShareText));
 
     if (this.mode !== 'client') this._spawnBots();
@@ -534,6 +565,10 @@ export class Game {
     this._scoreDirty = false;
     this._scoreBroadcastT = 0;
     this._kdSeed();
+    this.playtest = new PlaytestMetrics({ map: this.mapIndex, mode: this.gameMode,
+      seed: this.seed, side: this.player.team,
+      humans: this.remote.size + 1, bots: this.bots.length,
+      scope: this.mode === 'client' ? 'local' : 'authoritative' });
 
     hud.refreshTool(this.player);
     hud.health(this.player);
@@ -647,6 +682,10 @@ export class Game {
     this._funnelSeen.clear();
     this._entityFrameActive = false;
     this.voxelStory?.reset();
+    this.engineering.reset();
+    this._engineeringMessageAt.clear();
+    this._openRoutes = [];
+    this._hideBlueprintGhost();
     hud.deathRecap(null);
     this._clearTeamPings();
     this._squadVotes.clear();
@@ -656,6 +695,12 @@ export class Game {
     this._donePlayers.clear();
     this._myBattleChoice = null;
     this._battleTally = [0, 0, 0];
+    this._roleRows = [];
+    this._commendVoters.clear();
+    this._commendCounts.clear();
+    this._myCommendation = null;
+    this._rivalryVotes.clear();
+    this._terrainEvolution = null;
     this._contactState.clear();
     this._recentDeaths = [];
     this._ctfProgressAt = this.time;
@@ -672,6 +717,7 @@ export class Game {
     this.navRevision = 0;
     this._botTacticsT = 0;
     this._botBrainCursor = 0;
+    this._botUpdateFrame = 0;
     this.world.dispose();
     for (const b of this.bots) disposeObject(b.parts.group);
     for (const av of this.avatars.values()) av.dispose();
@@ -682,6 +728,7 @@ export class Game {
     this.mapIndex = map;
     this.world = new VoxelWorld(this.scene);
     generateMap(this.world, seed, map);
+    this._terrainStartSample = terrainSample(this.world, { width: 16, depth: 16 });
     // Map generation owns the placed-block palette. Refresh the persistent
     // first-person model from that exact source before it is shown again.
     this.player?.syncBlockColor();
@@ -760,6 +807,9 @@ export class Game {
     this._scoreBroadcastT = 0;
     this._statsSeen = { k: 0, d: 0 }; // fresh baseline — see the constructor note
     this._kdSeed();
+    this.playtest?.reset({ map: this.mapIndex, mode: this.gameMode, seed: this.seed,
+      side: this.player.team, humans: this.remote.size + 1, bots: this.bots.length,
+      scope: this.mode === 'client' ? 'local' : 'authoritative' });
     hud.score(this);
   }
 
@@ -1625,7 +1675,10 @@ export class Game {
       return accepted;
     }
     if (p.blocks <= 0) { sfx.click(); return false; }
-    const n = this._sendAction('place', { o: arr(p.body.eye()), d: arr(p.lookDir()) });
+    const payload = { o: arr(p.body.eye()), d: arr(p.lookDir()) };
+    if (validBlueprintKind(p.blueprintKind) && p.blueprintKind !== 'SINGLE')
+      payload.pattern = p.blueprintKind;
+    const n = this._sendAction('place', payload);
     this._pendingTerrainActions.set(n, 'place');
     return n;
   }
@@ -1727,13 +1780,23 @@ export class Game {
     })));
   }
 
+  playtestSnapshot() {
+    this.playtest?.updateDuration(this.matchElapsed);
+    this.playtest?.setRoster(this.remote.size + 1, this.bots.length);
+    return this.playtest?.diagnostics() ?? { current: null, history: [] };
+  }
+
   // ---------------- squad pings ----------------
-  requestTeamPing(e = this.player) {
+  requestTeamPing(e = this.player, requestedKind = null) {
     if (!e?.alive || this.over) return;
     this._recordLocalAction(e, 'ping');
     const d = arr(e.lookDir());
-    if (this.mode === 'client') this.net?.send({ t: 'a', k: 'mark', d });
-    else this._hostPlaceTeamPing(e, d);
+    if (this.mode === 'client') {
+      const msg = { t: 'a', k: 'mark', d };
+      if (['ATTACK', 'DEFEND', 'BREACH', 'BUILD_COVER', 'ROTATE'].includes(requestedKind))
+        msg.kind = requestedKind;
+      this.net?.send(msg);
+    } else this._hostPlaceTeamPing(e, d, requestedKind);
   }
 
   _teamPingKind(pos, team) {
@@ -1746,7 +1809,7 @@ export class Game {
     return 'MOVE';
   }
 
-  _hostPlaceTeamPing(e, rawDir) {
+  _hostPlaceTeamPing(e, rawDir, requestedKind = null) {
     const direction = normalizeDirection(rawDir);
     if (!direction || !e?.alive || this.over) return;
     if (this.time - (e._teamPingAt ?? -Infinity) < TEAM_PING_COOLDOWN) return;
@@ -1780,7 +1843,12 @@ export class Game {
     pos.z = Math.min(SZ, Math.max(0, pos.z));
     const msg = { t: 'e', k: 'mark', id: this._nextTeamPingId++, name: cleanName(e.name),
       team: e.team, x: pos.x, y: pos.y, z: pos.z,
-      kind: aimedEnemy ? 'ENEMY' : this._teamPingKind(pos, e.team) };
+      kind: ['ATTACK', 'DEFEND', 'BREACH', 'BUILD_COVER', 'ROTATE'].includes(requestedKind)
+        ? requestedKind : aimedEnemy ? 'ENEMY' : this._teamPingKind(pos, e.team) };
+    this.fieldTelemetry?.record('ping_event', {
+      kind: ['ATTACK', 'DEFEND', 'BREACH', 'BUILD_COVER', 'ROTATE'].includes(msg.kind)
+        ? msg.kind.toLowerCase() : 'generic', outcome: 'created' });
+    this.playtest?.notePing();
     const candidates = this.bots.filter(b => b.team === e.team).map(b => ({
       id: b.id, x: b.body.pos.x, z: b.body.pos.z, alive: b.alive,
       carrier: b.carrier, role: b.tacticalRole,
@@ -1809,7 +1877,8 @@ export class Game {
     group.position.set(d.x, d.y, d.z);
     this.scene.add(group);
     this.teamPings.push({ id: d.id, name: cleanName(d.name), team: d.team,
-      kind: d.kind, pos: new THREE.Vector3(d.x, d.y, d.z), group, mat, ttl: TEAM_PING_TTL });
+      kind: d.kind, pos: new THREE.Vector3(d.x, d.y, d.z), group, mat,
+      ttl: TEAM_PING_TTL, telemetryNear: false });
     while (this.teamPings.length > TEAM_PING_LIMIT) this._removeTeamPing(this.teamPings[0]);
     sfx.ping();
   }
@@ -1833,6 +1902,17 @@ export class Game {
       mark.group.visible = this.player.body.pos.distanceToSquared(mark.pos) > 9;
       mark.group.position.y = mark.pos.y + Math.round(Math.sin(this.time * 5) * 2) * 0.04;
       mark.mat.opacity = Math.min(1, mark.ttl * 1.5);
+      if (!mark.telemetryNear && this.mode !== 'client') {
+        const near = this.entities().some(e => e && e.alive && e !== this.player
+          && e.team === mark.team && e.body.pos.distanceToSquared(mark.pos) <= 9);
+        if (near) {
+          mark.telemetryNear = true;
+          this.playtest?.notePingNear();
+          this.fieldTelemetry?.record('ping_event', { kind: ['ATTACK', 'DEFEND',
+            'BREACH', 'BUILD_COVER', 'ROTATE'].includes(mark.kind)
+            ? mark.kind.toLowerCase() : 'generic', outcome: 'near_teammate' });
+        }
+      }
     }
   }
 
@@ -1876,6 +1956,13 @@ export class Game {
         + `↓${(n.recvBytesPerSecond / 1024).toFixed(1)}KB/s · `
         + `${n.droppedState} stale state drops · ${n.droppedInbound} rate drops · `
         + `${Math.round(n.peakBuffered / 1024)}KB peak queue`);
+      return true;
+    }
+    if (t === '/playteststats') {
+      const p = this.playtestSnapshot().current;
+      if (!p) hud.feed('PLAYTEST: diagnostics unavailable');
+      else hud.feed(`PLAYTEST: ${p.mode}/${p.map} ${p.scope} · contact ${p.firstContactSeconds?.toFixed(1) ?? '-'}s · `
+        + `K/D ${p.kills}/${p.deaths} · lanes ${p.laneEntries.north}/${p.laneEntries.center}/${p.laneEntries.south}`);
       return true;
     }
     if (t === '/securitystats') {
@@ -2088,11 +2175,17 @@ export class Game {
     if (!options.environmental && !combatDamageAllowed(victim.team, attacker?.team,
         victim === attacker, this.friendlyFire)) return false;
     if (attacker && attacker !== victim && Number.isFinite(amount) && amount > 0) {
+      if (attacker.team && victim.team && attacker.team !== victim.team)
+        this.playtest?.noteContact(this.matchElapsed);
       const ledger = victim._damageLedger ??= new Map();
       const prior = ledger.get(attacker) ?? { damage: 0, at: this.time };
       prior.damage += Math.min(Math.max(0, victim.health), amount);
       prior.at = this.time;
       ledger.set(attacker, prior);
+      // A teammate dealing damage near a fresh, authoritative opening is a
+      // bounded consequence for the engineer who made it. Repeated edits do
+      // not qualify, and the route is consumed after its first assist.
+      this._engineeringRouteAssist(attacker);
     }
     victim._combatAt = this.time;
     if (attacker && attacker !== victim) attacker._combatAt = this.time;
@@ -2126,6 +2219,7 @@ export class Game {
     if (victim.health <= 0) {
       victim._deathCause = options.cause ?? null;
       const self = attacker === victim;
+      const recapEvidence = this._deathRecapEvidence(victim, src, attacker);
       victim._lastDeathRecap = makeDeathRecap({
         cause: options.cause,
         attacker: attacker && !self ? cleanName(attacker.name) : null,
@@ -2135,7 +2229,10 @@ export class Game {
         health: attacker && !self ? attacker.health : null,
         headshot: options.headshot,
         self,
+        ...recapEvidence,
       });
+      this.fieldTelemetry?.record('recap_evidence', {
+        fact: recapEvidence.fact ?? 'none', reference: recapEvidence.direction ?? 'none' });
       victim.die(attacker);
       if (victim === this.player) hud.air(BREATH_MAX, false);
     }
@@ -2175,10 +2272,17 @@ export class Game {
   onDeath(victim, killer) {
     const wasCarrier = !!victim.carrier;
     const deathCause = victim._deathCause;
+    if (this.mode !== 'client' || victim === this.player)
+      this.playtest?.noteDeath(victim.gunClass ?? deathCause,
+        this.time - (victim._spawnedAt ?? -Infinity) <= PLAYTEST_SPAWN_WINDOW_SECONDS);
+    if (this.mode !== 'client' && killer && killer !== victim)
+      this.playtest?.noteKill(killer.gunClass);
     this._recentDeaths.push({ x: victim.body.pos.x, z: victim.body.pos.z,
       t: this.time, team: victim.team });
     this._recentDeaths = this._recentDeaths.filter(row => this.time - row.t < 20).slice(-24);
     if (deathCause === 'collapse') this.voxelStory?.recordCollapseKill();
+    if (deathCause === 'collapse' && killer && killer !== victim)
+      this._engineeringCredit(killer, 'collapse', `${Math.floor(victim.body.pos.x)},${Math.floor(victim.body.pos.y)},${Math.floor(victim.body.pos.z)}`);
     const engagementCause = deathCause
       ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
     if (victim === this.player) {
@@ -2270,6 +2374,138 @@ export class Game {
   }
 
   // ---------------- block tools ----------------
+  _hideBlueprintGhost() {
+    if (this._blueprintGhost) this._blueprintGhost.group.visible = false;
+  }
+
+  _blueprintCellAllowed(p, cell, occupied = null) {
+    if (!p || !cell || cell.x < 0 || cell.x >= SX || cell.y < 0 || cell.y >= SY
+        || cell.z < 0 || cell.z >= SZ || this.world.get(cell.x, cell.y, cell.z)
+        || this._protectedBuildReason(cell.x, cell.y, cell.z)) return false;
+    const entities = occupied ?? this.entities();
+    return !entities.some(e => {
+      if (!e?.alive) return false;
+      const b = e.body;
+      return cell.x + 1 > b.pos.x - b.half.x && cell.x < b.pos.x + b.half.x
+        && cell.z + 1 > b.pos.z - b.half.x && cell.z < b.pos.z + b.half.x
+        && cell.y + 1 > b.pos.y && cell.y < b.pos.y + b.half.h;
+    });
+  }
+
+  _blueprintPreflight(p, cells) {
+    if (!p || !Array.isArray(cells) || !cells.length
+        || !Number.isFinite(p.blocks) || p.blocks < cells.length
+        || (Number.isFinite(p._editTokens) && p._editTokens < cells.length)) return false;
+    const seen = new Set();
+    const entities = this.entities();
+    return cells.every(cell => {
+      const key = `${cell.x},${cell.y},${cell.z}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return this._blueprintCellAllowed(p, cell, entities);
+    });
+  }
+
+  _updateBlueprintGhost() {
+    const ghost = this._blueprintGhost, p = this.player;
+    if (!ghost || !p?.alive || this.over || p.tool !== 3) {
+      this._hideBlueprintGhost(); return;
+    }
+    const hit = this.world.raycast(p.body.eye(), p.lookDir(), 6);
+    if (!hit) { this._hideBlueprintGhost(); return; }
+    const kind = validBlueprintKind(p.blueprintKind) ? p.blueprintKind : 'SINGLE';
+    const cells = blueprintCells(kind, { x: hit.x + hit.nx, y: hit.y + hit.ny,
+      z: hit.z + hit.nz }, p.lookDir());
+    const valid = this._blueprintPreflight(p, cells);
+    for (let i = 0; i < ghost.meshes.length; i++) ghost.meshes[i].visible = false;
+    while (ghost.meshes.length < cells.length) {
+      const mesh = new THREE.Mesh(ghost.geometry, ghost.valid);
+      ghost.group.add(mesh); ghost.meshes.push(mesh);
+    }
+    for (let i = 0; i < cells.length; i++) {
+      const mesh = ghost.meshes[i];
+      mesh.position.set(cells[i].x + .5, cells[i].y + .5, cells[i].z + .5);
+      mesh.material = valid ? ghost.valid : ghost.invalid;
+      mesh.visible = true;
+    }
+    ghost.group.visible = true;
+  }
+
+  disposeBlueprintPreview() {
+    const ghost = this._blueprintGhost;
+    if (!ghost) return;
+    ghost.group.removeFromParent();
+    ghost.geometry.dispose(); ghost.valid.dispose(); ghost.invalid.dispose();
+    this._blueprintGhost = null;
+  }
+
+  _engineeringCredit(player, kind, site, consequence = true, points = CONTRIBUTION.engineeringAssist) {
+    if (this.mode === 'client' || !player || !consequence) return false;
+    const event = this.engineering.tryCredit(this._kdKey(player), kind, this.time, site, true);
+    if (!event) return false;
+    this._award(player, points, { specialty: 'terrain', specialtyPoints: 1 });
+    this.playtest?.noteEngineering(kind);
+    this.fieldTelemetry?.record('engineering_event', { kind, outcome: 'credited' });
+    // Score can have per-kind cooldowns, but the prominent center message is
+    // deliberately global: one concise engineering acknowledgement per
+    // player per 15 seconds, regardless of how many consequences occurred.
+    const key = this._kdKey(player);
+    if (this.time - (this._engineeringMessageAt.get(key) ?? -Infinity) >= 15) {
+      this._engineeringMessageAt.set(key, this.time);
+      const copy = { breach: 'BREACH OPENED', cover: 'COVER SAVE',
+        sightline: 'SIGHTLINE BLOCKED', collapse: 'COLLAPSE ASSIST',
+        route: 'ROUTE ASSIST +25' }[kind];
+      if (copy) this.messageTo(player, copy, '#ffd97a');
+    }
+    return true;
+  }
+
+  _engineeringConsequence(player, x, y, z) {
+    const nearby = this.entities().some(e => e && e !== player && e.alive
+      && e.team && Math.hypot(e.body.pos.x - (x + .5), e.body.pos.z - (z + .5)) < 12);
+    const objective = (this.hill && Math.hypot(this.hill.pos.x - (x + .5),
+      this.hill.pos.z - (z + .5)) < this.hill.r + 10)
+      || (this.flags && Object.values(this.flags).some(f => Math.hypot(f.home.x - (x + .5),
+        f.home.z - (z + .5)) < 14));
+    return nearby || objective;
+  }
+
+  _recordOpenRoute(player, x, y, z) {
+    if (!player) return;
+    this._openRoutes.push({ actor: player, team: player.team,
+      pos: { x: x + .5, y: y + .5, z: z + .5 }, t: this.time,
+      site: `${x},${y},${z}`, used: false });
+    if (this._openRoutes.length > 32) this._openRoutes.splice(0, this._openRoutes.length - 32);
+  }
+
+  _engineeringRouteAssist(attacker) {
+    if (this.mode === 'client' || !attacker?.body?.pos) return;
+    for (const route of this._openRoutes) {
+      if (route.used || route.actor === attacker || route.team !== attacker.team
+          || this.time - route.t > 8) continue;
+      if (route.pos && attacker.body.pos.distanceToSquared(route.pos) > 7 ** 2) continue;
+      if (this._engineeringCredit(route.actor, 'route', route.site, true)) route.used = true;
+    }
+    this._openRoutes = this._openRoutes.filter(route => this.time - route.t <= 8);
+  }
+
+  _deathRecapEvidence(victim, source, attacker) {
+    if (!attacker || attacker === victim || !source || !victim?.body?.pos) return {};
+    const dx = source.x - victim.body.pos.x, dz = source.z - victim.body.pos.z;
+    const direction = Math.abs(dx) >= Math.abs(dz)
+      ? (dx >= 0 ? 'east' : 'west') : (dz <= 0 ? 'north' : 'south');
+    const isolated = !this.entities().some(e => e && e !== victim && e.alive
+      && e.team === victim.team && e.body.pos.distanceToSquared(victim.body.pos) <= 8 ** 2);
+    const breached = this._openRoutes.some(route => this.time - route.t <= 9
+      && route.pos && Math.hypot(route.pos.x - victim.body.pos.x,
+        route.pos.z - victim.body.pos.z) <= 10);
+    let fact = null;
+    if (breached) fact = 'recent_breach';
+    else if (isolated) fact = 'isolated';
+    else if (this.losClear(attacker.body.eye?.() ?? source, victim.body.eye?.() ?? victim.body.pos)) fact = 'exposed';
+    return { fact, direction };
+  }
+
   _appendWorldEdit(entry) {
     this.editLog.push(entry);
     this._worldHash = advanceWorldHash(this._worldHash, entry);
@@ -2398,10 +2634,11 @@ export class Game {
       && !this.world.get(x + dx, y + 1, z + dz);
     const changedPassability = (bodyPassage(-1, 0) && bodyPassage(1, 0))
       || (bodyPassage(0, -1) && bodyPassage(0, 1));
-    const tactical = this.time - (who?._combatAt ?? -Infinity) < 10
-      || v === BLOCK.BLUE || v === BLOCK.GREEN;
-    this._recognizeVoxel(who, usefulVoxelAction({ type: 'dig',
-      changedPassability: changedPassability && tactical }));
+    const consequence = changedPassability && this._engineeringConsequence(who, x, y, z);
+    if (consequence) {
+      const site = `${x},${y},${z}`;
+      if (this._engineeringCredit(who, 'breach', site)) this._recordOpenRoute(who, x, y, z);
+    }
     if (Number.isFinite(who?._editTokens)) {
       who._editTokens = Math.max(0, who._editTokens - 1);
       who._terrainEdits++;
@@ -2432,7 +2669,7 @@ export class Game {
     return false;
   }
 
-  playerPlace(p, origin = null, dir = null) {
+  playerPlace(p, origin = null, dir = null, pattern = null) {
     this._noteAction(p);
     if (p.blocks <= 0) { if (p === this.player) sfx.click(); return false; }
     origin = origin ?? p.body.eye();
@@ -2440,9 +2677,31 @@ export class Game {
     const hit = this.world.raycast(origin, dir, 6);
     if (!hit) return false;
     const x = hit.x + hit.nx, y = hit.y + hit.ny, z = hit.z + hit.nz;
+    const kind = validBlueprintKind(pattern) ? pattern
+      : validBlueprintKind(p.blueprintKind) ? p.blueprintKind : 'SINGLE';
+    if (kind !== 'SINGLE') {
+      const accepted = this.tryBuildBlueprint(p, x, y, z, dir, kind);
+      if (accepted && p === this.player) { sfx.place(); hud.refreshTool(p); }
+      return accepted;
+    }
     const accepted = this.tryBuild(p, x, y, z);
     if (accepted && p === this.player) { sfx.place(); hud.refreshTool(p); }
     return accepted;
+  }
+
+  tryBuildBlueprint(p, x, y, z, dir, kind) {
+    if (!validBlueprintKind(kind) || kind === 'SINGLE') return false;
+    const cells = blueprintCells(kind, { x, y, z }, dir);
+    if (!this._blueprintPreflight(p, cells)) return false;
+    const color = p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN;
+    // Preflight has checked every cell before the first write. Each mutation
+    // still goes through applyEdit, preserving story, navigation, edit-log,
+    // and authoritative replication behavior for ordinary terrain.
+    for (const cell of cells) this.applyEdit(cell.x, cell.y, cell.z, color, p);
+    p.blocks -= cells.length;
+    if (Number.isFinite(p._editTokens)) p._editTokens = Math.max(0, p._editTokens - cells.length);
+    p._terrainEdits = (p._terrainEdits ?? 0) + cells.length;
+    return true;
   }
 
   // Shared placement rules for players and bots: cell must be empty, nobody
@@ -2471,18 +2730,23 @@ export class Game {
           z + 1 > b.pos.z - b.half.x && z < b.pos.z + b.half.x &&
           y + 1 > b.pos.y && y < b.pos.y + b.half.h) return false;
     }
-    const beforeSurface = this.world.surface(x, z);
-    const bridgedGap = beforeSurface < SEA || y > beforeSurface + 1;
     const recentCombat = this.time - (p._combatAt ?? -Infinity) < 8;
-    const pCenter = p.body.pos.clone().add(new THREE.Vector3(0, .9, 0));
-    const clearThreats = recentCombat ? this.foesOf(p.team).filter(e => e.alive
-      && e.body.pos.distanceToSquared(p.body.pos) < 24 ** 2
-      && this.losClear(e.body.eye(), pCenter)) : [];
+    // A construction contribution requires a teammate's threatened
+    // sightline, not merely placing a wall in front of oneself. Capture the
+    // before-state pairs, then compare after the authoritative edit.
+    const allies = this.teamOf(p.team).filter(e => e && e !== p && e.alive
+      && e.body.pos.distanceToSquared(p.body.pos) < 28 ** 2);
+    const threats = this.foesOf(p.team).filter(e => e.alive
+      && e.body.pos.distanceToSquared(p.body.pos) < 30 ** 2);
+    const threatened = [];
+    for (const ally of allies) for (const foe of threats) {
+      const target = ally.body.eye();
+      if (this.losClear(foe.body.eye(), target)) threatened.push({ ally, foe });
+    }
     this.applyEdit(x, y, z, p.team === 'blue' ? BLOCK.BLUE : BLOCK.GREEN, p);
     p.blocks--;
-    this._recognizeVoxel(p, usefulVoxelAction({ type: 'build',
-      bridgedGap, tactical: recentCombat,
-      blockedThreat: clearThreats.some(e => !this.losClear(e.body.eye(), pCenter)) }));
+    const blocked = threatened.some(({ ally, foe }) => !this.losClear(foe.body.eye(), ally.body.eye()));
+    if (blocked) this._engineeringCredit(p, recentCombat ? 'cover' : 'sightline', `${x},${y},${z}`);
     if (Number.isFinite(p?._editTokens)) {
       p._editTokens = Math.max(0, p._editTokens - 1);
       p._terrainEdits++;
@@ -2888,6 +3152,7 @@ export class Game {
         ownFlag.returnHome();
         this._ctfProgressAt = this.time;
         this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
+        this.playtest?.noteObjectiveCapture(true);
         this._award(e, CONTRIBUTION.flagReturn,
           { objective: 1, specialty: 'objective', specialtyPoints: 1 });
         this._broadcastScoreboard(true);
@@ -2898,6 +3163,7 @@ export class Game {
       if (interaction === 'capture') {
         e.carrier = false;
         this.captures[e.team]++;
+        this.playtest?.noteObjectiveCapture(false);
         this._ctfProgressAt = this.time;
         this._ctfEscalation = { active: false, returnTime: FLAG_RETURN_TIME, frontlineBonus: 0 };
         enemyFlag.returnHome();
@@ -2944,6 +3210,7 @@ export class Game {
     const h = this.hill;
     if (!h?.spots?.length) return;
     const index = nextHillIndex(h.index, h.spots.length);
+    this.playtest?.resetKoth();
     this._setHillIndex(index, true);
     sfx.capture();
     this.feed(`<b>HILL RELOCATED</b> — ${h.label}`);
@@ -3024,6 +3291,7 @@ export class Game {
     h.owner = capture.owner;
     h.capTeam = capture.capTeam;
     h.progress = capture.progress;
+    this.playtest?.noteKoth(dt, h.contested, h.owner, g + b > 0);
     if (capture.captured) {
       for (const e of present[capture.captured])
         this._award(e, CONTRIBUTION.hillCapture,
@@ -3125,6 +3393,13 @@ export class Game {
     this._myBattleChoice = retainedMine;
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
+    this._roleRows = this._postmatchRoleRows();
+    const terrainBefore = this._terrainStartSample;
+    const terrainAfter = terrainSample(this.world, { width: 16, depth: 16 });
+    this._terrainEvolution = terrainEvolution(terrainBefore, terrainAfter);
+    const terrainRecap = { ...this._terrainEvolution,
+      before: terrainBefore, after: terrainAfter,
+      highlights: terrainHighlights(storyMetrics, this._engineeringCounts()) };
     if (this.mode === 'host') {
       const event = { t: 'e', k: 'end', winner };
       if (storyMetrics) event.story = storyMetrics;
@@ -3146,6 +3421,7 @@ export class Game {
     hud.statsHide(); // the summary board replaces the overlay
     $('hud').classList.remove('on');
     const won = winner === this.player.team;
+    this.playtest?.finish(this.matchElapsed, won);
     this.engagement?.finishMatch({
       outcome: 'complete', won, duration: this.matchElapsed, overtime: this.overtime,
       scoreMargin: Math.abs((this.captures.green ?? 0) - (this.captures.blue ?? 0)),
@@ -3172,12 +3448,16 @@ export class Game {
       + 'Play at https://spadefall.io';
     hud.matchReport(this, report, recordUpdate);
     hud.voxelStory(story);
+    hud.roles(this, this._roleRows);
+    hud.terrainEvolution(terrainRecap);
     $('endBoard').innerHTML = hud.kdTable(this, { groupTeams: true }); // round contribution summary
     hud.classPick(this.player._pendingClass);
     const balanceNote = this.teamBalanceEnabled() ? ' · teams balance between rounds' : '';
     $('endNote').textContent = `choose a battle, then PLAY ANOTHER · waiting for players${balanceNote}`;
     hud.rotationProgress(0, false);
     hud.nextBattles(this, this._battleChoices, this._battleTally, this._myBattleChoice);
+    this._publishCommendationState();
+    this._publishRivalryState();
     $('end').classList.remove('hidden');
     this.player.vmRoot.visible = false;
     // Results contain real choices. Release captured mouse input before the
@@ -3403,6 +3683,83 @@ export class Game {
     return counts;
   }
 
+  _postmatchRoleRows() { return classifyRoles(this.kd.entries()); }
+
+  _engineeringCounts() {
+    const counts = {};
+    for (const [key, amount] of this.engineering.count ?? []) {
+      const kind = String(key).split(':')[1];
+      if (kind) counts[kind] = (counts[kind] ?? 0) + Math.max(0, Math.floor(amount));
+    }
+    return counts;
+  }
+
+  _commendationState() {
+    return { voters: [...this._commendVoters], counts: [...this._commendCounts.entries()] };
+  }
+
+  _publishCommendationState() {
+    const state = this._commendationState();
+    hud.commendations(this, this._roleRows, state.counts, this._myCommendation);
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'commend', ...state });
+  }
+
+  _publishRivalryState() {
+    const voters = [...this._rivalryVotes];
+    hud.rivalry(this, voters);
+    if (this.mode === 'host') this.net.broadcast({ t: 'e', k: 'rivalry', voters });
+  }
+
+  _hostCommend(voter, targetIdx) {
+    if (!this.over || !voter || !Number.isInteger(targetIdx)) return false;
+    const target = targetIdx === this._hostIdx ? this.player
+      : [...this.remote.values()].find(p => p.ridx === targetIdx);
+    const voterKey = this._kdKey(voter), targetKey = target && this._kdKey(target);
+    const result = recordCommendation({ voters: this._commendVoters, counts: this._commendCounts },
+      voterKey, targetKey, this.kd.entries());
+    if (!result.accepted) return false;
+    this._commendVoters = result.voters;
+    this._commendCounts = result.counts;
+    this._publishCommendationState();
+    return true;
+  }
+
+  requestCommend(targetKey) {
+    if (!this.over || typeof targetKey !== 'string' || !/^p\d+$/.test(targetKey)) return false;
+    const targetIdx = Number(targetKey.slice(1));
+    if (!Number.isSafeInteger(targetIdx)) return false;
+    if (this.mode === 'client') {
+      const sent = !!this.net?.send({ t: 'a', k: 'commend', target: targetIdx });
+      if (sent) { this._myCommendation = targetKey; hud.commendations(this, this._roleRows,
+        [...this._commendCounts.entries()], targetKey); }
+      return sent;
+    }
+    return this._hostCommend(this.player, targetIdx);
+  }
+
+  _hostRivalryOptIn(player) {
+    if (!this.over || !player) return false;
+    const active = this._humanKeys().filter(key => !this._donePlayers.has(key));
+    if (active.length < 2) return false;
+    const key = this._kdKey(player);
+    if (!active.includes(key) || this._rivalryVotes.has(key)) return false;
+    this._rivalryVotes.add(key);
+    this.playtest?.continuation('rivalry');
+    this._publishRivalryState();
+    this._maybeStartNextBattle();
+    return true;
+  }
+
+  requestRivalry() {
+    if (!this.over || this._humanKeys().length < 2) return false;
+    if (this.mode === 'client') {
+      const sent = !!this.net?.send({ t: 'a', k: 'rivalry' });
+      if (sent) this.playtest?.continuation('rivalry');
+      return sent;
+    }
+    return this._hostRivalryOptIn(this.player);
+  }
+
   _publishBattleChoices() {
     const counts = this._battleCounts();
     this._battleTally = counts;
@@ -3420,7 +3777,7 @@ export class Game {
       return false;
     if (this.mode === 'client') {
       const sent = !!this.net?.send({ t: 'a', k: 'vote', choice });
-      if (sent) { this._myBattleChoice = choice; hud.nextBattles(this, this._battleChoices,
+      if (sent) { this.playtest?.continuation('next'); this._myBattleChoice = choice; hud.nextBattles(this, this._battleChoices,
         this._battleTally, choice); }
       return sent;
     }
@@ -3435,6 +3792,7 @@ export class Game {
           { publicRoom: this.publicRoom, privateContent: this.privateContent })) return false;
     if (this._battleVotes.has(key)) return false;
     this._battleVotes.set(key, choice);
+    this.playtest?.continuation('next');
     this._publishBattleChoices();
     return true;
   }
@@ -3444,6 +3802,14 @@ export class Game {
     const active = this._humanKeys().filter(voter => !this._donePlayers.has(voter));
     if (!active.length || !active.every(voter => this._intermissionReady.has(voter)))
       return false;
+    const rivalry = rivalryDisposition({ active, opted: [...this._rivalryVotes],
+      ready: [...this._intermissionReady] });
+    if (rivalry.active) {
+      this._rivalryVotes.clear();
+      this._battleVotes.clear();
+      this._intermissionReady.clear();
+      return this._restartRound(this.mapIndex, this.seed, this.gameMode);
+    }
     const votes = [...this._battleVotes.entries()].map(([actor, choice]) => ({ actor, choice }));
     const resolved = resolveBattleVote(this._battleChoices, votes, active);
     if (!resolved) return false;
@@ -3456,6 +3822,7 @@ export class Game {
   _hostContinue(player) {
     const key = this._kdKey(player);
     if (this.mode === 'client' || !this.over || this._donePlayers.has(key)) return false;
+    this.playtest?.continuation('next');
     if (!this._battleVotes.has(key)) this._battleVotes.set(key, 0);
     this._intermissionReady.add(key);
     this._publishBattleChoices();
@@ -3481,6 +3848,7 @@ export class Game {
   requestDone() {
     if (!this.over) return false;
     this.engagement?.record('continuation', { action: 'done' });
+    this.playtest?.continuation('done');
     if (this.mode === 'client') this.net?.send({ t: 'a', k: 'done' });
     this.onDone?.();
     return true;
@@ -3489,6 +3857,7 @@ export class Game {
   requestStayAsSquad() {
     if (!this.over || !this.engagementFeatures.stayAsSquad) return;
     if (this.mode === 'client') {
+      this.playtest?.continuation('stay_squad');
       this.net?.send({ t: 'a', k: 'squad' });
       return;
     }
@@ -3499,6 +3868,7 @@ export class Game {
     if (!this.over || !e || !this.engagementFeatures.stayAsSquad) return;
     const key = this._kdKey(e);
     if (!this._humanKeys().includes(key) || this._squadVotes.has(key)) return;
+    this.playtest?.continuation('stay_squad');
     this._squadVotes.add(key);
     this._publishSquadState();
   }
@@ -3682,11 +4052,19 @@ export class Game {
       return;
     }
     if (d.t === 'a' && d.k === 'mark') {
-      this._hostPlaceTeamPing(p, d.d);
+      this._hostPlaceTeamPing(p, d.d, d.kind);
       return;
     }
     if (d.t === 'a' && d.k === 'squad') {
       this._hostSquadVote(p);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'commend') {
+      this._hostCommend(p, d.target);
+      return;
+    }
+    if (d.t === 'a' && d.k === 'rivalry') {
+      this._hostRivalryOptIn(p);
       return;
     }
     if (d.t === 'a' && d.k === 'ready') {
@@ -3914,7 +4292,10 @@ export class Game {
         if (p.tool !== 3) { this._securityViolation(p, 'place-tool', 0.5); return; }
         if (gap('place') < 0.12) return;
         p._actT.place = now;
-        this.playerPlace(p, o, dir); // tryBuild enforces the block count
+        // The host owns the accepted body origin. The client's bounded aim
+        // direction selects the surface; its optional pattern is allowlisted
+        // by protocol.js and still preflighted cell-by-cell below.
+        this.playerPlace(p, p.body.eye(), dir, d.pattern); // tryBuild enforces inventory
       }
       else if (d.k === 'nade') {
         if (p.tool !== 4) { this._securityViolation(p, 'nade-tool', 0.5); return; }
@@ -4047,6 +4428,8 @@ export class Game {
       if (this.engagementFeatures.stayAsSquad)
         this.net.sendTo(id, { t: 'e', k: 'squad', voters: [...this._squadVotes] });
       this.net.sendTo(id, { t: 'e', k: 'ready', voters: [...this._intermissionReady] });
+      this.net.sendTo(id, { t: 'e', k: 'commend', ...this._commendationState() });
+      this.net.sendTo(id, { t: 'e', k: 'rivalry', voters: [...this._rivalryVotes] });
     }
     this.net.broadcast(this._rosterMsg()); // the joiner gets it twice — idempotent
     this._broadcastScoreboard(true);
@@ -4593,6 +4976,13 @@ export class Game {
       const mine = this._rosterP.get(this.myIdx);
       if (mine) this.player.team = mine.team;
     }
+    if (this.over) {
+      this._roleRows = this._postmatchRoleRows();
+      hud.roles(this, this._roleRows);
+      hud.commendations(this, this._roleRows, [...this._commendCounts.entries()],
+        this._myCommendation);
+      hud.rivalry(this, [...this._rivalryVotes]);
+    }
   }
 
   _applyWorldEntry(e) {
@@ -5069,6 +5459,19 @@ export class Game {
         this._squadVotes = new Set(d.voters);
         hud.staySquad(this, d.voters);
         break;
+      case 'commend': {
+        const state = normalizeCommendationState(d.voters, d.counts);
+        this._commendVoters = new Set(state.voters);
+        this._commendCounts = new Map(state.counts);
+        if (this._commendVoters.has(this._kdKey(this.player)))
+          this._myCommendation = this._myCommendation ?? 'submitted';
+        hud.commendations(this, this._roleRows, state.counts, this._myCommendation);
+        break;
+      }
+      case 'rivalry':
+        this._rivalryVotes = new Set(d.voters);
+        hud.rivalry(this, d.voters);
+        break;
       case 'ready':
         this._intermissionReady = new Set(d.voters);
         hud.ready(d.voters.length, this._humanKeys().length,
@@ -5114,6 +5517,12 @@ export class Game {
               objective: r[11], terrain: r[12] } })]));
         hud.statsRefresh(this);
         this._syncPersistentStats(); // client side; the host/solo path is in onDeath
+        if (this.over) {
+          this._roleRows = this._postmatchRoleRows();
+          hud.roles(this, this._roleRows);
+          hud.commendations(this, this._roleRows, [...this._commendCounts.entries()],
+            this._myCommendation);
+        }
         break;
       case 'end': {
         // Same finale justification as snapshots, minus their growth
@@ -5340,7 +5749,8 @@ export class Game {
     this._updateGrenadeWarning();
     this._updateIntensityCues();
     if (this.mode === 'client') {
-      this._clientUpdate(dt); this.world.flushDirty(); this._endEntityFrame(); return;
+      this._clientUpdate(dt); this._updateBlueprintGhost();
+      this.world.flushDirty(); this._endEntityFrame(); return;
     }
 
     // Pending airstrikes: host/solo only, since only this side is
@@ -5390,7 +5800,7 @@ export class Game {
     else this.player.deathCam(dt);
     this._updateBotTactics(dt);
     this._updateBotAirstrikes();
-    for (const b of this.bots) b.update(dt);
+    for (const b of rotatingBotOrder(this.bots, this._botUpdateFrame++)) b.update(dt);
     this._updateAirstrikeDrones(dt);
     this._updateEnvironmentalDamage(dt);
     this._combatHistoryT += Math.max(0, dt);
@@ -5484,10 +5894,17 @@ export class Game {
 
     // Camera shake rides on top of whatever the player camera did.
     this._shakeCamera();
+    this._updateBlueprintGhost();
     this.effects.update(dt);
     // One remesh pass per frame: single-voxel set() calls queue their chunks
     // here instead of each synchronously rebuilding up to 5 of them.
     this.world.flushDirty();
+    if (!this.over) {
+      if (this.mode === 'client') this.playtest?.observeRoute(this.player,
+        this.player.team, this.player.body.pos.x, this.player.body.pos.z, this.time,
+        this.player._spawnedAt, SX / 2);
+      else this.playtest?.observeRoutes(this._entityRoster, this.time, SX / 2);
+    }
     this._endEntityFrame();
   }
 }

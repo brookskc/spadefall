@@ -83,6 +83,12 @@ const DIAGNOSTIC_ENUMS = Object.freeze({
   funnel: { step: ['opened', 'play_selected', 'playable_match', 'joined',
     'first_spawn', 'first_shoot', 'first_dig', 'first_place', 'first_ping',
     'objective', 'first_death', 'match_complete', 'next_match'] },
+  engineering_event: { kind: ['breach', 'cover', 'sightline', 'collapse', 'route'],
+    outcome: ['credited'] },
+  ping_event: { kind: ['attack', 'defend', 'breach', 'build_cover', 'rotate', 'generic'],
+    outcome: ['created', 'near_teammate'] },
+  recap_evidence: { fact: ['exposed', 'isolated', 'recent_breach', 'none'],
+    reference: ['north', 'south', 'east', 'west', 'none'] },
 });
 
 const exactKeys = (value, required, optional = []) => {

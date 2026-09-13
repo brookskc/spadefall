@@ -6,7 +6,7 @@ export const DEFAULT_BINDINGS = Object.freeze({
   sprint: ['ShiftLeft', 'ShiftRight'], crouch: ['ControlLeft', 'ControlRight'],
   aim: ['Mouse2'], fire: ['Mouse0'], reload: ['KeyR'], jump: ['Space'],
   tool1: ['Digit1'], tool2: ['Digit2'], tool3: ['Digit3'], tool4: ['Digit4'],
-  previousTool: ['KeyQ'], nextTool: ['KeyE'], ping: ['KeyG'], scoreboard: ['Tab'],
+  previousTool: ['KeyQ'], nextTool: ['KeyE'], ping: ['KeyG'], blueprint: ['KeyV'], scoreboard: ['Tab'],
   ability: ['KeyF'], spawnBase: ['KeyB'], teamChat: ['KeyY'], roomChat: ['KeyT'],
   mute: ['KeyM'],
 });
@@ -16,7 +16,7 @@ export const BINDING_LABELS = Object.freeze({
   moveRight: 'MOVE RIGHT', sprint: 'SPRINT', crouch: 'CROUCH', aim: 'AIM',
   fire: 'FIRE / USE', reload: 'RELOAD', jump: 'JUMP', tool1: 'WEAPON',
   tool2: 'SPADE', tool3: 'BLOCKS', tool4: 'GRENADE', previousTool: 'PREVIOUS TOOL',
-  nextTool: 'NEXT TOOL', ping: 'SQUAD PING', scoreboard: 'SCOREBOARD',
+  nextTool: 'NEXT TOOL', ping: 'SQUAD PING', blueprint: 'BLUEPRINT', scoreboard: 'SCOREBOARD',
   ability: 'AIRSTRIKE / FRONT SPAWN', spawnBase: 'BASE SPAWN',
   teamChat: 'TEAM CHAT', roomChat: 'ROOM CHAT', mute: 'MUTE',
 });

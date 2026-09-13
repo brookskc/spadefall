@@ -12,7 +12,7 @@ Spadefall is a first-person arena shooter built around terrain that can be destr
 
 Rooms support up to ten human players, split into teams of five. Bots occupy open positions, so a match can start immediately and fill with people as they join.
 
-Bots use line of sight, nearby sound, and fading last-known positions rather than hidden player coordinates. Their team jobs change with the mode: they escort and recover flags, anchor or flank rotating hills, and spread pressure across deathmatch lanes. Team pings made with `G` send the nearest available bots to the mark without pulling flag carriers or emergency recovery teams away from their jobs.
+Bots use line of sight, nearby sound, and fading last-known positions rather than hidden player coordinates. Their team jobs change with the mode: they escort and recover flags, anchor or flank rotating hills, and spread pressure across deathmatch lanes. Tap `G` for a quick team ping, or hold it and press `1`–`5` to mark attack, defense, a breach, cover construction, or a rotation. Pings can direct nearby available bots without pulling flag carriers or emergency recovery teams away from their jobs.
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
@@ -23,11 +23,11 @@ Capture the Flag is retired from public play. Dunes and Crown are also retired f
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
-After a round, the match report shows your contribution score, combat line, objective work, placement, and any performance medals. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players choose from three mode/map cards and explicitly select PLAY ANOTHER or DONE; there is no forced rotation.
+After a round, the match report shows contribution, combat and objective work, a descriptive team role, teammate commendations, and a paired start/finish view of how the terrain changed. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players choose from three mode/map cards and explicitly select PLAY ANOTHER or DONE; there is no forced rotation. When at least two humans are present, everyone can also opt into a rivalry round on the same map and seed with sides rebalanced.
 
 ## Loadouts and tools
 
-Choose one gun for each life. Every class also carries a spade, 50 building blocks, and regenerating grenades.
+Choose one gun for each life. Every class also carries a spade, 50 building blocks, and regenerating grenades. Terrain actions that create a useful breach, cover a teammate, interrupt a sightline, collapse terrain onto a fight, or enable a teammate's route can earn bounded engineering assists.
 
 | Weapon | Role |
 | --- | --- |
@@ -79,9 +79,10 @@ Room-wide chat is disabled by default; `Y` opens transient team chat. Callsigns 
 | `1`, `Q`, `E` | Select or cycle the gun |
 | `2` | Spade |
 | `3` | Blocks |
+| `V` | Cycle the block tool between single placement, low wall, firing step, and ramp blueprints |
 | `4` | Grenade |
 | `F` | Call in an airstrike when the meter is full |
-| `G` | Place a team-only tactical ping |
+| `G` | Tap for a team ping; hold and press `1`–`5` for an intent ping |
 | `Tab` | Scoreboard |
 | `Y` | Team chat |
 | `M` | Mute or unmute all game audio |
@@ -130,7 +131,7 @@ npm run test:multiplayer
 
 Run both suites in the same order as CI with `npm run test:ci`.
 
-For bot tuning, append `?botq=easy`, `?botq=normal`, or `?botq=hard` to the local URL. Difficulty changes reaction time, aim error, memory, hearing, and decision cadence; it does not change bot health or weapon damage. In a solo or hosted match, `/botstats` in chat reports average decision time, stuck recoveries, and objective participation.
+For bot tuning, append `?botq=easy`, `?botq=normal`, or `?botq=hard` to the local URL. Difficulty changes reaction time, aim error, memory, hearing, and decision cadence; it does not change bot health or weapon damage. In a solo or hosted match, `/botstats` reports bot performance and `/playteststats` reports bounded, local-only match aggregates for flow, classes, lanes, KOTH activity, engineering, pings, and continuation choices.
 
 ## License
 

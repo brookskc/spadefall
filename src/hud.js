@@ -30,6 +30,10 @@ const MULTIKILL = {
   multi:  { text: 'MULTI KILL',  color: '#e05a4e', notes: 5 },
 };
 
+const escRoleName = value => String(value ?? '').replace(/[&<>"']/g, char => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[char]));
+
 /**
  * Build the browser HUD adapter around the game dependencies it consumes.
  * Keeping the game instance out of this module prevents an import cycle while
@@ -53,13 +57,15 @@ export function createHud(deps = {}) {
   refreshTool(p) {
     const t = TOOLS[p.tool];
     $('toolname').textContent = t.name;
-    if (t.key === 'block') $('ammo').innerHTML = `${p.blocks} <small>blocks</small>`;
+    if (t.key === 'block') $('ammo').innerHTML = `${p.blocks} <small>blocks · ${(p.blueprintKind || 'SINGLE').replace('_', ' ')}</small>`;
     else if (t.key === 'nade') $('ammo').innerHTML = `${p.grenades} <small>grenades</small>`;
     else if (t.key === 'spade') $('ammo').innerHTML = `∞`;
     else $('ammo').innerHTML = p.reloading > 0
       ? `<small>reloading…</small>`
       : `${p.ammo[p.tool]} <small>/ ${t.mag}</small>`;
-    $('toolhint').textContent = '1 gun · 2 spade · 3 blocks · 4 grenade · R reload';
+    $('toolhint').textContent = t.key === 'block'
+      ? 'V cycles blueprint · 1 gun · 2 spade · 3 blocks · 4 grenade'
+      : '1 gun · 2 spade · 3 blocks · 4 grenade · R reload';
   },
   health(p) {
     $('healthfill').style.width = Math.max(0, p.health) + '%';
@@ -351,6 +357,95 @@ export function createHud(deps = {}) {
         .join(' · ')
         + (stats.selectedBadge() ? ` · EQUIPPED ${stats.selectedBadge()}` : '');
     }
+  },
+  roles(g, roleRows = []) {
+    const root = $('endRoles');
+    if (!root) return;
+    const me = g.player ? g._kdKey(g.player) : null;
+    const rows = roleRows.filter(row => /^p\d+$/.test(row.key));
+    root.innerHTML = '<span class="endSectionLabel">TEAM ROLES</span>'
+      + rows.map(row => `<span class="roleRow${row.key === me ? ' me' : ''}">`
+        + `<b>${escRoleName(row.name)}</b><small>${row.role}</small></span>`).join('');
+  },
+  commendations(g, roleRows = [], counts = [], mine = null) {
+    const root = $('endCommend');
+    if (!root) return;
+    const me = g.player ? g._kdKey(g.player) : null;
+    const mineDone = !!mine || g._commendVoters?.has?.(me);
+    const countMap = new Map(counts);
+    const teammates = roleRows.filter(row => /^p\d+$/.test(row.key)
+      && row.key !== me && row.team === g.player?.team);
+    root.innerHTML = '<span class="endSectionLabel">COMMEND A TEAMMATE</span>'
+      + (teammates.length ? teammates.map(row => `<button type="button" class="commendBtn" data-target="${row.key}"`
+        + `${mineDone ? ' disabled' : ''}><b>${escRoleName(row.name)}</b>`
+        + `<small>${row.role} · ${countMap.get(row.key) ?? 0}</small></button>`).join('')
+        : '<small class="endMuted">NO ELIGIBLE TEAMMATES</small>');
+  },
+  rivalry(g, voters = []) {
+    const root = $('endRivalry');
+    const button = $('rivalryBtn');
+    if (!root || !button) return;
+    const active = g._humanKeys?.().filter(key => !g._donePlayers?.has(key)) ?? [];
+    const eligible = active.length >= 2;
+    root.classList.toggle('on', eligible);
+    if (!eligible) return;
+    const mine = voters.includes(g._kdKey(g.player));
+    button.disabled = mine;
+    button.textContent = mine ? `RUN IT BACK · OPTED IN ${voters.length}/${active.length}`
+      : `RUN IT BACK · SAME MAP + SEED (${voters.length}/${active.length})`;
+  },
+  terrainEvolution(recap) {
+    const root = $('endEvolution');
+    if (!root || !recap) return;
+    const highlights = Array.isArray(recap.highlights) ? recap.highlights.slice(0, 2) : [];
+    const before = recap.before, after = recap.after;
+    const sampleLabel = sample => sample && Number.isInteger(sample.width)
+      && Number.isInteger(sample.depth) ? `${sample.width} by ${sample.depth}` : 'unavailable';
+    root.innerHTML = `<span class="endSectionLabel">BATTLEFIELD EVOLUTION</span>`
+      + `<small>${recap.changed ?? 0}/${recap.total ?? 0} SAMPLED AREAS CHANGED</small>`
+      + `<div class="terrainPair" role="group" aria-label="Terrain comparison from start to finish">`
+      + `<figure class="terrainSample"><canvas width="16" height="16" role="img"`
+      + ` aria-label="START terrain sample, ${sampleLabel(before)} cells">START terrain sample</canvas>`
+      + `<figcaption>START</figcaption></figure>`
+      + `<figure class="terrainSample"><canvas width="16" height="16" role="img"`
+      + ` aria-label="FINISH terrain sample, ${sampleLabel(after)} cells">FINISH terrain sample</canvas>`
+      + `<figcaption>FINISH</figcaption></figure></div>`
+      + `<span class="terrainFallback">START / FINISH · ${sampleLabel(before)} cells each</span>`
+      + (highlights.length ? `<div>${highlights.map(text => `<b>${text}</b>`).join(' · ')}</div>` : '');
+    const draw = (canvas, sample) => {
+      if (!canvas || !sample || !Number.isInteger(sample.width) || !Number.isInteger(sample.depth)
+          || sample.width < 1 || sample.width > 32 || sample.depth < 1 || sample.depth > 32) return;
+      const width = sample.width, depth = sample.depth;
+      canvas.width = width; canvas.height = depth;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const total = Math.min(width * depth, sample.occupancy?.length ?? 0,
+        sample.heights?.length ?? 0);
+      for (let i = 0; i < total; i++) {
+        const occupied = sample.occupancy[i] ? 1 : 0;
+        const height = Math.max(0, Math.min(255, Number(sample.heights[i]) || 0));
+        // The playable band is below 72 blocks; use that bounded reference so
+        // a one-voxel height change remains legible without exaggerating the
+        // comparison or depending on a runtime color scale.
+        const light = 25 + Math.round(Math.min(72, height) / 72 * 55);
+        ctx.fillStyle = occupied ? `hsl(42 48% ${light + 15}%)` : `hsl(205 24% ${light}%)`;
+        ctx.fillRect(i % width, Math.floor(i / width), 1, 1);
+      }
+    };
+    const canvases = root.querySelectorAll('.terrainSample canvas');
+    draw(canvases[0], before); draw(canvases[1], after);
+  },
+  pingSelector(open, selected = 0, intents = []) {
+    const el = $('pingSelector');
+    if (!el) return;
+    el.classList.toggle('on', !!open);
+    if (!open) return;
+    el.replaceChildren(...intents.map((intent, i) => {
+      const item = getDom().createElement('span');
+      item.className = i === selected ? 'picked' : '';
+      item.textContent = `${i + 1} ${intent.replace('_', ' ')}`;
+      return item;
+    }));
   },
   voxelStory(story) {
     const el = $('endStory');

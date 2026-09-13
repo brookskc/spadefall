@@ -40,6 +40,8 @@ import { PresentationSchedule } from '../src/presentation.js';
 import { AUDIO_QA_CONTRACT, SOUND_META, reloadPitch, sfx, spatialAudioMix, spatialVerticality,
   voxelSurface } from '../src/audio.js';
 import { DEFAULT_BINDINGS, bindingConflicts, normalizeBindings } from '../src/controls.js';
+import { BLUEPRINT_KINDS, blueprintCells, blueprintCost, cycleBlueprint,
+  validBlueprintKind } from '../src/blueprints.js';
 import { captionFromMix } from '../src/captions.js';
 import { nextReloadCue } from '../src/reload-timeline.js';
 import { BREATH_MAX, DROWN_DAMAGE, fallDamageForImpact,
@@ -49,7 +51,7 @@ import { BOT_DIFFICULTY, assignBotRoles, botDifficulty,
   botTelemetrySummary, botTerrainEditAllowed, BOT_LIFE_EDIT_BUDGET,
   chooseLocalRoute, ctfFinalApproachPolicy, hillPost, rememberedEnemyPosition,
   smgClosingIntent,
-  scheduleBotBrains } from '../src/bot-rules.js';
+  scheduleBotBrains, rotatingBotOrder } from '../src/bot-rules.js';
 import { authoredRouteGoal, crownRouteWaypoint, ctfApproachSupportDistance,
   ctfCarrierWaypoint, greenbeltOpeningRally, laned, pinefallCarrierFordCommitted } from '../src/bot-navigation.js';
 import { Bot } from '../src/bots.js';
@@ -75,6 +77,8 @@ import { callsignHasProfanity, callsignIssue, normalizeCallsign,
   sanitizeCallsign, sanitizeDisplayName } from '../src/callsign.js';
 import { DEFAULT_ENGAGEMENT_FEATURES, EngagementTracker, parseEngagementFeatures,
   sanitizeEngagementEvent } from '../src/engagement.js';
+import { EngineeringLedger, engineeringDisposition } from '../src/engineering.js';
+import { PlaytestMetrics, laneForZ, validPlaytestSnapshot } from '../src/playtest-metrics.js';
 import { balanceHumanTeams, TEAM_REASSIGNMENT_COST } from '../src/team-balance.js';
 import { FirstMinuteGuide, firstMinuteObjective,
   firstMinuteTerrainCue, firstMinuteMoveHint, consumeTerrainAck,
@@ -83,6 +87,8 @@ import { keyboardMouseUnsupported } from '../src/device-support.js';
 import { VoxelStoryTracker, normalizeVoxelStoryMetrics, validVoxelStoryMetrics,
   voxelBattleStory } from '../src/voxel-stories.js';
 import { deathRecapCopy, makeDeathRecap, validDeathRecap } from '../src/death-recap.js';
+import { POSTMATCH_ROLES, classifyRole, classifyRoles, eligibleCommendationTargets,
+  recordCommendation, rivalryDisposition, terrainEvolution, terrainHighlights } from '../src/postmatch.js';
 import { autoSprint, contactCue, ctfEscalation, intensityCue, nextBotDifficulty,
   normalizeSpecialties, topSpecialty, usefulVoxelAction } from '../src/combat-flow.js';
 import { MAX_REWIND_SECONDS, observeSnapshotRtt, recordPose,
@@ -378,6 +384,13 @@ function mapgenTests() {
 
   const greenSignature = new VoxelWorld(scene());
   generateMap(greenSignature, 12345, 0);
+  const greenLandmarks = MAPS[0].landmarks ?? [];
+  const landmarkRaised = greenLandmarks.every(({ x, z }) => {
+    const floor = greenSignature.surface(x, z);
+    return greenSignature.get(x, floor, z) === BLOCK.STONE;
+  });
+  ok('GREENBELT exposes three compact north/center/south landmark silhouettes',
+    greenLandmarks.length === 3 && landmarkRaised);
   ok('GREENBELT has staggered thick belts, thin cut points, and open flanks',
     greenSignature.get(103, 31, 128) === BLOCK.STONE
       && greenSignature.get(103, 26, 116) === BLOCK.STONE
@@ -392,6 +405,12 @@ function mapgenTests() {
       && [126, 127, 128, 129].every(x => pineSignature.get(x, SEA + 1, pineBridgeZ) === 0)
       && pineSignature.get(128, SEA, pineBridgeZ + 8) === BLOCK.STONE
       && pineSignature.get(128, SEA + 1, pineBridgeZ + 8) === 0);
+  const pineExitClear = [60, 80, 176, 196].every(x => {
+    const floor = pineSignature.surface(x, SZ / 2);
+    return Array.from({ length: 8 }, (_, i) => pineSignature.get(x, floor + 1 + i, SZ / 2))
+      .every(block => block === 0);
+  });
+  ok('PINEFALL primary base exits keep deterministic canopy headroom', pineExitClear);
 
   const beachSignature = new VoxelWorld(scene());
   generateMap(beachSignature, 12345, 1);
@@ -412,11 +431,16 @@ function mapgenTests() {
       // Enough connected silhouette to read as a line, enough missing
       // columns to expose several ordinary breach/fallback lanes.
       && beachWallColumns >= 30 && beachWallColumns <= 60
-      && beachFallbacks.every(area => {
+          && beachFallbacks.every(area => {
         const top = beachSignature.surface(area.x, area.z);
         return !beachSignature.get(area.x, top + 1, area.z)
           && !beachSignature.get(area.x, top + 2, area.z);
       }));
+  const beachRoutes = [SZ / 2 - 42, SZ / 2 + 42].every(routeZ => {
+    const surfaces = [104, 120, 140, 156].map(x => beachSignature.surface(x, routeZ));
+    return surfaces.every((surface, i) => surface >= SEA && (i === 0 || surface >= surfaces[i - 1] - 1));
+  });
+  ok('BEACHHEAD keeps two rising shoulder counter-routes open', beachRoutes);
   const dunesSignature = new VoxelWorld(scene());
   generateMap(dunesSignature, 12345, 3);
   let mirroredCourt = true;
@@ -487,6 +511,14 @@ function mapgenTests() {
       && calderaSignature.get(128, SEA + 16, 191) === 0
       && calderaSignature.surface(64, 128) >= SEA
       && calderaSignature.surface(192, 128) >= SEA);
+  const calderaPockets = signatureProtectedAreas(5, 12345)
+    .filter(area => area.kind === 'staging-pocket');
+  const pocketCover = calderaPockets.length === 6 && calderaPockets.every(area => {
+    const floor = calderaSignature.surface(area.x, area.z);
+    return [1, 2].some(dy => calderaSignature.get(area.x + (area.x < SX / 2 ? -2 : 2),
+      floor + dy, area.z) === BLOCK.STONE);
+  });
+  ok('CALDERA protects two bounded staging pockets for every hill', pocketCover);
 
   const crownProtected = signatureProtectedAreas(4, 12345);
   ok('signature fallback foundations are protected while spans remain editable',
@@ -679,7 +711,8 @@ function hostileInputTests() {
 function audioPaletteTests() {
   group('input, captions, and voxel audio');
   const defaults = normalizeBindings();
-  ok('controls preserve default crouch bindings', defaults.crouch.includes('ControlLeft'));
+  ok('controls preserve default crouch and blueprint bindings',
+    defaults.crouch.includes('ControlLeft') && defaults.blueprint.includes('KeyV'));
   ok('controls normalize malformed binding storage', normalizeBindings({ aim: ['Mouse2', 9] }).aim.length === 1);
   ok('controls report binding conflicts', bindingConflicts(DEFAULT_BINDINGS, 'aim', 'KeyR').includes('reload'));
   const audible = spatialAudioMix('rifle', { x: 8, y: 1, z: 0 }, { x: 0, y: 1, z: 0, rx: 1, rz: 0 });
@@ -876,6 +909,15 @@ function multiplayerRuleTests() {
       && !validClientMessage({ t: 'a', k: 'ready', fast: true })
       && !validClientMessage({ t: 'a', k: 'vote', choice: 3 })
       && !validClientMessage({ t: 'a', k: 'done', extra: true }));
+  ok('blueprint placement accepts only the three fixed patterns',
+    validClientMessage({ t: 'a', k: 'place', n: 1, life: 1,
+      d: [1, 0, 0], o: [10, 4, 10], pattern: 'RAMP' })
+      && validClientMessage({ t: 'a', k: 'place', n: 2, life: 1,
+        d: [1, 0, 0], o: [10, 4, 10] })
+      && !validClientMessage({ t: 'a', k: 'place', n: 3, life: 1,
+        d: [1, 0, 0], o: [10, 4, 10], pattern: 'TOWER' })
+      && !validClientMessage({ t: 'a', k: 'place', n: 4, life: 1,
+        d: [1, 0, 0], o: [10, 4, 10], pattern: 'RAMP', extra: 1 }));
   ok('ready rosters and headshot feedback are bounded server events',
     validServerMessage({ t: 'e', k: 'ready', voters: ['p0', 'p2'] })
       && validServerMessage({ t: 'e', k: 'choices',
@@ -1264,6 +1306,22 @@ function botRuleTests() {
     scheduledA.ids.length === 3 && scheduledB.ids.length <= 3);
   ok('round-robin brain scheduling reaches every due bot',
     new Set([...scheduledA.ids, ...scheduledB.ids]).size === due.length);
+  const updateBots = [
+    { id: 1, team: 'green' }, { id: 2, team: 'green' },
+    { id: 3, team: 'blue' }, { id: 4, team: 'blue' },
+  ];
+  const orders = Array.from({ length: 8 }, (_, frame) =>
+    rotatingBotOrder(updateBots, frame).map(bot => bot.id));
+  const earlyTeams = new Set(orders.slice(0, 4).map(order => updateBots.find(bot => bot.id === order[0])?.team));
+  const lateTeams = new Set(orders.slice(0, 4).map(order => updateBots.find(bot => bot.id === order.at(-1))?.team));
+  ok('physics update order rotates deterministically across every bot',
+    JSON.stringify(orders[0]) === JSON.stringify([1, 2, 3, 4])
+      && JSON.stringify(orders[1]) === JSON.stringify([2, 3, 4, 1])
+      && JSON.stringify(orders[4]) === JSON.stringify(orders[0])
+      && new Set(orders.flatMap(order => order.slice(0, 2))).size === updateBots.length
+      && earlyTeams.size === 2 && lateTeams.size === 2
+      && JSON.stringify(orders) === JSON.stringify(Array.from({ length: 8 }, (_, frame) =>
+        rotatingBotOrder(updateBots, frame).map(bot => bot.id))));
 
   const route = chooseLocalRoute([
     { angle: 0, x: 1, z: 0, clear: 1, progress: 1, maxStep: 0, maxDrop: 0 },
@@ -1831,11 +1889,12 @@ function socialProgressionTests() {
     !validPingDirection([0, 0, 0]) && !validPingDirection([9, 0, 0]));
   ok('tactical ping actions pass the client trust boundary',
     validClientMessage({ t: 'a', k: 'mark', d: [0, 0, -1] })
+      && validClientMessage({ t: 'a', k: 'mark', d: [0, 0, -1], kind: 'BUILD_COVER' })
       && !validClientMessage({ t: 'a', k: 'mark', d: [0, 0, 0] }));
   ok('team marks pass the server trust boundary with bounded kinds',
     validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
       x: 20, y: 12, z: 30, kind: 'ATTACK' })
-      && !validServerMessage({ t: 'e', k: 'mark', id: 8, name: 'SQUAD', team: 'green',
+      && validServerMessage({ t: 'e', k: 'mark', id: 8, name: 'SQUAD', team: 'green',
         x: 20, y: 12, z: 30, kind: 'BREACH' })
       && !validServerMessage({ t: 'e', k: 'mark', id: 7, name: 'Scout', team: 'green',
         x: 20, y: 12, z: 30, kind: 'ENEMY_THROUGH_WALL' }));
@@ -2021,6 +2080,127 @@ function firstMinuteTests() {
       && !joinedLate.update({ matchSecond: 360, x: 0, z: 0 }).visible);
 }
 
+function postmatchSocialTests() {
+  group('postmatch roles, commendations, evolution, and rivalry');
+  ok('roles are descriptive fixed rules over existing contribution specialties',
+    POSTMATCH_ROLES.length === 5
+      && classifyRole({ specialties: { sniper: 4 } }) === 'SCOUT'
+      && classifyRole({ specialties: { terrain: 30 }, k: 1 }) === 'BREACHER'
+      && classifyRole({ specialties: { terrain: 4 } }) === 'ARCHITECT'
+      && classifyRole({ objective: 8, k: 1, d: 1 }) === 'ANCHOR'
+      && classifyRole({ k: 8 }) === 'VANGUARD');
+  const rows = [
+    ['p0', { name: 'You', team: 'green', k: 5 }],
+    ['p1', { name: 'Ally', team: 'green', specialties: { terrain: 30 } }],
+    ['p2', { name: 'Enemy', team: 'blue', k: 5 }],
+    ['b0', { name: 'Bot', team: 'green', k: 9 }],
+  ];
+  const roles = classifyRoles(rows);
+  ok('commendations target same-team humans only',
+    eligibleCommendationTargets(rows, 'p0').map(row => row.key).join(',') === 'p1');
+  let commend = recordCommendation({}, 'p0', 'p1', rows);
+  const duplicate = recordCommendation(commend, 'p0', 'p1', rows);
+  const badTarget = recordCommendation(commend, 'p2', 'p2', rows);
+  ok('commendation is one-per-voter and rejects opponents/self duplicates',
+    commend.accepted && !duplicate.accepted && !badTarget.accepted
+      && commend.counts.get('p1') === 1 && roles.length === 4);
+  const sample = (values) => ({ width: 2, depth: 2, occupancy: values.slice(), heights: values.slice() });
+  ok('terrain evolution stays to a compact sampled delta',
+    terrainEvolution(sample([0, 1, 0, 1]), sample([0, 2, 1, 1])).changed === 2);
+  ok('terrain highlights are fixed, ordered, and capped at two',
+    JSON.stringify(terrainHighlights({ collapseKills: 1, collapsed: 20 }, { route: 2, breach: 2 }))
+      === JSON.stringify(['COLLAPSE TURNED THE FIGHT', 'STRUCTURE COLLAPSED']));
+  ok('rivalry requires unanimous opt-in and readiness from two active humans',
+    !rivalryDisposition({ active: ['p0'], opted: ['p0'], ready: ['p0'] }).eligible
+      && !rivalryDisposition({ active: ['p0', 'p1'], opted: ['p0', 'p1'], ready: ['p0'] }).active
+      && rivalryDisposition({ active: ['p0', 'p1'], opted: ['p0', 'p1'], ready: ['p0', 'p1'] }).active);
+  ok('new social packets are strict and retired rematch stays rejected',
+    validClientMessage({ t: 'a', k: 'commend', target: 1 })
+      && validClientMessage({ t: 'a', k: 'rivalry' })
+      && validServerMessage({ t: 'e', k: 'rivalry', voters: ['p0', 'p1'] })
+      && validServerMessage({ t: 'e', k: 'commend', voters: ['p0'], counts: [['p1', 1]] })
+      && !validClientMessage({ t: 'a', k: 'commend', target: 1, text: 'x' })
+      && !validServerMessage({ t: 'e', k: 'rivalry', voters: ['p0', 'p0'] }));
+}
+
+function engineeringAssistTests() {
+  group('phase one: consequential engineering assists');
+  ok('engineering policy requires a concrete consequence',
+    !engineeringDisposition({ kind: 'breach', now: 1, consequence: false }).credit
+      && engineeringDisposition({ kind: 'breach', now: 1, consequence: true }).credit);
+  const ledger = new EngineeringLedger();
+  ok('engineering credits dedupe a site and rate-limit each player/kind',
+    !!ledger.tryCredit('p0', 'breach', 1, '4,4,4')
+      && !ledger.tryCredit('p0', 'breach', 2, '4,4,4')
+      && !ledger.tryCredit('p0', 'breach', 3, '5,4,4')
+      && !!ledger.tryCredit('p0', 'breach', 17, '5,4,4'));
+  ok('different engineering kinds remain independently bounded',
+    !!ledger.tryCredit('p0', 'route', 2, '4,4,4'));
+}
+
+function playtestMetricsTests() {
+  group('local playtest metrics: bounded privacy-safe match facts');
+  ok('lane classifier exposes only north/center/south',
+    laneForZ(80) === 'north' && laneForZ(128) === 'center'
+      && laneForZ(176) === 'south' && laneForZ(NaN) === null);
+  const metrics = new PlaytestMetrics({ map: 5, mode: 'koth', seed: 123456789,
+    side: 'blue', humans: 2, bots: 6 });
+  metrics.noteContact(3.25);
+  metrics.noteContact(4);
+  metrics.noteDeath(0, true); metrics.noteDeath(1, false); metrics.noteKill(5);
+  const entities = [
+    { alive: true, team: 'green', _spawnedAt: 1, body: { pos: { x: 105, z: 80 } } },
+    { alive: true, team: 'blue', _spawnedAt: 1, body: { pos: { x: 150, z: 128 } } },
+    { alive: true, team: 'green', _spawnedAt: 1, body: { pos: { x: 105, z: 176 } } },
+  ];
+  metrics.observeRoutes(entities, 1);
+  metrics.noteKoth(5, false, null, false);
+  metrics.noteKoth(2, true, 'green'); metrics.noteKoth(2, false, 'blue');
+  metrics.noteEngineering('breach'); metrics.notePing(); metrics.notePingNear();
+  metrics.continuation('rivalry');
+  const current = metrics.finish(12, true);
+  ok('aggregates first contact, classes, lanes, KOTH, engineering, and pings',
+    current.seed === 123456789 && current.firstContactSeconds === 3.25
+      && current.spawnDeathRate === 0.5
+      && current.deathsByClass.rifle === 1 && current.killsByClass.sniper === 1
+      && JSON.stringify(current.laneEntries) === JSON.stringify({ north: 1, center: 1, south: 1 })
+      && current.koth.activeSeconds === 4 && current.koth.contestedSeconds === 2
+      && current.koth.captures === 2
+      && current.koth.retakes === 1 && current.engineering.breach === 1
+      && current.pings.created === 1 && current.pings.nearTeammate === 1
+      && current.continuation === 'rivalry' && current.continuationCounts.rivalry === 1);
+  ok('playtest snapshots exclude identity, positions, and free text',
+    validPlaytestSnapshot(current)
+      && !Object.keys(current).some(key => /name|chat|room|position|playerId|text/i.test(key))
+      && !validPlaytestSnapshot({ ...current, playerId: 'p0' }));
+  for (let i = 0; i < 17; i++) { metrics.reset({ map: i, mode: 'tdm' }); metrics.finish(i, false); }
+  metrics.reset({ map: 7, mode: 'tdm' });
+  ok('history is capped and reset starts a fresh active match',
+    metrics.history.length === 16 && metrics.snapshot().outcome === 'active'
+      && metrics.snapshot().map === 7);
+}
+
+function blueprintTests() {
+  group('phase two: deterministic combat blueprints');
+  ok('exactly three selectable blueprint patterns have bounded costs',
+    JSON.stringify(BLUEPRINT_KINDS) === JSON.stringify(['SINGLE', 'LOW_WALL', 'FIRING_STEP', 'RAMP'])
+      && blueprintCost('LOW_WALL') === 3 && blueprintCost('FIRING_STEP') === 3
+      && blueprintCost('RAMP') === 3);
+  ok('blueprint cycling wraps and rejects unknown patterns',
+    cycleBlueprint('SINGLE') === 'LOW_WALL' && cycleBlueprint('RAMP') === 'SINGLE'
+      && cycleBlueprint('NOPE') === 'LOW_WALL' && !validBlueprintKind('NOPE'));
+  const wallX = blueprintCells('LOW_WALL', { x: 10, y: 4, z: 10 }, { x: 1, z: 0 });
+  const wallZ = blueprintCells('LOW_WALL', { x: 10, y: 4, z: 10 }, { x: 0, z: -1 });
+  ok('low wall rotates laterally from horizontal facing without drifting anchor',
+    wallX.every(cell => cell.x === 10) && wallX.map(cell => cell.z).join(',') === '9,10,11'
+      && wallZ.every(cell => cell.z === 10) && wallZ.map(cell => cell.x).join(',') === '9,10,11');
+  const ramp = blueprintCells('RAMP', { x: 10, y: 4, z: 10 }, { x: 1, z: 0 });
+  ok('ramp stays grounded and rises only one supported step',
+    ramp.some(cell => cell.x === 10 && cell.y === 4)
+      && ramp.some(cell => cell.x === 11 && cell.y === 4)
+      && ramp.some(cell => cell.x === 11 && cell.y === 5));
+}
+
 function terrainContractTests() {
   group('terrain contracts: bounded cosmetic progression');
   ok('exactly three terrain contracts expose session-scale targets',
@@ -2164,6 +2344,11 @@ function deathRecapTests() {
       && clamped.distance === 256 && clamped.health === 0);
   ok('invalid objects never produce display copy',
     deathRecapCopy({ cause: 'rifle', attacker: '<b>Injected</b>' }) === null);
+  const adaptation = makeDeathRecap({ cause: 'rifle', attacker: 'Birch', team: 'blue',
+    distance: 20, health: 40, fact: 'isolated', direction: 'east' });
+  ok('recaps carry one fixed optional adaptation fact and direction',
+    validDeathRecap(adaptation) && deathRecapCopy(adaptation).detail.endsWith('ISOLATED · FROM EAST')
+      && !validDeathRecap({ ...adaptation, advice: 'run left' }));
 }
 
 function stayAsSquadTests() {
@@ -3203,6 +3388,15 @@ function productionReadinessTests() {
   ok('client diagnostics retain only a fixed anonymous schema',
     /^[a-f0-9]{8}$/.test(fingerprint) && crash.callsign === undefined
       && sanitizeTelemetryEvent('migration', { outcome: 'bogus', reason: 'other' }) === null);
+  const gameplayDiagnostics = telemetryEnvelope('p14', [
+    { type: 'engineering_event', kind: 'breach', outcome: 'credited', player: 'nope' },
+    { type: 'ping_event', kind: 'build_cover', outcome: 'created', position: [1, 2, 3] },
+    { type: 'recap_evidence', fact: 'isolated', reference: 'east', room: 'nope' },
+  ]);
+  ok('gameplay diagnostics keep only finite anonymous outcomes',
+    gameplayDiagnostics.events.length === 3
+      && gameplayDiagnostics.events.every(event => !('player' in event) && !('position' in event)
+        && !('room' in event)) && validDiagnosticsEnvelope(gameplayDiagnostics));
   const envelope = telemetryEnvelope('p14', [crash, {
     type: 'match_abandon', reason: 'pagehide', seconds: 91, room: 'secret',
   }]);
@@ -3441,12 +3635,16 @@ export async function run() {
   botRuleTests();
   pacingRuleTests();
   combatFlowTests();
+  engineeringAssistTests();
+  playtestMetricsTests();
+  blueprintTests();
   contributionRuleTests();
   kothRuleTests();
   streakRuleTests();
   matchReportTests();
   terrainContractTests();
   socialProgressionTests();
+  postmatchSocialTests();
   engagementFoundationTests();
   firstMinuteTests();
   deviceSupportTests();

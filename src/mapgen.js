@@ -44,11 +44,17 @@ function mulberry32(a) {
 // these later is just changing a hex value here, nothing structural.
 export const MAPS = [
   { key: 'island',  name: 'GREENBELT', modes: ['ctf', 'tdm'],        gen: null,
+    landmarks: [{ key: 'north-watch', x: SX / 2, z: 76 },
+      { key: 'center-gate', x: SX / 2, z: SZ / 2 },
+      { key: 'south-yard', x: SX / 2, z: 180 }],
     envelope: { minX: 16, maxX: 240, minZ: 48, maxZ: 208, shape: 'rect', kind: 'shore' },
     atmosphere: { sky: ['#5eafe0', '#a6d3e2', '#e3ead5'], fog: 0xcadcc9, cloud: 0xf5f1dc, water: 0x347ba7,
       sun: [0.45, 1, 0.25], sunTint: [1.06, 1.01, 0.90] },
     paletteOverrides: { grass: 0x5f9f45, dirt: 0x75563a, sand: 0xc4ad73, stone: 0x70796f, moss: 0x3d7545 } },
   { key: 'beach',   name: 'BEACHHEAD', modes: ['ctf', 'tdm'],        gen: null,
+    landmarks: [{ key: 'north-ramp', x: 112, z: SZ / 2 - 42 },
+      { key: 'covered-trench', x: 128, z: SZ / 2 + 26 },
+      { key: 'south-ramp', x: 112, z: SZ / 2 + 42 }],
     envelope: { minX: 16, maxX: 240, minZ: 48, maxZ: 208, shape: 'rect', kind: 'shore' },
     atmosphere: { sky: ['#4d9fc9', '#9bcbd8', '#e8eee4'], fog: 0xd3e3dc, cloud: 0xf8f4e8, water: 0x248fa4,
       sun: [-0.25, 1, 0.45], sunTint: [1.08, 1.02, 0.88] },
@@ -79,6 +85,7 @@ export const MAPS = [
       sun: [0.35, 1, -0.55], sunTint: [1.08, 1.04, 0.94] },
     paletteOverrides: { grass: 0x567447, dirt: 0x604636, sand: 0xb29a68, stone: 0x515d69, moss: 0x334f3c } },
   { key: 'caldera', name: 'CALDERA',   modes: ['koth'],              gen: null,
+    stagingPockets: 2,
     envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
     hills: [
       { x: SX / 2, z: SZ / 2, r: 10, label: 'KNOLL' },
@@ -202,10 +209,21 @@ export function signatureProtectedAreas(mapIndex = 0, seed = 1979) {
     { x: cx, y: SEA + 8, z: cz + 24, r: 3, below: 3, above: 3, kind: 'abutment' },
     { x: cx, y: SEA + 8, z: cz + 40, r: 3, below: 3, above: 3, kind: 'abutment' },
   ];
-  if (mapIndex === 5) return [
-    { x: cx - 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
-    { x: cx + 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
-  ];
+  if (mapIndex === 5) {
+    const fallbacks = [
+      { x: cx - 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
+      { x: cx + 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
+    ];
+    // Two small staging pockets per rotating hill are protected at their
+    // authored shoulder, so a stray edit cannot erase the guaranteed cover
+    // that makes each objective approachable from both directions.
+    const pockets = MAPS[5].hills.flatMap(hill => {
+      const y = hill.z === cz ? SEA + 11 : SEA + 5;
+      return [-1, 1].map(side => ({ x: hill.x + side * 17, y, z: hill.z,
+        r: 2, below: 2, above: 3, kind: 'staging-pocket' }));
+    });
+    return [...fallbacks, ...pockets];
+  }
   if (mapIndex === 6) return [
     { x: cx, y: SEA + 9, z: cz - 48, r: 4, below: 3, above: 4, kind: 'north-catwalk' },
     { x: cx, y: SEA + 9, z: cz + 48, r: 4, below: 3, above: 4, kind: 'south-catwalk' },
@@ -414,6 +432,36 @@ function genIsland(world, seed) {
   outcrop(SX - 1 - 92, SZ - 1 - 73, -1);
   outcrop(112, 188, -1);
   outcrop(SX - 1 - 112, SZ - 1 - 188, 1);
+
+  // Three small, deliberately different silhouettes make the GREENBELT
+  // north/center/south lanes legible at a glance. They are landmarks, not
+  // hard cover: the center gate has a doorway and the two outer markers are
+  // compact enough to route around without sealing the permanent flanks.
+  const landmark = (cx, cz, kind) => {
+    const blockAt = (x, z, h = 1) => {
+      const y = terrainY(height, x, z);
+      for (let dy = 1; dy <= h; dy++) put(world, x, y + dy, z, BLOCK.STONE);
+    };
+    if (kind === 'north') {
+      landmark(cx - 3, cz, 'south');
+      landmark(cx + 3, cz, 'south');
+      landmark(cx, cz, 'tower');
+    } else if (kind === 'tower') {
+      blockAt(cx, cz, 4);
+      for (let dx = -1; dx <= 1; dx++) blockAt(cx + dx, cz, 1);
+    } else if (kind === 'center') {
+      for (const dx of [-3, 3]) blockAt(cx + dx, cz, 3);
+      for (let dx = -3; dx <= 3; dx++) blockAt(cx + dx, cz, 1);
+    } else {
+      for (let dx = -4; dx <= 4; dx++) {
+        const h = Math.max(1, 3 - Math.floor(Math.abs(dx) / 2));
+        blockAt(cx + dx, cz, h);
+      }
+    }
+  };
+  landmark(SX / 2, 76, 'north');
+  landmark(SX / 2, SZ / 2, 'center');
+  landmark(SX / 2, 180, 'south');
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
 }
@@ -452,6 +500,22 @@ function genBeach(world, seed) {
       const z = trenchZ + dz;
       if (z < 2 || z >= SZ - 2) continue;
       height[at(x, z)] -= 2.2 * (1 - Math.abs(dz) / 3.5);
+    }
+
+  // A second, protected counter-route follows the north/south shoulders of
+  // the bluff. It is a deterministic three-wide ramp (not a teleport lane):
+  // landing players can choose this collision path when the central trench
+  // is contested, while both ramps remain outside the fortified centerline.
+  const counterRoutes = [SZ / 2 - 42, SZ / 2 + 42];
+  for (const routeZ of counterRoutes)
+    for (let x = 100; x <= 158; x++) {
+      const target = SEA + 5 + (x - 100) / 58 * 13;
+      for (let dz = -2; dz <= 2; dz++) {
+        const z = routeZ + dz;
+        if (z < 2 || z >= SZ - 2) continue;
+        const edge = Math.abs(dz) / 2;
+        height[at(x, z)] = target + edge * 0.7;
+      }
     }
 
   flattenBases(height);
@@ -558,11 +622,25 @@ function genBeach(world, seed) {
   // covered trench and both flank ramps as ordinary always-usable routes.
   for (const [from, to] of [[SZ / 2 - 43, SZ / 2 - 7], [SZ / 2 + 7, SZ / 2 + 43]])
     for (let z = from; z <= to; z++) {
-      if ((z - from) % 15 < 4 || Math.abs(z - trenchZ) < 5) continue;
+      if ((z - from) % 15 < 4 || Math.abs(z - trenchZ) < 5
+          || counterRoutes.some(route => Math.abs(z - route) < 5)) continue;
       const x = 142 + Math.floor(noise(z, 19) * 4), y = terrainY(height, x, z);
       put(world, x, y + 1, z, BLOCK.STONE);
       if ((z - from) % 8 !== 0) put(world, x, y + 2, z, BLOCK.STONE);
     }
+
+  // The high ridge is intentionally broken into short, destructible sightline
+  // interrupts. Gaps stay wider than the cover so the ridge never becomes a
+  // second continuous wall or a mandatory choke after the landing ramps.
+  for (const [x0, z0] of [[174, SZ / 2 - 30], [190, SZ / 2 + 24],
+    [208, SZ / 2 - 38], [222, SZ / 2 + 34]]) {
+    for (let dx = 0; dx < 3; dx++) {
+      const x = x0 + dx, z = z0 + (dx === 1 ? 1 : 0);
+      const y = terrainY(height, x, z);
+      put(world, x, y + 1, z, BLOCK.STONE);
+      if (dx !== 1) put(world, x, y + 2, z, BLOCK.STONE);
+    }
+  }
 
   buildBase(world, height, 'green');
   buildBase(world, height, 'blue');
@@ -706,6 +784,20 @@ function genForest(world, seed) {
       put(world, x, y + trunk + 1, z, BLOCK.MOSS);
     }
   }
+
+  // Keep the seeded canopy expressive in the wilderness, but guarantee a
+  // small, deterministic headroom envelope on each primary base exit. The
+  // clearance starts beyond the bunker footprint and follows the shared
+  // midfield approach, so no random tree can roof the first engagement.
+  const clearBaseExit = (x0, x1) => {
+    for (let x = x0; x <= x1; x++) for (let z = SZ / 2 - 4; z <= SZ / 2 + 4; z++) {
+      const floor = Math.floor(height[at(x, z)]);
+      for (let y = floor + 1; y < SY; y++)
+        world.data[(y * SZ + z) * SX + x] = 0;
+    }
+  };
+  clearBaseExit(BASE.green.x + 8, BASE.green.x + 46);
+  clearBaseExit(BASE.blue.x - 46, BASE.blue.x - 8);
 
   // The ravine now offers three unmistakable choices. A low stone ford is
   // permanent and protected; a higher dirt bridge has a real four-block gap
@@ -1128,14 +1220,34 @@ function genCaldera(world, seed) {
     }
   }
 
-  // Purposeful one-high cover just beyond the protected aprons gives arriving
-  // squads a choice of shoulders without blocking the broad ramp cuts.
+  // Low, separated fins interrupt the otherwise dominant rim sightlines.
+  // Their fixed gaps preserve the broad saddle choices and ordinary voxel
+  // edits can remove them; they are intentionally shorter than the rim.
+  const rimInterruptions = [
+    [CX - 53, CZ - 16], [CX - 48, CZ + 20],
+    [CX + 53, CZ + 16], [CX + 48, CZ - 20],
+    [CX - 18, CZ - 53], [CX + 20, CZ + 53],
+  ];
+  for (const [px, pz] of rimInterruptions) {
+    const py = Math.floor(height[at(px, pz)]);
+    for (let dz = -1; dz <= 1; dz++) {
+      const x = px + (Math.abs(dz) === 1 ? 1 : 0), z = pz + dz;
+      put(world, x, py + 1, z, BLOCK.STONE);
+      if (dz !== 0) put(world, x, py + 2, z, BLOCK.STONE);
+    }
+  }
+
+  // Two compact, protected staging pockets sit just beyond every hill apron.
+  // The inward-facing side stays open, preserving capture approach space while
+  // the short outer wall gives a squad a fair first foothold.
   for (const h of MAPS[5].hills)
-    for (const [dx, dz] of [[-12, 12], [12, -12]]) {
-      const px = h.x + dx, pz = h.z + dz;
-      const py = Math.floor(height[at(px, pz)]);
-      put(world, px, py + 1, pz, BLOCK.STONE);
-      put(world, px, py + 1, pz + 1, BLOCK.STONE);
+    for (const side of [-1, 1]) {
+      const px = h.x + side * 17, pz = h.z, py = Math.floor(height[at(px, pz)]);
+      for (let dz = -2; dz <= 2; dz++) {
+        const x = px + side * 2, z = pz + dz;
+        put(world, x, py + 1, z, BLOCK.STONE);
+        if (Math.abs(dz) <= 1) put(world, x, py + 2, z, BLOCK.STONE);
+      }
     }
 
   buildBase(world, height, 'green');

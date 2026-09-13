@@ -4,7 +4,14 @@ export const TEAM_PING_RANGE = 80;
 export const TEAM_PING_TTL = 6;
 export const TEAM_PING_COOLDOWN = 2;
 export const TEAM_PING_LIMIT = 4;
-export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL', 'ENEMY'];
+// MOVE/HILL/ENEMY remain host-derived markers. The five tactical intents are
+// explicit player requests; keeping one allowlist means they share the same
+// team-only TTL, duplicate cap, and protocol boundary.
+export const TEAM_PING_KINDS = ['MOVE', 'ATTACK', 'DEFEND', 'HILL', 'ENEMY',
+  'BREACH', 'BUILD_COVER', 'ROTATE'];
+export const TACTICAL_PING_KINDS = Object.freeze([
+  'ATTACK', 'DEFEND', 'BREACH', 'BUILD_COVER', 'ROTATE',
+]);
 export const VOTE_KICK_DURATION = 30;
 export const VOTE_KICK_COOLDOWN = 90;
 
@@ -56,4 +63,8 @@ export function validPingDirection(value) {
   if (!Array.isArray(value) || value.length !== 3 || !value.every(Number.isFinite)) return false;
   const length = Math.hypot(...value);
   return length > 0.5 && length < 1.5;
+}
+
+export function validTacticalPingKind(value) {
+  return TACTICAL_PING_KINDS.includes(value);
 }

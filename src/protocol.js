@@ -1,12 +1,13 @@
 // protocol.js — bounded structural validation for every network trust boundary.
 import { finiteVector, isRecord, parseSpawnRow } from './multiplayer.js';
-import { TEAM_PING_KINDS, validPingDirection } from './social.js';
+import { TEAM_PING_KINDS, validPingDirection, validTacticalPingKind } from './social.js';
 import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
+import { validBlueprintKind } from './blueprints.js';
 import { MAPS } from './mapgen.js';
 
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 17;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -69,13 +70,13 @@ export function validClientMessage(d) {
   const actionKeys = {
     chat: ['t', 'k', 'text', 'scope'], class: ['t', 'k', 'cls'],
     strike: ['t', 'k', 'n', 'life', 'x', 'z', 'yaw'],
-    mark: ['t', 'k', 'd'], squad: ['t', 'k'],
+    mark: ['t', 'k', 'd', 'kind'], squad: ['t', 'k'],
     votekick: ['t', 'k', 'target'],
     resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n', 'life'],
     shoot: ['t', 'k', 'n', 'life', 'd', 'o'], dig: ['t', 'k', 'n', 'life', 'd', 'o'],
-    place: ['t', 'k', 'n', 'life', 'd', 'o'], nade: ['t', 'k', 'n', 'life', 'd', 'o'],
+    place: ['t', 'k', 'n', 'life', 'd', 'o', 'pattern'], nade: ['t', 'k', 'n', 'life', 'd', 'o'],
     spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'], vote: ['t', 'k', 'choice'],
-    done: ['t', 'k'],
+    commend: ['t', 'k', 'target'], rivalry: ['t', 'k'], done: ['t', 'k'],
   };
   if (!actionKeys[d.k] || !exactKeys(d, actionKeys[d.k], ['t', 'k'])) return false;
   if (SECURED_ACTIONS.includes(d.k)
@@ -84,15 +85,19 @@ export function validClientMessage(d) {
     && (d.scope === 'all' || d.scope === 'team');
   if (d.k === 'class') return Number.isInteger(d.cls);
   if (d.k === 'strike') return finite(d.x) && finite(d.z) && finite(d.yaw);
-  if (d.k === 'mark') return validPingDirection(d.d);
+  if (d.k === 'mark') return validPingDirection(d.d)
+    && (d.kind === undefined || validTacticalPingKind(d.kind));
   if (d.k === 'squad') return true;
   if (d.k === 'ready') return true;
   if (d.k === 'vote') return Number.isInteger(d.choice) && d.choice >= 0 && d.choice <= 2;
   if (d.k === 'done') return true;
+  if (d.k === 'commend') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
+  if (d.k === 'rivalry') return true;
   if (d.k === 'spawnpref') return d.pref === 'front' || d.pref === 'base';
   if (d.k === 'votekick') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
   if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
   if (d.k === 'reload') return true;
+  if (d.k === 'place' && d.pattern !== undefined && !validBlueprintKind(d.pattern)) return false;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)
     && finiteVector(d.d) && (d.o === undefined || finiteVector(d.o));
 }
@@ -161,6 +166,8 @@ function validEvent(d) {
     squad: ['t', 'k', 'voters'],
     ready: ['t', 'k', 'voters'],
     choices: ['t', 'k', 'choices', 'votes', 'ready'],
+    commend: ['t', 'k', 'voters', 'counts'],
+    rivalry: ['t', 'k', 'voters'],
     votekick: ['t', 'k', 'active', 'target', 'name', 'voters', 'needed', 'remaining'],
     spawn: ['t', 'k', 'x', 'y', 'z', 'yaw', 'life'], corr: ['t', 'k', 'x', 'y', 'z'],
     kick: ['t', 'k', 'reason'], kd: ['t', 'k', 'rows'],
@@ -218,6 +225,13 @@ function validEvent(d) {
       && d.votes.every(v => Number.isInteger(v) && v >= 0 && v <= 10)
       && Array.isArray(d.ready) && d.ready.length <= 10
       && d.ready.every(v => shortString(v, 16)) && new Set(d.ready).size === d.ready.length;
+    case 'commend': return Array.isArray(d.voters) && d.voters.length <= 10
+      && d.voters.every(v => /^p\d+$/.test(v)) && new Set(d.voters).size === d.voters.length
+      && Array.isArray(d.counts) && d.counts.length <= 10
+      && d.counts.every(row => Array.isArray(row) && row.length === 2
+        && /^p\d+$/.test(row[0]) && Number.isInteger(row[1]) && row[1] >= 0 && row[1] <= 10);
+    case 'rivalry': return Array.isArray(d.voters) && d.voters.length <= 10
+      && d.voters.every(v => /^p\d+$/.test(v)) && new Set(d.voters).size === d.voters.length;
     case 'votekick': return d.active === false
       ? exactKeys(d, ['t', 'k', 'active'], ['t', 'k', 'active'])
       : d.active === true && Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000

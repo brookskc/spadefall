@@ -75,7 +75,7 @@ engagement.record('page_ready', { protocol: PROTOCOL_VERSION });
 const diagnostics = window.__spadefallDiagnostics = {
   protocol: PROTOCOL_VERSION, startedAt: new Date().toISOString(), faults: [],
   metrics: null, soakCycles: 0, features: engagementFeatures,
-  engagement: engagement.snapshot(), iceServers: 0,
+  engagement: engagement.snapshot(), playtest: null, iceServers: 0,
 };
 
 // Warm the relay credentials while the player is still reading the menu, so
@@ -99,6 +99,7 @@ const mapQa = params.has('mapqa');
 const reportQa = params.has('reportqa');
 const pingQa = params.has('pingqa');
 const deathRecapQa = params.has('deathrecapqa');
+const blueprintQa = params.has('blueprintqa');
 const audioQa = params.has('audioqa');
 
 const renderer = new THREE.WebGLRenderer({ antialias: gfxPreset().antialias });
@@ -203,7 +204,7 @@ if (params.has('damageqa')) document.documentElement.dataset.damageqa = 'on';
 // Browser-only composition hook for inspecting the flyover without needing
 // pointer lock or a ten-kill setup. It uses the real model, pose helper, and
 // render updater; only the fixed camera and frozen countdown are test aids.
-if (airstrikeQa || soldierQa || mapQa || reportQa || pingQa)
+if (airstrikeQa || soldierQa || mapQa || reportQa || pingQa || blueprintQa)
   $('menu').style.display = 'none';
 
 // A soft sun sprite high in the sky — one textured quad, always faces the
@@ -1651,6 +1652,7 @@ function frame() {
     diagnostics.metrics = { ...report, ...counts, resources,
       resourceDrift: resourceBaseline ? resourceDrift(resourceBaseline, resources) : null };
     diagnostics.engagement = engagement.snapshot();
+    diagnostics.playtest = game.playtestSnapshot();
     if (perfOn && perfCount) {
       const sorted = Array.from(perfSamples.slice(0, perfCount)).sort((a, b) => a - b);
       const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
@@ -1779,6 +1781,19 @@ if (pingQa) {
   setPlaying(true);
   game._hostPlaceTeamPing(game.player, [0.65, -0.25, -0.72]);
 }
+// Blueprint composition hook: exercise the real ghost preflight/render path
+// without requiring pointer lock or a live block placement.
+if (blueprintQa) {
+  game.player.tool = 3;
+  game.player.blueprintKind = ['LOW_WALL', 'FIRING_STEP', 'RAMP']
+    .includes(params.get('blueprint')) ? params.get('blueprint') : 'RAMP';
+  game.player.protT = 999;
+  setPlaying(true);
+  game._updateBlueprintGhost();
+  window.__blueprintQa = () => ({ kind: game.player.blueprintKind,
+    visible: !!game._blueprintGhost?.group.visible,
+    cells: game._blueprintGhost?.meshes.filter(mesh => mesh.visible).length ?? 0 });
+}
 // Death-recap composition hook. The fixture enters through authoritative
 // Game#damage and the ordinary Player#die/Game#onDeath route so browser QA
 // covers fact capture and HUD presentation together, not a hand-filled card.
@@ -1819,6 +1834,13 @@ if (reportQa) {
     game.voxelStory.recordCollapse(34);
     game.voxelStory.recordCollapseKill();
   }
+  // Make the deterministic QA fixture exercise both sides of the local
+  // terrain comparison. This is a presentation-only edit; it is not added to
+  // the story metrics or any network packet.
+  const qaSampleX = Math.floor((8.5 * SX) / 16), qaSampleZ = Math.floor((8.5 * SZ) / 16);
+  const qaSampleY = game.world.surface(qaSampleX, qaSampleZ);
+  if (game.world.get(qaSampleX, qaSampleY, qaSampleZ))
+    game.world.set(qaSampleX, qaSampleY, qaSampleZ, 0);
   game._end(reportWinner);
 }
 frame();

@@ -11,6 +11,7 @@ export const CONTRIBUTION = Object.freeze({
   carrierStop: 75,
   objectiveDefense: 50,
   carrierEscort: 50,
+  engineeringAssist: 25,
   hillCapture: 100,
   hillHoldPerSecond: 2,
 });

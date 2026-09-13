@@ -4,6 +4,7 @@ import { TEAM_PING_KINDS, validPingDirection } from './social.js';
 import { SECURED_ACTIONS } from './security.js';
 import { validVoxelStoryMetrics } from './voxel-stories.js';
 import { validDeathRecap } from './death-recap.js';
+import { MAPS } from './mapgen.js';
 
 export const PROTOCOL_VERSION = 15;
 
@@ -212,7 +213,7 @@ function validEvent(d) {
     case 'choices': return Array.isArray(d.choices) && d.choices.length === 3
       && d.choices.every(row => Array.isArray(row) && row.length === 2
         && shortString(row[0], 4) && ['tdm', 'koth', 'ctf'].includes(row[0])
-        && Number.isInteger(row[1]) && row[1] >= 0 && row[1] < 6)
+        && Number.isInteger(row[1]) && row[1] >= 0 && row[1] < MAPS.length)
       && Array.isArray(d.votes) && d.votes.length === 3
       && d.votes.every(v => Number.isInteger(v) && v >= 0 && v <= 10)
       && Array.isArray(d.ready) && d.ready.length <= 10
@@ -234,7 +235,7 @@ function validEvent(d) {
         && shortString(r[1], 64) && team(r[2]) && r.slice(3).every(finite));
     case 'end': return team(d.winner)
       && (d.story === undefined || validVoxelStoryMetrics(d.story));
-    case 'restart': return finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    case 'restart': return finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < MAPS.length
       && ['ctf', 'tdm', 'koth'].includes(d.mode);
     default: return false;
   }
@@ -250,7 +251,7 @@ export function validServerMessage(d) {
       'log', 'r', 'reset', 'migrated', 'spawn', 'wr', 'wh', 'tb', 'life'],
       ['t', 'id', 'team', 'seed', 'map', 'mode', 'me', 'log', 'r'])
     && shortString(d.id, 128) && team(d.team)
-    && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    && finite(d.seed) && Number.isInteger(d.map) && d.map >= 0 && d.map < MAPS.length
     && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && Number.isInteger(d.me) && validEditLog(d.log ?? []) && validRoster(d.r)
     && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6
@@ -262,7 +263,7 @@ export function validServerMessage(d) {
     && (d.tb === undefined || d.tb === 0 || d.tb === 1);
   if (d.t === 'sync') return exactKeys(d, ['t', 'seed', 'map', 'log', 'wr', 'wh'],
       ['t', 'seed', 'map', 'log', 'wr', 'wh']) && finite(d.seed)
-    && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    && Number.isInteger(d.map) && d.map >= 0 && d.map < MAPS.length
     && validEditLog(d.log)
     && Number.isSafeInteger(d.wr) && d.wr === d.log.length
     && Number.isInteger(d.wh) && d.wh >= 0 && d.wh <= 0xffffffff;
@@ -277,7 +278,7 @@ export function validPong(d) {
     ['t', 'humans', 'max', 'map', 'mode', 'g', 'b', 'names']) && d.t === 'pong'
     && Number.isInteger(d.humans) && Number.isInteger(d.max)
     && d.humans >= 0 && d.max >= 1 && d.humans <= d.max
-    && Number.isInteger(d.map) && d.map >= 0 && d.map < 6
+    && Number.isInteger(d.map) && d.map >= 0 && d.map < MAPS.length
     && ['ctf', 'tdm', 'koth'].includes(d.mode)
     && finite(d.g) && finite(d.b)
     && Array.isArray(d.names) && d.names.length <= 10

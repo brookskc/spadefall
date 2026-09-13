@@ -322,8 +322,9 @@ export class VoxelWorld {
 
   configureAtmosphere(mapIndex) {
     this._atmosphereMapIndex = mapIndex;
-    const colors = [0xd9ed9b, 0xe8f8f4, 0xd8d59b, 0xf0bf72, 0xd4e0ed, 0xff8a55];
-    const modes = ['motes', 'spray', 'pollen', 'sand', 'dust', 'ash'];
+    const colors = [0xd9ed9b, 0xe8f8f4, 0xd8d59b, 0xf0bf72, 0xd4e0ed, 0xff8a55,
+      0xc5b08b, 0x9fc9bf];
+    const modes = ['motes', 'spray', 'pollen', 'sand', 'dust', 'ash', 'embers', 'spores'];
     const rnd = mulberry32(7000 + mapIndex * 97);
     const count = this.ambienceMax;
     this.ambience.count = count;

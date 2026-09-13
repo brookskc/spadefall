@@ -2,9 +2,9 @@
 // real browser build: bot movement, raycasts, terrain edits, objectives and
 // missile effects all stay on the same authority path used by a hosted game.
 //
-// `npm run test:bot-sim` runs 12 valid mode/map pairings with two seeds each.
+// `npm run test:bot-sim` runs 13 valid mode/map pairings with two seeds each.
 // Use SPADE_BOT_SIM_SECONDS=300 for a longer local investigation.
-// Narrow a diagnostic with SPADE_BOT_SIM_MODES=koth and SPADE_BOT_SIM_MAPS=4.
+// Narrow a diagnostic with SPADE_BOT_SIM_MODES=koth and SPADE_BOT_SIM_MAPS=7.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -21,12 +21,12 @@ const mime = new Map([['.html', 'text/html; charset=utf-8'], ['.js', 'text/javas
 const seconds = Math.max(60, Math.min(720, Number(process.env.SPADE_BOT_SIM_SECONDS) || 180));
 const step = 0.05;
 const requestedModes = new Set((process.env.SPADE_BOT_SIM_MODES ?? 'ctf,tdm,koth').split(','));
-const requestedMaps = new Set((process.env.SPADE_BOT_SIM_MAPS ?? '0,1,2,3,4,5')
+const requestedMaps = new Set((process.env.SPADE_BOT_SIM_MAPS ?? '0,1,2,3,4,5,6,7')
   .split(',').map(Number).filter(Number.isInteger));
 const cases = [
   ...[0, 1, 2].map(map => ['ctf', map]),
-  ...[0, 1, 2, 3, 4].map(map => ['tdm', map]),
-  ...[3, 4, 5].map(map => ['koth', map]),
+  ...[0, 1, 2, 3, 4, 6].map(map => ['tdm', map]),
+  ...[3, 4, 5, 7].map(map => ['koth', map]),
 ].filter(([mode, map]) => requestedModes.has(mode) && requestedMaps.has(map))
   .flatMap(([mode, map]) => [0x1a2b3c4d, 0x5e6f7788].map(seed => ({ mode, map, seed })));
 

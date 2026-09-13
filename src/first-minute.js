@@ -52,6 +52,8 @@ export function firstMinuteTerrainCue(mapIndex) {
     'DROP AN ARCH OR BUILD A NEW FIRING STEP',
     'CUT OR REBUILD THE NORTH/SOUTH SPANS',
     'OPEN A SHORT PATH THROUGH A BASALT GATE',
+    'CROSS THE CONVEYOR OR BREACH A SLAG WALL',
+    'FOLLOW THE NORTH/WEST/SOUTH/EAST FAULT LOOP',
   ][mapIndex] ?? 'DIG A ROUTE OR BUILD NEW COVER';
 }
 
@@ -72,7 +74,7 @@ export class FirstMinuteGuide {
     this.hasRun = true;
     this.active = true;
     this.mode = ['ctf', 'tdm', 'koth'].includes(mode) ? mode : 'ctf';
-    this.mapIndex = Number.isInteger(mapIndex) && mapIndex >= 0 && mapIndex < 6
+    this.mapIndex = Number.isInteger(mapIndex) && mapIndex >= 0 && mapIndex < 8
       ? mapIndex : 0;
     this.startedAtSecond = Math.max(0, finite(matchSecond));
     this.origin = { x: finite(x), z: finite(z) };

@@ -16,10 +16,10 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
-| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall, Dunes |
-| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Dunes, Caldera |
+| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall, Foundry |
+| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Caldera, Faultline |
 
-Capture the Flag and the Crown map are retired from public play. Both remain playable in private rooms started with the `privateContent` feature for development and testing.
+Capture the Flag is retired from public play. Dunes and Crown are also retired from public matchmaking, but all three remain playable in private rooms started with the `privateContent` feature for development and testing. Foundry is TDM-only; Faultline is KOTH-only.
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
@@ -51,10 +51,12 @@ Each map has its own terrain generator, atmosphere, sight lines, water layout, a
 | Greenbelt | Beachhead |
 | ![Pinefall](docs/map-pinefall.png) | ![Dunes](docs/map-dunes.png) |
 | Pinefall | Dunes |
-| ![Caldera](docs/map-caldera.png) | |
-| Caldera | |
+| ![Caldera](docs/map-caldera.png) | ![Foundry](docs/map-foundry.png) |
+| Caldera | Foundry |
+| ![Faultline](docs/map-faultline.png) | |
+| Faultline | |
 
-Crown is retired from public play and remains available in private development rooms only.
+Foundry and Faultline are available in their supported public modes. Dunes and Crown remain available in private development rooms only.
 
 ## Multiplayer
 

@@ -1,4 +1,5 @@
 // next-battle.js — pure post-match choice generation and tally resolution.
+import { contentAvailable } from './content-gating.js';
 
 export const NEXT_BATTLE_CHOICES = 3;
 
@@ -15,8 +16,10 @@ function candidatesFor({ maps, publicRoom = false, privateContent = true }) {
   return (maps ?? []).flatMap((map, mapIndex) => {
     if (!map || !Number.isInteger(mapIndex)) return [];
     return (map.modes ?? []).filter(validMode)
-      .filter(mode => !publicRoom || (mode !== 'ctf' && mapIndex !== 4))
-      .filter(mode => publicRoom || privateContent || (mode !== 'ctf' && mapIndex !== 4))
+      .filter(mode => contentAvailable(mode, mapIndex, {
+        publicOnly: publicRoom,
+        privateContent,
+      }))
       .map(mode => ({ mode, map: mapIndex, name: map.name, key: map.key }));
   });
 }
@@ -60,8 +63,10 @@ export function resolveBattleVote(choices, votes, eligible = []) {
 export function validBattleChoice(choice, maps, { publicRoom = false, privateContent = true } = {}) {
   if (!choice || !validMode(choice.mode) || !Number.isInteger(choice.map)
       || !maps?.[choice.map] || !maps[choice.map].modes.includes(choice.mode)) return false;
-  return publicRoom ? choice.mode !== 'ctf' && choice.map !== 4
-    : privateContent || (choice.mode !== 'ctf' && choice.map !== 4);
+  return contentAvailable(choice.mode, choice.map, {
+    publicOnly: publicRoom,
+    privateContent,
+  });
 }
 
 export function validBattleChoices(choices, maps, options = {}) {

@@ -2,7 +2,7 @@
 // VoxelWorld's CPU terrain/storage path is enough to exercise routes; mesh
 // creation is deliberately skipped so hundreds of seeds remain practical.
 //
-// Default: 4 deterministic seeds × 6 maps. For a longer release soak:
+// Default: 4 deterministic seeds × 8 maps. For a longer release soak:
 //   npm run test:fuzz -- --seeds=2000
 // MAP_FUZZ_SEEDS / MAP_FUZZ_START remain available for CI matrices.
 import * as THREE from 'three';
@@ -17,7 +17,7 @@ const count = Math.max(1, Number.parseInt(argument('seeds')
 const start = Number.parseInt(argument('start')
   ?? process.env.MAP_FUZZ_START ?? '1000', 10) || 1000;
 const step = 7919;
-const rectangularMaps = new Set([0, 1, 2]);
+const rectangularMaps = new Set([0, 1, 2, 6]);
 const GRID_CACHE = new WeakMap();
 const MAX_STEP_UP = 2;
 const MAX_STEP_DOWN = 4;
@@ -162,6 +162,16 @@ function fallbackEndpoints(mapIndex, seed) {
     { x: cx - 64, z: cz, kind: 'west-saddle' },
     { x: cx + 64, z: cz, kind: 'east-saddle' },
   ];
+  if (mapIndex === 6) return [
+    { x: cx, z: cz - 48, kind: 'north-catwalk' },
+    { x: cx, z: cz + 48, kind: 'south-catwalk' },
+  ];
+  if (mapIndex === 7) return [
+    { x: cx, z: cz - 24, kind: 'north-loop' },
+    { x: cx - 24, z: cz, kind: 'west-loop' },
+    { x: cx, z: cz + 24, kind: 'south-loop' },
+    { x: cx + 24, z: cz, kind: 'east-loop' },
+  ];
   return [];
 }
 
@@ -277,6 +287,20 @@ function representativeBreach(world, mapIndex, seed, envelope) {
       const z = SZ / 2 - 64;
       if (world.get(x, y, z)) edits.push({ x, y, z });
     }
+  } else if (mapIndex === 6) {
+    for (let x = SX / 2 - 9; x <= SX / 2 + 9; x++)
+      for (let y = SEA + 1; y <= SEA + 3; y++) {
+        const z = SZ / 2 - 17;
+        if (world.get(x, y, z)) edits.push({ x, y, z });
+      }
+  } else if (mapIndex === 7) {
+    // Breach the north hill's east-side dirt seam; the radial lane, both ends,
+    // and the permanent loop remain untouched.
+    for (let z = SZ / 2 - 32 - 4; z <= SZ / 2 - 32 + 4; z++)
+      for (let y = SEA + 1; y <= SEA + 2; y++) {
+        const x = SX / 2 + 16;
+        if (world.get(x, y, z)) edits.push({ x, y, z });
+      }
   }
   if (!edits.length) return { removed: false, after: true, fallbackAfter: true, rebuilt: true };
   const prior = edits.map(edit => world.get(edit.x, edit.y, edit.z));

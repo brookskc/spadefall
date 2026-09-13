@@ -261,11 +261,37 @@ function mapgenTests() {
       });
       ok('CALDERA has mirrored, walkable base-facing ramp cuts for every rotating hill', mirroredRoutes);
     }
+    if (m === 6) {
+      const samples = [[64, 92], [92, 128], [128, 64], [160, 96]];
+      const highPair = [[93, 146], [162, 109]];
+      const pairOccupancy = highPair.every(([x, z], i) => {
+        const mirror = highPair[1 - i];
+        return [1, 2, 3].every(y => (a.get(x, SEA + 8 + y, z) !== 0)
+          === (a.get(mirror[0], SEA + 8 + y, mirror[1]) !== 0));
+      });
+      const weakWallPair = [111, 144].every(z =>
+        [120, 128, 136].every(x => a.get(x, SEA + 9, z) !== 0));
+      ok('FOUNDRY keeps seeded terrain rotationally symmetric at route samples',
+        samples.every(([x, z]) => a.surface(x, z) === a.surface(SX - 1 - x, SZ - 1 - z))
+          && pairOccupancy && weakWallPair);
+    }
+    if (m === 7) {
+      const labels = MAPS[m].hills.map(h => h.label);
+      const level = MAPS[m].hills.every(h => {
+        const values = [];
+        for (let z = h.z - h.r; z <= h.z + h.r; z++)
+          for (let x = h.x - h.r; x <= h.x + h.r; x++)
+            if (Math.hypot(x - h.x, z - h.z) <= h.r) values.push(a.surface(x, z));
+        return values.length > 0 && new Set(values).size === 1;
+      });
+      ok('FAULTLINE orders four clear level hills north/west/south/east',
+        JSON.stringify(labels) === '["NORTH","WEST","SOUTH","EAST"]' && level);
+    }
     let bad = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] >= PALETTE.length) bad++;
     ok(`${name}: every voxel indexes PALETTE`, bad === 0, `${bad} out of range`);
   }
-  ok('all six maps are distinct', new Set(hashes).size === MAPS.length);
+  ok('all eight maps are distinct', new Set(hashes).size === MAPS.length);
   const bounded = clampToEnvelope(mapEnvelope(0), -50, SZ + 50, 5);
   ok('combat-envelope clamp keeps bot/spawn samples inside the requested inset',
     envelopeContains(mapEnvelope(0), bounded.x, bounded.z, 5), JSON.stringify(bounded));
@@ -278,16 +304,18 @@ function mapgenTests() {
       .every(block => (beachSurfaceCounts?.get(block) ?? 0) >= 100),
     JSON.stringify(Object.fromEntries(beachSurfaceCounts ?? [])));
   ok('mapsForMode(ctf) = [0,1,2]', JSON.stringify(mapsForMode('ctf')) === '[0,1,2]');
-  ok('mapsForMode(koth) = [3,4,5]', JSON.stringify(mapsForMode('koth')) === '[3,4,5]');
-  ok('CALDERA is KOTH-only while TDM retains its other five maps',
+  ok('mapsForMode(koth) retains private DUNES/CROWN and public CALDERA/FAULTLINE',
+    JSON.stringify(mapsForMode('koth')) === '[3,4,5,7]');
+  ok('CALDERA is KOTH-only while TDM retains its other maps',
     JSON.stringify(MAPS[5].modes) === '["koth"]'
-      && JSON.stringify(mapsForMode('tdm')) === '[0,1,2,3,4]',
+      && JSON.stringify(mapsForMode('tdm')) === '[0,1,2,3,4,6]',
     JSON.stringify(mapsForMode('tdm')));
-  ok('public rotation excludes CTF, CROWN, and TDM CALDERA',
+  ok('public rotation excludes CTF and private DUNES/CROWN',
     JSON.stringify(mapsForMode('ctf', { publicOnly: true })) === '[]'
-      && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[3,5]'
-      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,3]'
-      && mapsForMode('tdm').includes(4));
+      && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[5,7]'
+      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,6]'
+      && !mapsForMode('tdm', { publicOnly: true }).includes(3)
+      && !mapsForMode('tdm', { publicOnly: true }).includes(4));
   ok('private content requires its explicit feature outside public paths',
     !publicContentAvailable('ctf', 0) && !publicContentAvailable('tdm', 4)
       && !contentAvailable('ctf', 0, { privateContent: false })
@@ -318,7 +346,7 @@ function mapgenTests() {
   ok('every map has a complete authored flat-color terrain palette',
     MAPS.every(m => ['grass', 'dirt', 'sand', 'stone', 'moss']
       .every(material => Number.isInteger(m.paletteOverrides?.[material]))));
-  ok('all six map atmospheres have distinct sky gradients',
+  ok('all eight map atmospheres have distinct sky gradients',
     new Set(MAPS.map((_, i) => mapAtmosphere(i).sky.join(','))).size === MAPS.length);
   ok('PINEFALL uses a warm lavender sky that preserves blue-team contrast',
     mapAtmosphere(2).sky[0] === '#aaa3d2' && mapAtmosphere(2).fog === 0xc9c1d6);
@@ -342,8 +370,8 @@ function mapgenTests() {
   ok('PINEFALL ravine still crosses midfield at its seeded ford',
     pinefallRavineCenter(4242, seededFord) === SZ / 2);
 
-  ok('signature metadata ships all six active mechanics with fallbacks',
-    ['greenbelt', 'beachhead', 'pinefall', 'dunes', 'crown', 'caldera'].every((key, i) => {
+  ok('signature metadata ships all eight active mechanics with fallbacks',
+    ['greenbelt', 'beachhead', 'pinefall', 'dunes', 'crown', 'caldera', 'foundry', 'faultline'].every((key, i) => {
       const mechanic = signatureMechanic(i);
       return mechanic?.id === key && mechanic.fallbacks.length >= 2;
     }));

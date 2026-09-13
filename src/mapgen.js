@@ -1,4 +1,4 @@
-// mapgen.js — procedural terrain with two team bases, in six themed maps.
+// mapgen.js — procedural terrain with two team bases, in eight themed maps.
 // MAPS order is the rotation order; generateMap(world, seed, mapIndex) fills
 // world.data, re-anchors BASE, and meshes everything via world.buildAll().
 import { SX, SY, SZ, SEA, BLOCK, PALETTE, DEFAULT_PALETTE_COLORS, setVoxelLight } from './world.js';
@@ -28,9 +28,8 @@ function mulberry32(a) {
   };
 }
 
-// modes: which game modes the map supports. DUNES retired from the CTF
-// rotation (its long sniper lanes punish flag runs) but kept for deathmatch
-// and king of the hill, mirrored about midfield so the hill fight is fair.
+// modes: which game modes the map supports. DUNES and CROWN remain private
+// development maps; their existing modes are intentionally preserved here.
 // hills: rotating king-of-the-hill zones. Every point stays on the midfield
 // axis, so both bases travel the same distance even when the fight moves.
 // atmosphere: optional sky/fog/cloud/water tint for this map (see
@@ -89,6 +88,22 @@ export const MAPS = [
     atmosphere: { sky: ['#40334f', '#76556a', '#c38a73'], fog: 0xa47770, cloud: 0xc7b1ae, water: 0x595866,
       sun: [-0.6, 0.72, 0.28], sunTint: [1.14, 0.98, 0.78] },
     paletteOverrides: { grass: 0x74654d, dirt: 0x7b5047, sand: 0xb58568, stone: 0x4e4b52, moss: 0x53594c } },
+  { key: 'foundry', name: 'FOUNDRY',   modes: ['tdm'],               gen: null,
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
+    atmosphere: { sky: ['#4b5966', '#89969b', '#d7c8ae'], fog: 0x9ca4a2, cloud: 0xc7d0ce, water: 0x3e5960,
+      sun: [-0.35, 0.82, 0.18], sunTint: [1.08, 0.98, 0.84] },
+    paletteOverrides: { grass: 0x58655d, dirt: 0x624e42, sand: 0x9c8060, stone: 0x58636a, moss: 0x3f514b } },
+  { key: 'faultline', name: 'FAULTLINE', modes: ['koth'],            gen: null,
+    envelope: { minX: 32, maxX: 224, minZ: 32, maxZ: 224, shape: 'ellipse', kind: 'rim' },
+    hills: [
+      { x: SX / 2, z: SZ / 2 - 32, r: 8, label: 'NORTH' },
+      { x: SX / 2 - 32, z: SZ / 2, r: 8, label: 'WEST' },
+      { x: SX / 2, z: SZ / 2 + 32, r: 8, label: 'SOUTH' },
+      { x: SX / 2 + 32, z: SZ / 2, r: 8, label: 'EAST' },
+    ],
+    atmosphere: { sky: ['#3f5864', '#7da0a4', '#d8c2a0'], fog: 0x9aada8, cloud: 0xd3ddda, water: 0x315f69,
+      sun: [0.25, 0.88, -0.42], sunTint: [1.04, 1.02, 0.88] },
+    paletteOverrides: { grass: 0x596c68, dirt: 0x70534a, sand: 0xb38a61, stone: 0x566168, moss: 0x3d554b } },
 ];
 
 // The voxel world remains 256×256; an envelope is the authored combat space
@@ -145,6 +160,10 @@ export const SIGNATURE_MECHANICS = Object.freeze({
     fallbacks: Object.freeze(['east-causeway', 'west-causeway']) }),
   caldera: Object.freeze({ id: 'caldera', mapIndex: 5,
     fallbacks: Object.freeze(['east-saddle', 'west-saddle']) }),
+  foundry: Object.freeze({ id: 'foundry', mapIndex: 6,
+    fallbacks: Object.freeze(['north-catwalk', 'south-catwalk']) }),
+  faultline: Object.freeze({ id: 'faultline', mapIndex: 7,
+    fallbacks: Object.freeze(['north-loop', 'south-loop', 'east-loop', 'west-loop']) }),
 });
 
 export function signatureMechanic(mapIndex = 0) {
@@ -186,6 +205,16 @@ export function signatureProtectedAreas(mapIndex = 0, seed = 1979) {
   if (mapIndex === 5) return [
     { x: cx - 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
     { x: cx + 64, y: SEA + 9, z: cz, r: 6, below: 3, above: 4, kind: 'fallback' },
+  ];
+  if (mapIndex === 6) return [
+    { x: cx, y: SEA + 9, z: cz - 48, r: 4, below: 3, above: 4, kind: 'north-catwalk' },
+    { x: cx, y: SEA + 9, z: cz + 48, r: 4, below: 3, above: 4, kind: 'south-catwalk' },
+  ];
+  if (mapIndex === 7) return [
+    { x: cx, y: SEA + 9, z: cz - 24, r: 4, below: 3, above: 4, kind: 'north-loop' },
+    { x: cx - 24, y: SEA + 9, z: cz, r: 4, below: 3, above: 4, kind: 'west-loop' },
+    { x: cx, y: SEA + 9, z: cz + 24, r: 4, below: 3, above: 4, kind: 'south-loop' },
+    { x: cx + 24, y: SEA + 9, z: cz, r: 4, below: 3, above: 4, kind: 'east-loop' },
   ];
   return [];
 }
@@ -1113,12 +1142,185 @@ function genCaldera(world, seed) {
   buildBase(world, height, 'blue');
 }
 
+// ---------------------------------------------------------------- foundry
+// A compact industrial TDM arena. The authored floor is deliberately level:
+// the three combat zones are separated by readable, destructible cover rather
+// than terrain cliffs, while the outer ring and paired bases provide the
+// silhouette. All seeded dressing is mirrored through the 180-degree center
+// transform so competitive geometry never changes with the seed.
+function genFoundry(world, seed) {
+  const noise = makeNoise(seed);
+  const height = new Float32Array(SX * SZ);
+  const CX = SX / 2, CZ = SZ / 2, FLOOR = SEA + 8;
+  BASE.green.x = 68; BASE.blue.x = SX - 1 - 68;
+
+  for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    // Keep the authored combat core exactly level so walls and stairs are
+    // grounded consistently. Seeded grade only roughens the outer rim.
+    const edge = envelopeEdgeDistance(mapEnvelope(6), x, z);
+    const variation = (noise(x * 0.025, z * 0.025)
+      + noise((SX - 1 - x) * 0.025, (SZ - 1 - z) * 0.025)) * 0.35 - 0.35;
+    height[at(x, z)] = FLOOR + (edge < 28 ? variation : 0);
+  }
+  flattenBases(height);
+  applyArenaRim(height, mapEnvelope(6), FLOOR, SEA + 25);
+  fillColumns(world, height, (x, z) => {
+    const band = noise(x * 0.018 + 8, z * 0.018 + 17);
+    return band > 0.67 ? BLOCK.STONE : band < 0.28 ? BLOCK.DIRT : BLOCK.GRASS;
+  });
+
+  const wall = (x, z, w, d, h = 3, gap = -1) => {
+    const y = FLOOR;
+    for (let dx = 0; dx < w; dx++) for (let dz = 0; dz < d; dz++) {
+      if (gap >= 0 && dx === gap) continue;
+      for (let dy = 1; dy <= h; dy++) put(world, x + dx, y + dy, z + dz, BLOCK.STONE);
+    }
+  };
+  // Central foundry floor: offset cover blocks leave several cross-links.
+  wall(CX - 25, CZ - 5, 18, 3, 2, 8);
+  wall(CX + 7, CZ + 2, 18, 3, 2, 9);
+  // North conveyor/trench: low walls flank a permanently open catwalk.
+  wall(CX - 53, CZ - 47, 34, 3, 3, 14);
+  wall(CX + 19, CZ - 47, 34, 3, 3, 18);
+  for (const rowZ of [CZ - 34, CZ + 34]) for (let x = CX - 44; x <= CX + 44; x += 4) {
+    const y = FLOOR;
+    put(world, x, y + 1, rowZ, BLOCK.STONE);
+    if (Math.abs(x - CX) % 8 >= 4) put(world, x, y + 2, rowZ, BLOCK.STONE);
+  }
+  // South slag yard: paired berms and two useful, counterable high positions.
+  wall(CX - 53, CZ + 44, 34, 3, 3, 14);
+  wall(CX + 19, CZ + 44, 34, 3, 3, 18);
+  const highPositions = [[CX - 35, CZ + 18],
+    [SX - 1 - (CX - 35), SZ - 1 - (CZ + 18)]];
+  for (const [px, pz] of highPositions) {
+    for (let dx = -5; dx <= 5; dx++) for (let dz = -4; dz <= 4; dz++)
+      for (let dy = 1; dy <= 3; dy++) put(world, px + dx, FLOOR + dy, pz + dz, BLOCK.STONE);
+    // Stair-like access on both sides keeps the perch counterable.
+    for (let step = 1; step <= 3; step++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = 1; dy <= step; dy++) {
+          put(world, px + dx, FLOOR + dy, pz - 5 - step, BLOCK.STONE);
+          put(world, px + dx, FLOOR + dy, pz + 5 + step, BLOCK.STONE);
+        }
+      }
+    }
+  }
+  // Two symmetric weak walls are obvious local shortcuts; permanent north
+  // and south catwalk endpoints remain on the flat floor if they collapse.
+  for (const z of [CZ - 17, SZ - 1 - (CZ - 17)]) {
+    for (let x = CX - 9; x <= CX + 9; x++)
+      for (let dy = 1; dy <= 3; dy++) put(world, x, FLOOR + dy, z, dy === 3 ? BLOCK.DIRT : BLOCK.STONE);
+    for (const x of [CX - 9, CX + 9]) put(world, x, FLOOR + 1, z, BLOCK.STONE);
+  }
+  buildBase(world, height, 'green');
+  buildBase(world, height, 'blue');
+}
+
+// ---------------------------------------------------------------- faultline
+// Four level objectives form a non-collinear N→W→S→E loop. The central
+// survey tower orients the squad but is intentionally low enough that every
+// hill remains its own fight. Permanent floor routes circle the landmark;
+// matching weak barriers make each hill's local shortcut readable.
+function genFaultline(world, seed) {
+  const noise = makeNoise(seed);
+  const height = new Float32Array(SX * SZ);
+  const CX = SX / 2, CZ = SZ / 2, FLOOR = SEA + 8;
+  // Keep the standard arena base setback so deployment clears the bunker
+  // towers before the east/west loop begins.
+  BASE.green.x = 52; BASE.blue.x = SX - 1 - 52;
+  for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const edge = envelopeEdgeDistance(mapEnvelope(7), x, z);
+    const variation = (noise(x * 0.021 + 3, z * 0.021 + 7)
+      + noise((SX - 1 - x) * 0.021 + 3, (SZ - 1 - z) * 0.021 + 7)) * 0.3 - 0.3;
+    height[at(x, z)] = FLOOR + (edge < 28 ? variation : 0);
+  }
+  // Force every hill footprint and its clear apron to the same level before
+  // filling columns. The small blend ring avoids a step at the hill edge.
+  for (const hill of MAPS[7].hills) for (let z = hill.z - 15; z <= hill.z + 15; z++)
+    for (let x = hill.x - 15; x <= hill.x + 15; x++) {
+      const d = Math.hypot(x - hill.x, z - hill.z);
+      if (d <= 11) height[at(x, z)] = FLOOR;
+      else if (d <= 15) height[at(x, z)] = FLOOR + (height[at(x, z)] - FLOOR) * ss((d - 11) / 4);
+  }
+  flattenBases(height);
+  // Base plateau blending reaches the west/east hill aprons on the compact
+  // loop. Reassert the authored capture footprints after that shared pass so
+  // every objective remains level and clear at every seed.
+  for (const hill of MAPS[7].hills)
+    for (let z = hill.z - hill.r; z <= hill.z + hill.r; z++)
+      for (let x = hill.x - hill.r; x <= hill.x + hill.r; x++)
+        if (Math.hypot(x - hill.x, z - hill.z) <= hill.r) height[at(x, z)] = FLOOR;
+  applyArenaRim(height, mapEnvelope(7), FLOOR, SEA + 25);
+  fillColumns(world, height, (x, z) => {
+    const band = noise(x * 0.02 + 31, z * 0.02 + 5);
+    return band > 0.7 ? BLOCK.STONE : band < 0.3 ? BLOCK.DIRT : BLOCK.GRASS;
+  });
+
+  // A solid, low survey foundation breaks the four cross-map sniper lanes.
+  // It forces a readable clockwise/counter-clockwise choice without becoming
+  // a perch that can see every hill.
+  for (let dx = -5; dx <= 5; dx++) for (let dz = -5; dz <= 5; dz++) {
+    if (Math.hypot(dx, dz) > 5.5) continue;
+    for (let dy = 1; dy <= 4; dy++) put(world, CX + dx, FLOOR + dy, CZ + dz, BLOCK.STONE);
+  }
+  const line = (x, z, dx, dz, from, to, wallH = 3, block = BLOCK.STONE) => {
+    for (let i = from; i <= to; i++) for (let dy = 1; dy <= wallH; dy++)
+      put(world, x + dx * i, FLOOR + dy, z + dz * i, block);
+  };
+  // Each hill gets two substantial inner staging shoulders with a broad
+  // permanent radial entrance between them. Routes around both ends provide
+  // the two flanks, so the objective has three durable approaches.
+  for (const hill of MAPS[7].hills) {
+    const rx = Math.sign(hill.x - CX), rz = Math.sign(hill.z - CZ);
+    const tx = -rz, tz = rx;
+    const sx = hill.x - rx * 17, sz = hill.z - rz * 17;
+    line(sx, sz, tx, tz, -12, -7, 3);
+    line(sx, sz, tx, tz, 7, 12, 3);
+
+    // Short outer shoulders let a retaking squad stage without enclosing the
+    // capture footprint or deleting the outer-loop approach.
+    const ox = hill.x + rx * 14, oz = hill.z + rz * 14;
+    line(ox, oz, tx, tz, -8, -5, 2);
+    line(ox, oz, tx, tz, 5, 8, 2);
+
+    // A two-high dirt seam closes one lateral micro-route beside the point.
+    // Players may breach it; both ends and the radial lane remain permanent.
+    const bx = hill.x + tx * 16, bz = hill.z + tz * 16;
+    line(bx, bz, rx, rz, -4, 4, 2, BLOCK.DIRT);
+  }
+
+  // Seeded rubble changes the visual read only. It is paired by the 180°
+  // transform and kept outside every hill's clear footprint and route core.
+  const rnd = mulberry32(seed ^ 0xfa0171);
+  for (let i = 0; i < 18; i++) {
+    const x = 62 + Math.floor(rnd() * 52), z = 62 + Math.floor(rnd() * 52);
+    if (MAPS[7].hills.some(h => Math.hypot(x - h.x, z - h.z) < 18)) continue;
+    const y = FLOOR;
+    put(world, x, y + 1, z, BLOCK.STONE);
+    put(world, SX - 1 - x, y + 1, SZ - 1 - z, BLOCK.STONE);
+  }
+  buildBase(world, height, 'green');
+  buildBase(world, height, 'blue');
+  // The shared bunker template has a deliberately narrow two-block gate.
+  // Faultline's close west/east hills need a little more deployment clearance
+  // so a bot cannot park against a tower while choosing its first objective.
+  for (const team of ['green', 'blue']) {
+    const b = BASE[team], dir = team === 'green' ? 1 : -1;
+    const fy = Math.floor(height[at(b.x, b.z)]);
+    for (let z = b.z - 6; z <= b.z + 6; z++)
+      for (let x = b.x + dir * 5; x !== b.x + dir * 13; x += dir)
+        for (let y = fy + 1; y <= fy + 3; y++) put(world, x, y, z, 0);
+  }
+}
+
 MAPS[0].gen = genIsland;
 MAPS[1].gen = genBeach;
 MAPS[2].gen = genForest;
 MAPS[3].gen = genDesert;
 MAPS[4].gen = genCrown;
 MAPS[5].gen = genCaldera;
+MAPS[6].gen = genFoundry;
+MAPS[7].gen = genFaultline;
 
 // ---------------------------------------------------------------- entry
 // Resets every named palette entry to its true default, then applies

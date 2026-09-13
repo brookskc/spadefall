@@ -1514,7 +1514,7 @@ addEventListener('resize', () => {
 
 // Headless/test hooks: ?mp=host&code=TEST&auto=1 · ?mp=join&code=TEST&auto=1
 // ?mp=quick&auto=1&ns=<namespace> · ?mp=browse&auto=1 · host cap: &cap=2
-// Pref hooks: &map=0..5&mode=ctf|tdm|koth · visual QA:
+// Pref hooks: &map=0..7&mode=ctf|tdm|koth · visual QA:
 // &scopeqa=1 / &airstrikeqa=1 / &soldierqa=1 / &mapqa=1
 // TDM kill limit: &killcap=2
 // Auto runs can't type, so they get a callsign to satisfy the lobby gate.

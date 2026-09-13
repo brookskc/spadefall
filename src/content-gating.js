@@ -2,7 +2,9 @@
 // development and QA can still exercise every generated map.
 export const PRIVATE_CONTENT_FEATURE = 'privateContent';
 export const PUBLIC_MODES = Object.freeze(['tdm', 'koth']);
-export const PRIVATE_MAP_INDEXES = Object.freeze([4]); // CROWN
+// DUNES and CROWN are retained for private development rooms. Keep indices
+// stable: the appended public maps are FOUNDRY=6 and FAULTLINE=7.
+export const PRIVATE_MAP_INDEXES = Object.freeze([3, 4]);
 
 export const publicContentAvailable = (mode, mapIndex) =>
   PUBLIC_MODES.includes(mode) && !PRIVATE_MAP_INDEXES.includes(mapIndex);

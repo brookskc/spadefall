@@ -63,6 +63,11 @@ try {
       };
       const horizontalFit = rect => rect && rect.left >= -1 && rect.right <= innerWidth + 1;
       const name = visibleRect('nameInput'), quick = visibleRect('quickBtn');
+      const howTo = document.getElementById('howTo');
+      howTo.open = true;
+      const howToSummary = howTo.querySelector('summary').getBoundingClientRect();
+      const controls = howTo.querySelector('.controls').getBoundingClientRect();
+      const guideGap = Math.round(controls.top - howToSummary.bottom);
       const tabbable = [...document.querySelectorAll('button,input,select,a,[tabindex]')]
         .filter(el => el.tabIndex >= 0 && getComputedStyle(el).display !== 'none');
       return {
@@ -72,12 +77,15 @@ try {
           && document.getElementById('quickMeta')?.textContent.includes('BOTS FILL EMPTY SEATS'),
         menuWidth: document.getElementById('menu').scrollWidth <= innerWidth + 1,
         keyboardQuick: tabbable.some(el => el.id === 'quickBtn'),
+        guideCompact: guideGap >= 0 && guideGap <= 12,
+        guideGap,
       };
     });
     // The 360px case is deliberately a non-supported smoke: its critical
     // entry controls must remain usable, but the desktop-only decorative
     // backdrop labels are not a mobile-support promise.
-    assert.ok(lobby.name && lobby.quick && lobby.quickCopy && lobby.keyboardQuick && (smoke || lobby.menuWidth),
+    assert.ok(lobby.name && lobby.quick && lobby.quickCopy && lobby.keyboardQuick
+      && lobby.guideCompact && (smoke || lobby.menuWidth),
       `lobby layout ${tier} ${viewport.width}x${viewport.height}: ${JSON.stringify(lobby)}`);
 
     await page.evaluate(value => {

@@ -6,11 +6,11 @@
 
 export const TERRAIN_CONTRACTS = Object.freeze([
   Object.freeze({ id: 'route', action: 'dig', target: 10,
-    name: 'ROUTE RUNNER', copy: 'SUCCESSFUL DIGS', badge: '[BR]' }),
+    name: 'ROUTE RUNNER', copy: 'SUCCESSFUL DIGS', badge: '[BR]', badgeName: 'ROUTE' }),
   Object.freeze({ id: 'cover', action: 'place', target: 10,
-    name: 'FORTIFY', copy: 'SUCCESSFUL BUILDS', badge: '[BD]' }),
+    name: 'FORTIFY', copy: 'SUCCESSFUL BUILDS', badge: '[BD]', badgeName: 'BUILDER' }),
   Object.freeze({ id: 'reshape', action: 'terrain', target: 30,
-    name: 'RESHAPER', copy: 'SUCCESSFUL TERRAIN EDITS', badge: '[VX]' }),
+    name: 'RESHAPER', copy: 'SUCCESSFUL TERRAIN EDITS', badge: '[VX]', badgeName: 'RESHAPER' }),
 ]);
 
 const IDS = new Set(TERRAIN_CONTRACTS.map(contract => contract.id));

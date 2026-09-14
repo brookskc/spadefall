@@ -65,9 +65,26 @@ try {
       const name = visibleRect('nameInput'), quick = visibleRect('quickBtn');
       const howTo = document.getElementById('howTo');
       howTo.open = true;
+      document.getElementById('playOptions').open = true;
+      const terrainRewards = document.getElementById('terrainRewards');
+      const terrainRewardsQuiet = !terrainRewards.open;
+      terrainRewards.open = true;
       const howToSummary = howTo.querySelector('summary').getBoundingClientRect();
       const controls = howTo.querySelector('.controls').getBoundingClientRect();
       const guideGap = Math.round(controls.top - howToSummary.bottom);
+      const masteryNumbers = [...document.querySelectorAll('#gunColors .need')]
+        .map(node => node.getBoundingClientRect());
+      const firstContract = document.querySelector('#terrainContracts .terrainContract')
+        ?.getBoundingClientRect();
+      const progressionClear = !!firstContract && masteryNumbers.length > 0
+        && firstContract.top >= Math.max(...masteryNumbers.map(rect => rect.bottom)) + 4;
+      const browserButtons = ['browsePrev', 'browseNext', 'browseRefresh', 'browseBack']
+        .map(id => document.getElementById(id));
+      const browserLinksClean = browserButtons.every(button => {
+        const style = getComputedStyle(button);
+        return style.appearance === 'none' && style.borderTopWidth === '0px'
+          && style.backgroundColor === 'rgba(0, 0, 0, 0)';
+      });
       const tabbable = [...document.querySelectorAll('button,input,select,a,[tabindex]')]
         .filter(el => el.tabIndex >= 0 && getComputedStyle(el).display !== 'none');
       return {
@@ -77,6 +94,11 @@ try {
           && document.getElementById('quickMeta')?.textContent.includes('BOTS FILL EMPTY SEATS'),
         menuWidth: document.getElementById('menu').scrollWidth <= innerWidth + 1,
         keyboardQuick: tabbable.some(el => el.id === 'quickBtn'),
+        browserLinksClean,
+        browserPagingSemantics: document.getElementById('browsePrev').disabled
+          && !document.getElementById('browseNext').disabled,
+        progressionClear,
+        terrainRewardsQuiet,
         guideCompact: guideGap >= 0 && guideGap <= 12,
         guideGap,
       };
@@ -85,6 +107,8 @@ try {
     // entry controls must remain usable, but the desktop-only decorative
     // backdrop labels are not a mobile-support promise.
     assert.ok(lobby.name && lobby.quick && lobby.quickCopy && lobby.keyboardQuick
+      && lobby.browserLinksClean && lobby.browserPagingSemantics
+      && lobby.progressionClear && lobby.terrainRewardsQuiet
       && lobby.guideCompact && (smoke || lobby.menuWidth),
       `lobby layout ${tier} ${viewport.width}x${viewport.height}: ${JSON.stringify(lobby)}`);
 

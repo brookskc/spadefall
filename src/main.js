@@ -741,9 +741,10 @@ const modePref = $('modePref');
       for (const contract of stats.contracts()) {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'badgeChoice';
-        button.textContent = contract.badge;
+        button.textContent = contract.badgeName;
         button.title = unlocked.has(contract.badge)
-          ? `equip ${contract.badge}` : `complete ${contract.name} to unlock`;
+          ? `use the ${contract.badgeName.toLowerCase()} callsign tag`
+          : `complete ${contract.name.toLowerCase()} to unlock`;
         if (!unlocked.has(contract.badge)) {
           button.classList.add('locked'); button.disabled = true;
         } else {
@@ -754,7 +755,7 @@ const modePref = $('modePref');
       }
       const clear = document.createElement('button');
       clear.type = 'button'; clear.className = 'badgeChoice' + (!selected ? ' equipped' : '');
-      clear.textContent = 'CLEAR'; clear.title = 'clear callsign badge';
+      clear.textContent = 'NO TAG'; clear.title = 'show only your callsign';
       clear.addEventListener('click', () => { stats.setBadge(null); renderStats(); });
       terrainBadges.appendChild(clear);
     }
@@ -1231,8 +1232,8 @@ let browseGuest = null, scanning = false, browsePage = 0;
 
 function updateBrowsePager() {
   $('browsePage').textContent = `${browsePage + 1} / ${PUBLIC_PAGES}`;
-  $('browsePrev').classList.toggle('disabled', browsePage === 0);
-  $('browseNext').classList.toggle('disabled', browsePage === PUBLIC_PAGES - 1);
+  $('browsePrev').disabled = browsePage === 0;
+  $('browseNext').disabled = browsePage === PUBLIC_PAGES - 1;
 }
 
 function roomRow(room) {

@@ -1,17 +1,17 @@
 # Spadefall Gameplay Excellence Roadmap
 
-Status: product and playtest plan, 2026-09-13
+Status: product and playtest plan, 2026-09-14
 
-## Implementation status — 2026-09-13
+## Implementation status — 2026-09-14
 
 The bounded implementation phases in this roadmap are complete:
 
 - Local, privacy-safe match diagnostics now track first contact, spawn deaths, class outcomes, route lanes, occupied/contested KOTH time, captures/retakes, engineering, pings, and continuation choices. Bot simulation rotates update order to prevent a persistent first-mover bias.
 - Consequential engineering assists, terrain-intent pings, and evidence-based death recaps expose terrain mastery without rewarding raw edit volume.
 - The block tool now has deterministic low-wall, firing-step, and ramp blueprints with previews, full-cost atomic placement, collision checks, and host authority.
-- Greenbelt received distinct lane landmarks; Beachhead received bounded counter-routes and ridge cover; Pinefall received clear base-exit headroom; and Caldera received rim sightline breaks and protected hill staging. Foundry and Faultline were left geometrically intact because automated checks found no reproducible defect.
+- Greenbelt received distinct lane landmarks; Beachhead received bounded counter-routes and ridge cover; Pinefall received clear base-exit headroom; and Caldera received rim sightline breaks and protected hill staging. Foundry and Faultline received an initial visual-identity pass before direct play feedback established that their underlying layouts still need substantial redesign.
 - Post-match reports now show paired start/finish terrain views, descriptive roles, one teammate commendation per voter, and an optional unanimous rivalry round on the same map and seed with sides rebalanced.
-- Foundry and Faultline pass deterministic structural and bot-flow validation. Their human comparison studies remain open; automated bots cannot establish enjoyment, suspense, social value, or perceived fairness.
+- Foundry and Faultline pass deterministic structural and bot-flow validation, but direct play feedback found both boring. They are now private prototypes rather than public maps; this is concrete evidence that bot flow alone cannot establish enjoyment, suspense, social value, or perceived fairness.
 
 The items under “Mechanics to test later” remain intentionally unbuilt. They are evidence-gated experiments, not part of the approved core, and should not be promoted without human playtest support.
 
@@ -227,11 +227,11 @@ Plan:
 
 Measure approach diversity, arrival advantage, contest percentage, retake rate, consecutive-hold duration, rim kill share, and side-swapped score.
 
-### Foundry — public TDM only
+### Foundry — private TDM prototype
 
 Role: compact, purpose-built competitive TDM arena.
 
-Current evidence: final greybox simulations produced fast contact, low spawn-death pressure, and competitive scores. Human perception may find 3–4 second contact too immediate even though the bots pass safety thresholds.
+Current evidence: final greybox simulations produced fast contact, low spawn-death pressure, and competitive scores, but direct play feedback found the arena extremely boring. It is retired from normal hosting and public matchmaking pending a substantially stronger redesign.
 
 Plan:
 
@@ -241,11 +241,11 @@ Plan:
 4. Add richer industrial silhouettes, lighting, and navigational color only after the lane structure survives testing.
 5. If humans feel rushed, add spawn-exit concealment or route depth before increasing the overall footprint.
 
-### Faultline — public KOTH only
+### Faultline — private KOTH prototype
 
 Role: compact four-hill rotation map designed specifically for KOTH.
 
-Current evidence: contact and public pacing thresholds pass, but one bot seed still produced notable stalls and current bots do not generate trustworthy contested-hill time.
+Current evidence: contact and pacing thresholds pass, but direct play feedback found the arena extremely boring. It is retired from normal hosting and public matchmaking pending a substantially stronger redesign.
 
 Plan:
 
@@ -295,10 +295,10 @@ Keep Crown private until moat and causeway traversal produce acceptable re-engag
 - Caldera stall fixes and protected hill staging.
 - Beachhead side-balance experiment.
 
-### Phase 4 — validate the dedicated maps
+### Phase 4 — redesign and validate the dedicated maps
 
-- Foundry-versus-Pinefall TDM study.
-- Faultline-versus-Caldera KOTH study.
+- Redesign Foundry before any new Pinefall comparison.
+- Redesign Faultline before any new Caldera comparison.
 - Apply art polish only to geometry that survives the tests.
 
 ### Phase 5 — strengthen memory and social return
@@ -331,8 +331,8 @@ Do not optimize one number in isolation. For example, faster contact is harmful 
 - Random macro-route or spawn-distance changes that prevent mastery.
 - More weapons before the current terrain and class decisions are legible.
 - Mandatory longer sessions or forced rematches.
-- More public maps until Foundry and Faultline establish what a purpose-built Spadefall map should achieve.
+- More public maps without human evidence that they are more enjoyable than the current controls.
 
 ## Next decision gate
 
-The next decision is a **counterbalanced human playtest**, not another feature batch. Compare Foundry with Pinefall and Faultline with Caldera, swap sides and play order, and use the implemented local diagnostics alongside short player-experience surveys. Tune geometry or mechanic thresholds only where behavioral evidence and player reports point to the same reproducible problem; Beachhead and Caldera remain the highest-risk public maps, while Pinefall is the TDM flow control.
+The next decision is a **new greybox hypothesis**, followed by counterbalanced human playtesting before either prototype returns. Foundry needs a stronger TDM-specific spatial hook than a flat cover yard; Faultline needs hill rotations that create distinct stories rather than four versions of the same basin fight. Compare a redesigned Foundry with Pinefall and a redesigned Faultline with Caldera, swap sides and play order, and use the local diagnostics alongside short player-experience surveys. Beachhead and Caldera remain the highest-risk public maps, while Pinefall is the TDM flow control.

@@ -350,9 +350,9 @@ export function createHud(deps = {}) {
     const endContracts = $('endContracts');
     if (endContracts) {
       endContracts.textContent = stats.contracts()
-        .map(contract => `${contract.badge} ${contract.current}/${contract.target}`)
+        .map(contract => `${contract.name} ${contract.current}/${contract.target}`)
         .join(' · ')
-        + (stats.selectedBadge() ? ` · EQUIPPED ${stats.selectedBadge()}` : '');
+        + (stats.selectedBadge() ? ' · CALLSIGN TAG ACTIVE' : '');
     }
   },
   roles(g, roleRows = []) {

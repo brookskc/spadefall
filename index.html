@@ -63,7 +63,7 @@
   #statsPanel { margin-top:18px; font-size:12px; letter-spacing:1.5px; opacity:.8; }
   #statsLine { opacity:.65; text-transform:uppercase; letter-spacing:2px; }
   #masteryLine { margin-top:6px; color:#ffd97a; font-size:10px; letter-spacing:1.8px; }
-  #gunColors { margin-top:8px; display:flex; gap:8px; justify-content:center; }
+  #gunColors { margin-top:8px; padding-bottom:18px; display:flex; gap:8px; justify-content:center; }
   .swatch { width:22px; height:22px; border-radius:4px; cursor:pointer;
     border:2px solid rgba(255,255,255,.15); position:relative; }
   .swatch:hover { border-color:rgba(255,255,255,.4); }
@@ -72,12 +72,20 @@
   .swatch.equipped { border-color:#ffd97a; }
   .swatch .need { position:absolute; left:50%; top:26px; transform:translateX(-50%);
     font-size:9px; white-space:nowrap; opacity:.8; letter-spacing:1px; }
-  #terrainContracts { margin:12px auto 0; max-width:420px; display:grid; gap:5px; text-align:left; }
+  #terrainRewards { margin:10px auto 0; max-width:420px; }
+  #terrainRewards summary, #endTerrainRewards summary { cursor:pointer; list-style:none;
+    font-size:9px; letter-spacing:1.5px; opacity:.55; text-transform:uppercase; }
+  #terrainRewards summary::-webkit-details-marker,
+  #endTerrainRewards summary::-webkit-details-marker { display:none; }
+  #terrainRewards summary::before, #endTerrainRewards summary::before { content:'+ '; color:#ffd97a; }
+  #terrainRewards[open] summary::before, #endTerrainRewards[open] summary::before { content:'− '; }
+  #terrainContracts { margin:10px auto 0; max-width:420px; display:grid; gap:5px; text-align:left; }
   .terrainContract { display:grid; grid-template-columns:1fr auto; gap:2px 8px; font-size:10px; letter-spacing:1px; }
   .terrainContract span { opacity:.7; }
   .terrainContract b { color:#ffd97a; font-weight:500; }
   .terrainContract progress { grid-column:1 / -1; width:100%; height:4px; accent-color:#a7c58d; }
   #terrainBadges { margin-top:8px; display:flex; justify-content:center; flex-wrap:wrap; gap:5px; }
+  .badgeHelp { margin-top:10px; font-size:9px; letter-spacing:1.2px; opacity:.5; }
   .badgeChoice { padding:3px 7px; border:1px solid rgba(255,255,255,.2); background:transparent;
     color:#fff; font:inherit; font-size:10px; letter-spacing:1px; cursor:pointer; }
   .badgeChoice:hover, .badgeChoice.equipped { border-color:#ffd97a; color:#ffd97a; }
@@ -104,7 +112,9 @@
   .brow .bjoin { font-size:11px; letter-spacing:2px; color:#ffd97a; opacity:.8; }
   .bfoot { margin-top:22px; display:flex; gap:28px; font-size:13px;
     letter-spacing:2px; opacity:.7; }
-  .bfoot .disabled { opacity:.25; pointer-events:none; }
+  .bfoot button.plink { appearance:none; -webkit-appearance:none; border:0; padding:0;
+    background:transparent; color:inherit; font:inherit; letter-spacing:inherit; }
+  .bfoot button:disabled { opacity:.25; cursor:default; }
   #browsePage { opacity:.55; font-variant-numeric:tabular-nums; }
   .private input { width:104px; background:transparent; border:none;
     border-bottom:1px solid rgba(255,255,255,.4); color:#fff; padding:2px 4px;
@@ -257,7 +267,9 @@
   .medal b { font-size:11px; }
   .medal span { font-size:10px; opacity:.58; }
   .noMedals { font-size:10px; opacity:.52; }
-  #endBests, #endMastery, #endContracts { display:inline; font-size:10px; line-height:1.6; opacity:.7; }
+  #endBests, #endMastery { display:inline; font-size:10px; line-height:1.6; opacity:.7; }
+  #endTerrainRewards { margin-top:4px; font-size:10px; line-height:1.6; opacity:.7; }
+  #endContracts { margin-top:3px; }
   #endBests::after { content:"  /  "; opacity:.45; }
   #endBests.new { color:var(--outcome); opacity:1; }
   #endMastery { color:#d9e3e4; }
@@ -910,8 +922,12 @@
       <div id="statsLine">0 K · 0 D · MATCHES 0 · WINS 0</div>
       <div id="masteryLine">RECRUIT MASTERY · 0 / 1000</div>
       <div id="gunColors"></div>
-      <div id="terrainContracts" aria-label="Terrain contracts"></div>
-      <div id="terrainBadges" aria-label="Callsign badges"></div>
+      <details id="terrainRewards">
+        <summary>optional terrain rewards</summary>
+        <div id="terrainContracts" aria-label="Terrain reward progress"></div>
+        <div class="badgeHelp">optional tag shown before your callsign</div>
+        <div id="terrainBadges" aria-label="Optional callsign tags"></div>
+      </details>
     </div>
     <div class="prefs home-only" id="startClassPick">
       <div class="lbl">starting class</div>
@@ -1012,7 +1028,7 @@
     <div id="browsestatus">scanning…</div>
     <div id="browselist"></div>
     <div class="bfoot">
-      <button class="plink disabled" type="button" id="browsePrev">PREVIOUS</button>
+      <button class="plink" type="button" id="browsePrev" disabled>PREVIOUS</button>
       <span id="browsePage">1 / 8</span>
       <button class="plink" type="button" id="browseNext">NEXT</button>
       <button class="plink" type="button" id="browseRefresh">RESCAN</button>
@@ -1037,7 +1053,10 @@
             <div id="endStats"></div>
             <div id="endMedals"></div>
             <div><span id="endBests"></span><span id="endMastery"></span></div>
-            <div id="endContracts" aria-label="Terrain contract progress"></div>
+            <details id="endTerrainRewards">
+              <summary>terrain rewards</summary>
+              <div id="endContracts" aria-label="Terrain reward progress"></div>
+            </details>
           </div>
           <div id="endFacts">
             <div id="endStory">

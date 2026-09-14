@@ -16,14 +16,14 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
-| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall, Foundry |
-| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Caldera, Faultline |
+| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall |
+| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Caldera |
 
-Capture the Flag is retired from public play. Dunes and Crown are also retired from public matchmaking, but all three remain playable in private rooms started with the `privateContent` feature for development and testing. Foundry is TDM-only; Faultline is KOTH-only.
+Capture the Flag is retired from public play. Dunes, Crown, Foundry, and Faultline are also retired from normal matchmaking and hosting. They remain playable in development rooms started with the `privateContent` feature.
 
 Terrain changes remain in the match state. Late joiners receive the current battlefield, including dug tunnels, collapsed cover, and placed blocks.
 
-After a round, the match report shows contribution, combat and objective work, a descriptive team role, teammate commendations, and a paired start/finish view of how the terrain changed. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players choose from three mode/map cards and explicitly select PLAY ANOTHER or DONE; there is no forced rotation. When at least two humans are present, everyone can also opt into a rivalry round on the same map and seed with sides rebalanced.
+After a round, the match report shows contribution, combat and objective work, a descriptive team role, teammate commendations, and a paired start/finish view of how the terrain changed. Personal records are tracked separately for CTF, deathmatch, and king of the hill in the current browser. Players choose from three mode/map cards; PLAY ANOTHER starts the selected battle immediately, DONE leaves, and an unanswered room advances after the bounded results window. When at least two humans are present, everyone can also opt into a rivalry round on the same map and seed with sides rebalanced.
 
 ## Loadouts and tools
 
@@ -56,7 +56,7 @@ Each map has its own terrain generator, atmosphere, sight lines, water layout, a
 | ![Faultline](docs/map-faultline.png) | |
 | Faultline | |
 
-Foundry and Faultline are available in their supported public modes. Dunes and Crown remain available in private development rooms only.
+Foundry, Faultline, Dunes, and Crown remain available in private development rooms only.
 
 ## Multiplayer
 

@@ -2069,9 +2069,9 @@ export class Game {
     if (action === 'dig' || action === 'place') {
       const contractUpdate = stats.recordTerrainAction(action);
       if (contractUpdate.unlocked.length) {
-        const tags = contractUpdate.unlocked.join(' · ');
+        const rewards = contractUpdate.completed.map(contract => contract.name).join(' · ');
         this.messageTo(this.player,
-          `CONTRACT COMPLETE · ${tags} BADGE UNLOCKED · AVAILABLE NEXT SESSION`, '#ffd97a');
+          `TERRAIN REWARD UNLOCKED · ${rewards} · OPTIONAL CALLSIGN TAG AVAILABLE NEXT SESSION`, '#ffd97a');
       }
       this.onStatsChanged?.();
     }

@@ -311,18 +311,20 @@ function mapgenTests() {
       .every(block => (beachSurfaceCounts?.get(block) ?? 0) >= 100),
     JSON.stringify(Object.fromEntries(beachSurfaceCounts ?? [])));
   ok('mapsForMode(ctf) = [0,1,2]', JSON.stringify(mapsForMode('ctf')) === '[0,1,2]');
-  ok('mapsForMode(koth) retains private DUNES/CROWN and public CALDERA/FAULTLINE',
+  ok('mapsForMode(koth) retains private maps and public CALDERA',
     JSON.stringify(mapsForMode('koth')) === '[3,4,5,7]');
   ok('CALDERA is KOTH-only while TDM retains its other maps',
     JSON.stringify(MAPS[5].modes) === '["koth"]'
       && JSON.stringify(mapsForMode('tdm')) === '[0,1,2,3,4,6]',
     JSON.stringify(mapsForMode('tdm')));
-  ok('public rotation excludes CTF and private DUNES/CROWN',
+  ok('public rotation excludes CTF and every retired private map',
     JSON.stringify(mapsForMode('ctf', { publicOnly: true })) === '[]'
-      && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[5,7]'
-      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2,6]'
+      && JSON.stringify(mapsForMode('koth', { publicOnly: true })) === '[5]'
+      && JSON.stringify(mapsForMode('tdm', { publicOnly: true })) === '[0,1,2]'
       && !mapsForMode('tdm', { publicOnly: true }).includes(3)
-      && !mapsForMode('tdm', { publicOnly: true }).includes(4));
+      && !mapsForMode('tdm', { publicOnly: true }).includes(4)
+      && !publicContentAvailable('tdm', 6)
+      && !publicContentAvailable('koth', 7));
   ok('private content requires its explicit feature outside public paths',
     !publicContentAvailable('ctf', 0) && !publicContentAvailable('tdm', 4)
       && !contentAvailable('ctf', 0, { privateContent: false })

@@ -432,6 +432,7 @@ export class Game {
     this._lastWeaponActionSeq = 0;
     this._lastHealth = 100;
     this._respawnT = 0;                  // client: cosmetic redeploy countdown
+    this._respawnRepairAt = Infinity;    // client: request authority if the spawn edge is missed
     this._chatCd = 0;                    // chat send cooldown (wall clock)
     this.teamPings = [];                 // short-lived, team-only tactical marks
     this._nextTeamPingId = 1;
@@ -772,6 +773,8 @@ export class Game {
     for (const p of this.remote.values()) p.alive = false;
     this._openingDeployment = true;
     this.player.respawn();
+    this._respawnT = 0;
+    this._respawnRepairAt = Infinity;
     if (this.mode !== 'client') {
       for (const p of this.remote.values()) p.resetForRound();
       this._spawnBots();
@@ -3397,6 +3400,24 @@ export class Game {
       publicRoom: this.publicRoom, privateContent: this.privateContent, seed: this.seed });
     this._battleTally = retainedTally;
     this._myBattleChoice = retainedMine;
+    // Results use a fixed aerial camera while the outer loop continues to
+    // tick. Quiesce the completed round at this boundary so an older death
+    // timer cannot respawn somebody into that camera and held combat input
+    // cannot survive into the intermission.
+    this.respawnTimers.clear();
+    this._respawnT = 0;
+    this._respawnRepairAt = Infinity;
+    this.player.controls.clear();
+    this.player.mouseDown = [false, false, false];
+    this.player._piloting = false;
+    this.player._fallingT = 0;
+    this.player._lingerT = 0;
+    this.player.body.vel.set(0, 0, 0);
+    this.player.resetZoom();
+    for (const entity of [...this.remote.values(), ...this.bots])
+      entity.body?.vel?.set?.(0, 0, 0);
+    this._pendingStrikes = [];
+    this._clearAirstrikeDrones();
     const storyMetrics = authoritativeStory ?? this.voxelStory?.metrics();
     const story = this.voxelStory ? voxelBattleStory(storyMetrics) : null;
     this._roleRows = this._postmatchRoleRows();
@@ -3903,7 +3924,7 @@ export class Game {
       x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z });
   }
 
-  _hostResync(id, scope) {
+  _hostResync(id, scope, repair = null) {
     const conn = this.net?.conns?.get(id);
     if (!conn) return;
     const now = performance.now();
@@ -3911,6 +3932,22 @@ export class Game {
     conn._resyncAt = now + 1000; // repair is expensive; one request is enough
     if (scope === 'state') {
       conn._forceFullSnapshot = true;
+      // A client whose displayed wave expired can be missing both the
+      // reliable spawn edge and the first changed snapshot. Re-send the
+      // exact authoritative life rather than making it guess forever from
+      // an old corpse row. If authority is also missing its timer, repair
+      // that invariant and return the player promptly.
+      const p = this.remote.get(id);
+      if (repair?.dead && Number.isSafeInteger(repair.life) && p) {
+        if (p.alive) {
+          this.net.sendTo(id, { t: 'e', k: 'spawn',
+            x: p.body.pos.x, y: p.body.pos.y, z: p.body.pos.z,
+            yaw: p.yaw + Math.PI / 2, life: p._life });
+        } else if (!this.over && !this.respawnTimers.has(p)) {
+          this.respawnTimers.set(p, Math.min(1,
+            respawnWaveDelay(this.gameMode, this.matchElapsed)));
+        }
+      }
       return;
     }
     this.net.sendTo(id, { t: 'sync', seed: this.seed, map: this.mapIndex,
@@ -4056,7 +4093,8 @@ export class Game {
       if (!order.accept) { this._securityViolation(p, 'action-' + order.reason, 2); return; }
       p._lastActionSeq = d.n;
     }
-    if (d.t === 'a' && d.k === 'resync') return this._hostResync(id, d.scope);
+    if (d.t === 'a' && d.k === 'resync') return this._hostResync(id, d.scope,
+      { life: d.life, dead: d.dead === 1 });
     if (d.t === 'a' && d.k === 'chat') return this._hostOnChat(id, d.text, d.scope);
     if (d.t === 'a' && d.k === 'votekick') {
       this._hostVoteKick(p, d.target);
@@ -4111,6 +4149,9 @@ export class Game {
       return;
     }
     if (d.t === 's') {
+      // State packets remain useful as connection heartbeats during results,
+      // but they must not keep moving the completed battlefield.
+      if (this.over) return;
       // Finite + bounded: a NaN here poisons every distance check downstream.
       if (![d.x, d.y, d.z, d.yaw].every(Number.isFinite)) return;
       const nx = Math.min(Math.max(d.x, 0), SX), ny = Math.min(Math.max(d.y, -8), SY + 8),
@@ -5021,11 +5062,16 @@ export class Game {
     });
   }
 
-  _requestResync(scope) {
+  _requestResync(scope, repair = null) {
     const now = performance.now();
     if (now < (this._resyncAt[scope] ?? 0)) return;
     this._resyncAt[scope] = now + 1000;
-    this.net?.send({ t: 'a', k: 'resync', scope });
+    const message = { t: 'a', k: 'resync', scope };
+    if (scope === 'state' && repair?.dead) {
+      message.life = this._serverLife;
+      message.dead = 1;
+    }
+    this.net?.send(message);
   }
 
   _applyWorldSync(d) {
@@ -5102,6 +5148,8 @@ export class Game {
           const spawn = parseSpawnRow(d.spawn);
           if (spawn) {
             this.player.respawn({ x: spawn.x, y: spawn.y, z: spawn.z });
+            this._respawnT = 0;
+            this._respawnRepairAt = Infinity;
             this.player.yaw = spawn.yaw;
             this.player.pitch = 0;
           }
@@ -5176,7 +5224,7 @@ export class Game {
         ammo, reloadMs, gunClass] = r;
       if (idx === this.myIdx) {
         if (!alive && this.player.alive) this._clientDied();
-        else if (alive && !this.player.alive) {
+        else if (alive && !this.player.alive && !this.over && !d.o) {
           // The reliable spawn event is the normal lifecycle edge, but the
           // authoritative snapshot must still be able to heal a missed or
           // rejected edge. Previously an alive self row updated health and
@@ -5186,6 +5234,7 @@ export class Game {
           this._serverLife = Math.min(1e6, this._serverLife + 1);
           this.player.respawn({ x, y, z });
           this._respawnT = 0;
+          this._respawnRepairAt = Infinity;
           hud.respawn(0);
           hud.health(this.player);
           hud.refreshTool(this.player);
@@ -5472,8 +5521,14 @@ export class Game {
         break;
       case 'died': this._clientDied(d.rt, d.recap); break;
       case 'spawn':
+        // A wave queued before the final score can arrive after the results
+        // transition. The next-round restart, not that stale wave, owns the
+        // next playable life.
+        if (this.over) break;
         this._serverLife = d.life;
         this.player.respawn({ x: d.x, y: d.y, z: d.z });
+        this._respawnT = 0;
+        this._respawnRepairAt = Infinity;
         if (Number.isFinite(d.yaw)) this.player.yaw = d.yaw;
         hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player);
         this._lastHealth = 100;
@@ -5583,9 +5638,23 @@ export class Game {
   }
 
   _clientDied(redeploy, recap = null) {
+    // A final-kill death event can trail the score/end transition. Results
+    // already own the screen, so keep the player down without reopening the
+    // death recap or arming a respawn repair against a completed round.
+    if (this.over) {
+      this.player.alive = false;
+      this._respawnT = 0;
+      this._respawnRepairAt = Infinity;
+      hud.respawn(0);
+      hud.deathRecap(null);
+      return;
+    }
     const firstTransition = this.player.alive;
     if (!firstTransition) {
-      if (Number.isFinite(redeploy)) this._respawnT = redeploy;
+      if (Number.isFinite(redeploy)) {
+        this._respawnT = redeploy;
+        this._respawnRepairAt = this.time + redeploy + 0.75;
+      }
       if (this.engagementFeatures.deathRecap && recap) hud.deathRecap(recap);
       return;
     }
@@ -5618,6 +5687,7 @@ export class Game {
     this.player.vmRoot.visible = false; // no floating gun while down
     this._respawnT = Number.isFinite(redeploy)
       ? redeploy : respawnWaveDelay(this.gameMode, this.matchElapsed);
+    this._respawnRepairAt = this.time + this._respawnT + 0.75;
     this.player.resetZoom(); // same reason as Player.die() — this is the guest's equivalent of it
     this.effects.burst(this.player.body.eye(), 26, teamHex(this.player.team), 6);
     sfx.hurt();
@@ -5662,6 +5732,14 @@ export class Game {
       this._respawnT -= dt;
       if (this._respawnT > 0) hud.respawn(this._respawnT);
     }
+    // The countdown is presentation; the host owns the real life. Once the
+    // displayed wave has passed, explicitly ask it to replay our exact life
+    // and force a full snapshot. Retry at the existing one-second repair
+    // budget until either an authoritative spawn or game-over arrives.
+    if (!this.player.alive && !this.over && this.time >= this._respawnRepairAt) {
+      this._respawnRepairAt = this.time + 1;
+      this._requestResync('state', { dead: true });
+    }
     // Own footsteps + cosmetic protection countdown (the host's copy is the
     // one that actually gates damage); everyone else steps via Avatar.update.
     {
@@ -5682,14 +5760,16 @@ export class Game {
         }
       }
     }
-    if (this.player.alive) {
-      this.player.update(dt);
-      // The host alone applies damage; the client advances the same pure
-      // breath state only so its HUD responds immediately to local movement.
-      this._updateBreathFor(this.player, dt, false);
-    } else {
-      hud.air(BREATH_MAX, false);
-      this.player.deathCam(dt);
+    if (!this.over) {
+      if (this.player.alive) {
+        this.player.update(dt);
+        // The host alone applies damage; the client advances the same pure
+        // breath state only so its HUD responds immediately to local movement.
+        this._updateBreathFor(this.player, dt, false);
+      } else {
+        hud.air(BREATH_MAX, false);
+        this.player.deathCam(dt);
+      }
     }
     for (const av of this.avatars.values()) av.update(this.time, this.world, this.effects);
     this._sendT -= dt;
@@ -5789,7 +5869,7 @@ export class Game {
     // Pending airstrikes: host/solo only, since only this side is
     // authoritative for when damage actually lands. Iterated backward so
     // splicing a finished one out mid-loop never skips the next entry.
-    if (this._pendingStrikes) {
+    if (!this.over && this._pendingStrikes) {
       for (let i = this._pendingStrikes.length - 1; i >= 0; i--) {
         const s = this._pendingStrikes[i];
         // The host/solo's OWN steering never crosses the wire at all —
@@ -5829,13 +5909,15 @@ export class Game {
         }
       }
     }
-    if (this.player.alive) this.player.update(dt);
-    else this.player.deathCam(dt);
-    this._updateBotTactics(dt);
-    this._updateBotAirstrikes();
-    for (const b of rotatingBotOrder(this.bots, this._botUpdateFrame++)) b.update(dt);
+    if (!this.over) {
+      if (this.player.alive) this.player.update(dt);
+      else this.player.deathCam(dt);
+      this._updateBotTactics(dt);
+      this._updateBotAirstrikes();
+      for (const b of rotatingBotOrder(this.bots, this._botUpdateFrame++)) b.update(dt);
+      this._updateEnvironmentalDamage(dt);
+    }
     this._updateAirstrikeDrones(dt);
-    this._updateEnvironmentalDamage(dt);
     this._combatHistoryT += Math.max(0, dt);
     if (!this._combatHistoryInitialized || combatHistoryDue(0, this._combatHistoryT)) {
       for (const e of this.entities()) if (e.alive) this._recordCombatPose(e);
@@ -5847,7 +5929,7 @@ export class Game {
 
     // Fell out of the world: Body parked them above the sea and raised the
     // flag. Kill them properly so the flag drops and the redeploy timer runs.
-    for (const e of this.entities()) {
+    if (!this.over) for (const e of this.entities()) {
       if (!e.body?.voidFall) continue;
       e.body.voidFall = false;
       if (e.alive) this.damage(e, 1000, null, null,
@@ -5858,7 +5940,7 @@ export class Game {
     // every 2.2 blocks of grounded travel sounds a step where they are, and
     // moving burns protection twice as fast as standing (firing ends it
     // outright — see fireHitscan/throwGrenade).
-    for (const e of this.entities()) {
+    if (!this.over) for (const e of this.entities()) {
       if (!e?.alive || !e.body) continue;
       const b = e.body;
       if (e._sx === undefined) { e._sx = b.pos.x; e._sz = b.pos.z; e._stepAcc = 0; continue; }
@@ -5880,13 +5962,29 @@ export class Game {
       }
     }
 
-    // Respawns.
-    for (const [e, t] of this.respawnTimers) {
+    // Every in-round death must own a timer. This defensive invariant also
+    // heals a timer lost during migration/reconstruction instead of leaving
+    // a host or solo player permanently attached to the death camera.
+    if (!this.over) {
+      for (const e of this.entities()) {
+        if (!e?.alive && !this.respawnTimers.has(e))
+          this.respawnTimers.set(e, Math.min(1,
+            respawnWaveDelay(this.gameMode, this.matchElapsed)));
+      }
+    }
+
+    // Respawns exist only inside a live round. _end clears any pending wave
+    // so no late timer can create a playable body beneath the results camera.
+    if (!this.over) for (const [e, t] of this.respawnTimers) {
       const nt = t - dt;
       if (nt <= 0) {
         this.respawnTimers.delete(e);
         e.respawn();
-        if (e === this.player) { hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player); }
+        if (e === this.player) {
+          this._respawnT = 0;
+          this._respawnRepairAt = Infinity;
+          hud.respawn(0); hud.health(this.player); hud.refreshTool(this.player);
+        }
       } else {
         this.respawnTimers.set(e, nt);
         if (e === this.player) hud.respawn(nt);

@@ -72,7 +72,7 @@ export function validClientMessage(d) {
     strike: ['t', 'k', 'n', 'life', 'x', 'z', 'yaw'],
     mark: ['t', 'k', 'd', 'kind'], squad: ['t', 'k'],
     votekick: ['t', 'k', 'target'],
-    resync: ['t', 'k', 'scope'], reload: ['t', 'k', 'n', 'life'],
+    resync: ['t', 'k', 'scope', 'life', 'dead'], reload: ['t', 'k', 'n', 'life'],
     shoot: ['t', 'k', 'n', 'life', 'd', 'o'], dig: ['t', 'k', 'n', 'life', 'd', 'o'],
     place: ['t', 'k', 'n', 'life', 'd', 'o', 'pattern'], nade: ['t', 'k', 'n', 'life', 'd', 'o'],
     spawnpref: ['t', 'k', 'pref'], ready: ['t', 'k'], vote: ['t', 'k', 'choice'],
@@ -95,7 +95,12 @@ export function validClientMessage(d) {
   if (d.k === 'rivalry') return true;
   if (d.k === 'spawnpref') return d.pref === 'front' || d.pref === 'base';
   if (d.k === 'votekick') return Number.isInteger(d.target) && d.target >= 0 && d.target <= 10000;
-  if (d.k === 'resync') return d.scope === 'state' || d.scope === 'world';
+  if (d.k === 'resync') {
+    const repair = d.life !== undefined || d.dead !== undefined;
+    return (d.scope === 'state' || d.scope === 'world')
+      && (!repair || d.scope === 'state' && d.dead === 1
+        && Number.isSafeInteger(d.life) && d.life >= 1 && d.life <= 1e6);
+  }
   if (d.k === 'reload') return true;
   if (d.k === 'place' && d.pattern !== undefined && !validBlueprintKind(d.pattern)) return false;
   return ['shoot', 'dig', 'place', 'nade'].includes(d.k)

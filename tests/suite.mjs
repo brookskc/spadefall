@@ -920,6 +920,14 @@ function multiplayerRuleTests() {
       && !validClientMessage({ t: 'a', k: 'ready', fast: true })
       && !validClientMessage({ t: 'a', k: 'vote', choice: 3 })
       && !validClientMessage({ t: 'a', k: 'done', extra: true }));
+  ok('expired client death waits can request a bounded authoritative life repair',
+    validClientMessage({ t: 'a', k: 'resync', scope: 'state', life: 3, dead: 1 })
+      && validClientMessage({ t: 'a', k: 'resync', scope: 'state' })
+      && !validClientMessage({ t: 'a', k: 'resync', scope: 'state', dead: 1 })
+      && !validClientMessage({ t: 'a', k: 'resync', scope: 'state', life: 3 })
+      && !validClientMessage({ t: 'a', k: 'resync', scope: 'state', dead: 0 })
+      && !validClientMessage({ t: 'a', k: 'resync', scope: 'world', life: 3, dead: 1 })
+      && !validClientMessage({ t: 'a', k: 'resync', scope: 'state', life: 0, dead: 1 }));
   ok('blueprint placement accepts only the three fixed patterns',
     validClientMessage({ t: 'a', k: 'place', n: 1, life: 1,
       d: [1, 0, 0], o: [10, 4, 10], pattern: 'RAMP' })

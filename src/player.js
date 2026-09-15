@@ -256,10 +256,6 @@ export class Player {
         this.game.hud.statsShow(this.game);
         return;
       }
-      if (this.controls.matches('crouch', e.code) && getCrouchMode() === 'toggle')
-        this._crouchToggled = !this._crouchToggled;
-      if (this.controls.matches('aim', e.code) && getAimMode() === 'toggle')
-        this._aimToggled = !this._aimToggled;
       if (this.game.over || !this.alive) {
         // Class select while waiting to respawn: 1/2/3 for rifle/smg/
         // sniper. Applied at the moment respawn() actually fires, not
@@ -278,6 +274,10 @@ export class Player {
         if (this.game.over && e.code === 'Enter') this.game.requestIntermissionReady();
         return;
       }
+      if (this.controls.matches('crouch', e.code) && getCrouchMode() === 'toggle')
+        this._crouchToggled = !this._crouchToggled;
+      if (this.controls.matches('aim', e.code) && getAimMode() === 'toggle')
+        this._aimToggled = !this._aimToggled;
       for (let i = 1; i <= 4; i++) if (this.controls.bindings[`tool${i}`]?.includes(e.code)) this._selectTool(this._toolSlots()[i - 1]);
       if (this.controls.bindings.previousTool?.includes(e.code) || this.controls.bindings.nextTool?.includes(e.code))
         this._cycleTool(this.controls.bindings.nextTool?.includes(e.code) ? 1 : -1);
@@ -325,7 +325,7 @@ export class Player {
     // to throw a grenade nobody aimed (lock engaged a moment later, the held
     // flag was still set, and the "first" grenade went off on its own).
     dom.addEventListener('mousedown', e => {
-      if (document.pointerLockElement === dom) {
+      if (document.pointerLockElement === dom && !this.game.over && this.alive) {
         this.mouseDown[e.button] = true; this.controls.set(`Mouse${e.button}`, true);
         if (this.controls.matches('aim', `Mouse${e.button}`) && getAimMode() === 'toggle')
           this._aimToggled = !this._aimToggled;
@@ -568,7 +568,10 @@ export class Player {
 
   // ---------------- per-frame ----------------
   update(dt) {
-    if (!this.alive) return;
+    // Game.update keeps ticking during results so the intermission timer,
+    // networking, and presentation can finish. The fixed results camera is
+    // not playable: never let the body underneath it aim, move, or fire.
+    if (!this.alive || this.game.over) return;
     // Short-circuits everything below — no movement, no aiming, no firing,
     // completely different camera. The body itself never gets touched
     // here, which is exactly what leaves it standing still and fully

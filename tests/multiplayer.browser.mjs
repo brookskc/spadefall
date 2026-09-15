@@ -33,7 +33,7 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const namespace = `ci${Date.now().toString(36)}`.slice(-16);
-const base = `http://127.0.0.1:${port}/?auto=1&code=TEST&ns=${namespace}&map=0&mode=ctf`;
+const base = `http://127.0.0.1:${port}/?auto=1&code=TEST&ns=${namespace}&map=1&mode=tdm`;
 const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const executablePath = process.env.SPADEFALL_BROWSER
   ?? (process.platform === 'win32' && existsSync(edge) ? edge : undefined);
@@ -120,6 +120,71 @@ try {
     recap: '', countdown: '0', classPick: '0', spawnPick: '0',
   }, 'respawn clears every death-only HUD layer');
 
+  // Reproduce the production failure more aggressively: acknowledge away
+  // both the reliable spawn event and the snapshot row that first says the
+  // Beachhead player is alive. Ordinary heartbeats continue, so migration
+  // cannot accidentally mask the bug. The expired client countdown must ask
+  // authority to replay the exact life and clear the death camera/HUD.
+  await host.evaluate(guestId => {
+    const game = window.__game;
+    const sendTo = game.net.sendTo.bind(game.net);
+    const hostResync = game._hostResync.bind(game);
+    game._auditSendTo = sendTo;
+    game._auditHostResync = hostResync;
+    game._auditRespawnRepair = false;
+    game._auditSuppressedSpawn = false;
+    game._auditSuppressedLiveRow = false;
+    game._hostResync = (id, scope, repair) => {
+      if (id === guestId && scope === 'state' && repair?.dead)
+        game._auditRespawnRepair = true;
+      return hostResync(id, scope, repair);
+    };
+    game.net.sendTo = (id, message) => {
+      if (id !== guestId || game._auditRespawnRepair) return sendTo(id, message);
+      if (message?.t === 'e' && message.k === 'spawn') {
+        game._auditSuppressedSpawn = true;
+        return true;
+      }
+      if (message?.t === 's' && message.p?.some(row => row[0] === game.remote.get(id)?.ridx
+          && row[6] === 1)) {
+        game._auditSuppressedLiveRow = true;
+        return sendTo(id, { ...message,
+          p: message.p.filter(row => row[0] !== game.remote.get(id)?.ridx) });
+      }
+      return sendTo(id, message);
+    };
+  }, identity.id);
+  await host.evaluate(() => {
+    const game = window.__game;
+    const remote = [...game.remote.values()][0];
+    remote.protT = 0;
+    game.damage(remote, 200, game.player, game.player.body.pos,
+      { cause: 'rifle', ignoreProtection: true });
+  });
+  await guest.waitForFunction(() => !window.__game.player.alive,
+    null, { timeout: syncTimeout });
+  await guest.waitForFunction(() => window.__game.player.alive
+    && window.__game._respawnRepairAt === Infinity
+    && !document.getElementById('deathRecap')?.classList.contains('on'),
+  null, { timeout: 12_000 });
+  const repairedLife = await host.evaluate(() => {
+    const game = window.__game;
+    const remote = [...game.remote.values()][0];
+    return { repair: game._auditRespawnRepair,
+      spawn: game._auditSuppressedSpawn, row: game._auditSuppressedLiveRow,
+      authoritativeLife: remote._life };
+  });
+  assert.deepEqual({ repair: repairedLife.repair, spawn: repairedLife.spawn,
+    row: repairedLife.row }, { repair: true, spawn: true, row: true },
+  'expired Beachhead death wait requests an authoritative respawn replay');
+  assert.equal(await guest.evaluate(() => window.__game._serverLife),
+    repairedLife.authoritativeLife, 'respawn repair restores the exact authoritative life');
+  await host.evaluate(() => {
+    const game = window.__game;
+    game.net.sendTo = game._auditSendTo;
+    game._hostResync = game._auditHostResync;
+  });
+
   const intermissionClass = await guest.evaluate(() => {
     const game = window.__game;
     const current = game.player.gunClass;
@@ -164,28 +229,84 @@ try {
   await guest.evaluate(() => { window.__game.player.alive = true; });
   await host.evaluate(() => { [...window.__game.remote.values()][0].alive = true; });
 
-  // Enter results through the real authoritative path so the continuation
-  // message carries the required three-card battle slate. The previous
-  // fixture toggled `over` directly, which can only manufacture an invalid
-  // empty choices event now that continuation is explicit.
-  await host.evaluate(() => {
+  // End Beachhead with a real final kill. This is the exact camera state a
+  // player can mistake for a failed respawn: the results renderer switches
+  // to a high three-quarter view while Game continues ticking networking.
+  const finalDeath = await host.evaluate(() => {
     const game = window.__game;
-    game.captures.green = 3;
-    game._end('green');
+    const victim = [...game.remote.values()][0];
+    game.captures[game.player.team] = 49;
+    game.respawnTimers.set(game.player, 0.01); // an older pending wave
+    victim.protT = 0;
+    game.damage(victim, 200, game.player, game.player.body.pos,
+      { cause: 'rifle', ignoreProtection: true });
+    return { over: game.over, victimAlive: victim.alive,
+      pendingRespawns: game.respawnTimers.size };
   });
+  assert.deepEqual(finalDeath, { over: true, victimAlive: false, pendingRespawns: 0 },
+    'a final death enters results and cancels every pending respawn wave');
   await guest.waitForFunction(() => window.__game.over
     && window.__game._battleChoices.length === 3, null, { timeout: syncTimeout });
+  const resultsState = await guest.evaluate(() => {
+    const game = window.__game;
+    const p = game.player, position = p.body.pos.clone();
+    // A late spawn edge from a wave queued before the final score is stale.
+    game._clientEvent({ t: 'e', k: 'spawn', x: position.x, y: position.y,
+      z: position.z, yaw: p.yaw, life: Math.min(1e6, game._serverLife + 1) });
+    return { alive: p.alive,
+      resultsVisible: !document.getElementById('end').classList.contains('hidden'),
+      recap: document.getElementById('deathRecap').className,
+      countdown: getComputedStyle(document.getElementById('respawn')).opacity };
+  });
+  assert.deepEqual(resultsState,
+    { alive: false, resultsVisible: true, recap: '', countdown: '0' },
+    'the final-death aerial view is visibly results and rejects stale respawns');
+  const frozenResults = await host.evaluate(() => {
+    const game = window.__game, p = game.player;
+    const bot = game.bots.find(candidate => candidate.alive);
+    const before = { ammo: p.ammo[p.tool], fov: p.camera.fov,
+      player: p.body.pos.clone(), bot: bot?.body.pos.clone() };
+    p._aimToggled = true;
+    p.controls.set('Mouse0', true);
+    p.controls.set('Mouse2', true);
+    p.update(0.5);
+    game.update(0.5);
+    const result = { ammo: p.ammo[p.tool], fov: p.camera.fov,
+      playerMoved: p.body.pos.distanceTo(before.player) > 0.001,
+      botMoved: bot ? bot.body.pos.distanceTo(before.bot) > 0.001 : false,
+      pendingRespawns: game.respawnTimers.size };
+    p._aimToggled = false;
+    p.controls.clear();
+    return { before: { ammo: before.ammo, fov: before.fov }, result };
+  });
+  assert.deepEqual(frozenResults.result, {
+    ammo: frozenResults.before.ammo, fov: frozenResults.before.fov,
+    playerMoved: false, botMoved: false, pendingRespawns: 0,
+  }, 'results camera cannot zoom, fire, move combatants, or process respawns');
   await guest.evaluate(() => { window.__game.requestIntermissionReady(); });
   await host.waitForFunction(() => window.__game._intermissionReady.size === 1,
     null, { timeout: syncTimeout });
   await guest.waitForFunction(() => document.getElementById('readyBtn')?.textContent.includes('1/2'),
     null, { timeout: syncTimeout });
-  await host.evaluate(() => {
+  await guest.evaluate(() => {
     window.__game.over = false;
-    window.__game._rotateT = null;
+    window.__game.winner = null;
+    window.__game.captures = { green: 0, blue: 0 };
     window.__game._intermissionReady.clear();
+    document.getElementById('end').classList.add('hidden');
   });
-  await guest.evaluate(() => { window.__game.over = false; window.__game._intermissionReady.clear(); });
+  await host.evaluate(() => {
+    const game = window.__game;
+    game.over = false;
+    game.winner = null;
+    game.captures = { green: 0, blue: 0 };
+    game._rotateT = null;
+    game._intermissionReady.clear();
+    document.getElementById('end').classList.add('hidden');
+    [...game.remote.values()][0].respawn();
+  });
+  await guest.waitForFunction(() => window.__game.player.alive,
+    null, { timeout: syncTimeout });
 
   await guest.evaluate(() => { window.__game._sendT = 999; });
   const hostPosition = await host.evaluate(() => {

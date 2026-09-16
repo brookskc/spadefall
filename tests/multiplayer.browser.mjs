@@ -274,15 +274,19 @@ try {
     const result = { ammo: p.ammo[p.tool], fov: p.camera.fov,
       playerMoved: p.body.pos.distanceTo(before.player) > 0.001,
       botMoved: bot ? bot.body.pos.distanceTo(before.bot) > 0.001 : false,
-      pendingRespawns: game.respawnTimers.size };
+      pendingRespawns: game.respawnTimers.size,
+      cameraFromPlayer: p.camera.position.distanceTo(p.body.eye()) };
     p._aimToggled = false;
     p.controls.clear();
     return { before: { ammo: before.ammo, fov: before.fov }, result };
   });
-  assert.deepEqual(frozenResults.result, {
+  const { cameraFromPlayer, ...frozenRound } = frozenResults.result;
+  assert.deepEqual(frozenRound, {
     ammo: frozenResults.before.ammo, fov: frozenResults.before.fov,
     playerMoved: false, botMoved: false, pendingRespawns: 0,
   }, 'results camera cannot zoom, fire, move combatants, or process respawns');
+  assert.ok(Number.isFinite(cameraFromPlayer) && cameraFromPlayer < 3,
+    'round end preserves the grounded player camera instead of snapping above the map');
   await guest.evaluate(() => { window.__game.requestIntermissionReady(); });
   await host.waitForFunction(() => window.__game._intermissionReady.size === 1,
     null, { timeout: syncTimeout });
@@ -307,6 +311,39 @@ try {
   });
   await guest.waitForFunction(() => window.__game.player.alive,
     null, { timeout: syncTimeout });
+
+  const airstrikeCamera = await host.evaluate(() => {
+    const game = window.__game, p = game.player;
+    const eye = p.body.eye();
+    p.resetZoom();
+    p._pilotPos = eye.clone();
+    p._pilotPos.y = 94;
+    p._piloting = true;
+    p.vmRoot.visible = true; // challenge the per-frame defensive hide
+    p.update(0.05);
+    const targetingHidden = !p.vmRoot.visible;
+    p._piloting = false;
+    p._fallingT = 1;
+    p._fallingT0 = 3;
+    p.vmRoot.visible = true;
+    p.update(0.05);
+    const fallingHidden = !p.vmRoot.visible;
+    p._fallingT = 0;
+    p._lingerT = 0.5;
+    p._lingerPos = p.camera.position.clone();
+    p.vmRoot.visible = true;
+    p.update(0.05);
+    const lingerHidden = !p.vmRoot.visible;
+    p._lingerT = 0;
+    p.update(0.05);
+    const restored = p.vmRoot.visible;
+    return { targetingHidden, fallingHidden, lingerHidden, restored,
+      fov: p.camera.fov, baseFov: p.baseFov };
+  });
+  assert.deepEqual(airstrikeCamera, {
+    targetingHidden: true, fallingHidden: true, lingerHidden: true,
+    restored: true, fov: airstrikeCamera.baseFov, baseFov: airstrikeCamera.baseFov,
+  }, 'airstrike targeting, fall, and linger hide the weapon and restore first person cleanly');
 
   await guest.evaluate(() => { window.__game._sendT = 999; });
   const hostPosition = await host.evaluate(() => {

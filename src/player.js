@@ -295,6 +295,11 @@ export class Player {
         if (this._piloting) {
           this._piloting = false;
         } else if (this.game.availableStreak(this) === 'airstrike') {
+          // The overhead targeting camera is not attached to the soldier's
+          // hands. Clear weapon zoom and hide the first-person model before
+          // moving the camera so neither can float over the battlefield.
+          this.resetZoom();
+          this.vmRoot.visible = false;
           this._piloting = true;
           const eye = this.body.eye();
           this._pilotPos = new THREE.Vector3(eye.x, SY + 30, eye.z);
@@ -780,6 +785,7 @@ export class Player {
   // yaw-relative scheme would this far removed from a normal first-person
   // frame of reference.
   _updatePiloting(dt) {
+    this.vmRoot.visible = false;
     const p = this._pilotPos;
     const wish = this._moveWish.set(0, 0, 0);
     if (this.controls.down('moveForward')) wish.z -= 1;
@@ -833,6 +839,7 @@ export class Player {
   // this local camera motion and the actual, host-authoritative impact
   // point stay in sync without waiting on any round trip.
   _updateFalling(dt) {
+    this.vmRoot.visible = false;
     this._fallingT -= dt;
     if (this._fallingT < 0) this._fallingT = 0;
     const p = this._pilotPos;
@@ -868,6 +875,7 @@ export class Player {
   }
 
   _updateLinger(dt) {
+    this.vmRoot.visible = false;
     this._lingerT -= dt;
     if (this._lingerT < 0) this._lingerT = 0;
     this.camera.position.copy(this._lingerPos);

@@ -1758,18 +1758,6 @@ function frame() {
     if (game.flags) for (const f of ['green', 'blue']) game.flags[f].clientUpdate(game.time);
     game.effects.update(dt);
   }
-  if (game.over) {
-    // Keep the map the players just altered behind its results. A fixed high
-    // three-quarter view reads as the actual battlefield, while the overlay
-    // remains stable enough to scan and click during the short intermission.
-    const angle = 0.55 + game.mapIndex * 0.83;
-    const cx = SX / 2, cz = SZ / 2;
-    const cy = game.world.surface(Math.floor(cx), Math.floor(cz));
-    camera.position.set(cx + Math.cos(angle) * 74, Math.max(50, cy + 34),
-      cz + Math.sin(angle) * 74);
-    camera.lookAt(cx, Math.max(14, cy + 5), cz);
-    game.player.vmRoot.visible = false;
-  }
   renderer.render(scene, camera);
 }
 // Tactical-ping composition hook. It uses the real host-side raycast,

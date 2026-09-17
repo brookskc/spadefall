@@ -16,6 +16,7 @@ export class RemotePlayer {
     this.body = new Body(game.world, p.x, p.y, p.z);
     this.health = 100;
     this.alive = true;
+    this.protT = 3;
     this._spawnedAt = game.time;
     resetEnvironmentalState(this);
     this.carrier = false;

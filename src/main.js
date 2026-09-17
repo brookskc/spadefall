@@ -788,15 +788,7 @@ const modePref = $('modePref');
 // Results class choice remains available before an explicit PLAY ANOTHER.
 for (const el of document.querySelectorAll('#endClassOpts .opt')) {
   el.addEventListener('click', () => {
-    if (!game.player.selectClass(Number(el.dataset.cls))) return;
-    if (document.pointerLockElement !== renderer.domElement) {
-      initAudio();
-      let lock;
-      try { lock = renderer.domElement.requestPointerLock(); }
-      catch { status('mouse capture was blocked — click a class to retry'); return; }
-      Promise.resolve(lock).catch(() =>
-        status('mouse capture was blocked — click a class to retry'));
-    }
+    game.player.selectClass(Number(el.dataset.cls));
   });
 }
 

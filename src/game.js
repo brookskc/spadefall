@@ -4755,6 +4755,8 @@ export class Game {
     proxy.yaw = ry; // uplink yaw is already model rotation; snapshot passes it through
     proxy.health = health;
     proxy.alive = !!alive;
+    // Restoring an existing life is not a fresh protected deployment.
+    proxy.protT = 0;
     proxy.carrier = !!carrier;
     proxy.tool = tool;
     proxy.gunClass = GUN_CLASSES.includes(gunClass) ? gunClass
@@ -4972,6 +4974,9 @@ export class Game {
       if (pingTs !== undefined) out.ts = pingTs;
       out.ack = this.remote.get(id)?._lastActionSeq ?? 0;
       const viewer = this.remote.get(id);
+      // Include the exact life even on deltas: a migrated welcome may have
+      // already advanced it before a missed spawn is healed from this row.
+      if (viewer) out.life = viewer._life;
       const eye = viewer?.body.eye(this._interestEye);
       for (const key of ['p', 'b']) {
         const cur = new Set();
@@ -5223,15 +5228,16 @@ export class Game {
       const [x, y, z, ry, health, alive, carrier, tool, blocks, crouch, nades,
         ammo, reloadMs, gunClass] = r;
       if (idx === this.myIdx) {
+        if (Number.isSafeInteger(d.life)) this._serverLife = d.life;
         if (!alive && this.player.alive) this._clientDied();
-        else if (alive && !this.player.alive && !this.over && !d.o) {
+        else if (alive && !this.player.alive && !this.over && !d.o
+            && Number.isSafeInteger(d.life)) {
           // The reliable spawn event is the normal lifecycle edge, but the
           // authoritative snapshot must still be able to heal a missed or
           // rejected edge. Previously an alive self row updated health and
           // position without ever flipping Player#alive, leaving the death
           // camera and recap on screen forever even though the host had
           // already respawned the soldier.
-          this._serverLife = Math.min(1e6, this._serverLife + 1);
           this.player.respawn({ x, y, z });
           this._respawnT = 0;
           this._respawnRepairAt = Infinity;
@@ -5887,7 +5893,7 @@ export class Game {
         // A bot may guide only while it lives. It steers toward a bounded
         // predicted pressure point; death stops guidance but never cancels
         // the confirmed missile.
-        if (s.attacker?.id !== undefined && s.attacker.alive) {
+        if (s.attacker instanceof Bot && s.attacker.alive) {
           const foes = this.foesOf(s.attacker.team).filter(e => e.alive).map(e =>
             predictBotAirstrikePoint(e.body.pos, e.body.vel, 0.45, SX, SZ)).filter(Boolean);
           const allies = this.entities().filter(e => e.alive && e.team === s.attacker.team)
@@ -5902,6 +5908,9 @@ export class Game {
         s.t -= dt;
         if (s.t <= 0) {
           this._airstrikeImpact(s.pos, s.attacker, s.id);
+          // A winning impact clears the queue in _end(). Do not continue
+          // reading entries from the now-finished round.
+          if (this.over) break;
           this._pendingStrikes.splice(i, 1);
         } else {
           this._syncAirstrikeDrone(s.id, s.pos.x, s.pos.y, s.pos.z,

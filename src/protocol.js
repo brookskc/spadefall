@@ -7,7 +7,7 @@ import { validDeathRecap } from './death-recap.js';
 import { validBlueprintKind } from './blueprints.js';
 import { MAPS } from './mapgen.js';
 
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 
 const finite = Number.isFinite;
 const team = value => value === 'green' || value === 'blue';
@@ -109,7 +109,7 @@ export function validClientMessage(d) {
 
 function validSnapshot(d) {
   if (!exactKeys(d, ['t', 'p', 'b', 'q', 'full', 'ack', 'wr', 'wh', 'c', 'm',
-      'tb', 'w', 'g', 'a', 'u', 'f', 'h', 'ct', 'rm', 'o', 'ts'],
+      'tb', 'w', 'g', 'a', 'u', 'f', 'h', 'ct', 'rm', 'o', 'ts', 'life'],
       ['t', 'p', 'b', 'c', 'g'])) return false;
   if (!rows(d.p, 15, 10) || !rows(d.b, 10, 10)) return false;
   if (!d.p.every(r => Number.isInteger(r[12]) && r[12] >= 0 && r[12] <= 30
@@ -117,6 +117,7 @@ function validSnapshot(d) {
       && (r[14] === 0 || r[14] === 1 || r[14] === 5))) return false;
   if (!d.b.every(r => Number.isInteger(r[9]) && r[9] >= 0 && r[9] <= 2)) return false;
   if ((d.q !== undefined && (!Number.isSafeInteger(d.q) || d.q < 1))
+      || (d.life !== undefined && (!Number.isSafeInteger(d.life) || d.life < 1 || d.life > 1e6))
       || (d.full !== undefined && d.full !== 0 && d.full !== 1)
       || (d.ack !== undefined && (!Number.isSafeInteger(d.ack) || d.ack < 0))
       || (d.wr !== undefined && (!Number.isSafeInteger(d.wr) || d.wr < 0))

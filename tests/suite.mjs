@@ -1846,6 +1846,10 @@ function streakRuleTests() {
       && spendStreak(AIRSTRIKE_COST - 1, AIRSTRIKE_COST) === null);
   const snapshot = { t: 's', p: [], b: [], c: [0, 0], g: [],
     u: [[0, 650], [2, 0]] };
+  ok('self snapshot life accepts exact authority and rejects invalid counters',
+    validServerMessage({ ...snapshot, life: 2 })
+      && [0, -1, 1.5, 1000001, NaN, '2'].every(life =>
+        !validServerMessage({ ...snapshot, life })));
   ok('contribution meter rows pass the snapshot trust boundary',
     validServerMessage(snapshot)
       && !validServerMessage({ ...snapshot, u: [[0, 701]] })

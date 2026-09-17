@@ -463,10 +463,11 @@ try {
   await host.locator(`#endClassOpts [data-cls="${nextClass}"]`).click();
   const resultsMouse = await host.evaluate(expected => ({
     released: window.__game._roundEndReleasedMouse,
+    unlocked: document.pointerLockElement === null,
     visible: !document.getElementById('end').classList.contains('hidden'),
     pending: window.__game.player._pendingClass,
   }), nextClass);
-  assert.deepEqual(resultsMouse, { released: true, visible: true, pending: nextClass },
+  assert.deepEqual(resultsMouse, { released: true, unlocked: true, visible: true, pending: nextClass },
     'round end releases capture and its class buttons accept mouse input');
   await host.evaluate(() => { window.__game._rotateT = 0.05; });
   await host.waitForFunction(expected => !window.__game.over

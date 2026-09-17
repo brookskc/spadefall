@@ -7,11 +7,12 @@
     "test:fuzz": "node tests/map-fuzz.mjs",
     "test:fuzz:soak": "node tests/map-fuzz.mjs --seeds=200",
     "test:multiplayer": "node tests/multiplayer.browser.mjs",
+    "test:lifecycle": "node tests/lifecycle.browser.mjs",
     "test:stress": "node tests/full-room.browser.mjs",
     "test:bot-sim": "node tests/bot-simulation.browser.mjs",
     "test:accessibility": "node tests/accessibility.browser.mjs",
     "test:release-readiness": "node tests/release-readiness.browser.mjs",
-    "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility",
+    "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility && npm run test:lifecycle",
     "capture:results": "node tests/capture-results.mjs",
     "lint": "eslint src worker/src \"tests/*.mjs\"",
     "typecheck": "tsc --noEmit -p jsconfig.json"

@@ -2114,6 +2114,15 @@ function postmatchSocialTests() {
     ['b0', { name: 'Bot', team: 'green', k: 9 }],
   ];
   const roles = classifyRoles(rows);
+  ok('scoreboard iterators produce reusable role arrays for results rendering',
+    Array.isArray(classifyRoles(new Map(rows).entries()))
+      && JSON.stringify(classifyRoles(new Map(rows).entries())) === JSON.stringify(roles)
+      && classifyRoles(new Map(rows).entries()).filter(row => row.key === 'p0')
+        .map(row => row.role).join(',') === 'VANGUARD');
+  ok('commendations accept the actual scoreboard iterator without consuming its roles',
+    eligibleCommendationTargets(new Map(rows).entries(), 'p0')
+      .map(row => row.key).join(',') === 'p1'
+      && recordCommendation({}, 'p0', 'p1', new Map(rows).entries()).accepted);
   ok('commendations target same-team humans only',
     eligibleCommendationTargets(rows, 'p0').map(row => row.key).join(',') === 'p1');
   let commend = recordCommendation({}, 'p0', 'p1', rows);

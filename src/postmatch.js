@@ -29,7 +29,9 @@ export function classifyRole(row = {}) {
 }
 
 export function classifyRoles(entries = []) {
-  return entries.map(([key, row]) => ({
+  // Scoreboards pass Map#entries(), whose native iterator helpers return
+  // another iterator. Consumers need a reusable array for find/filter/join.
+  return Array.from(entries, ([key, row]) => ({
     key: String(key), name: String(row?.name ?? ''), team: row?.team === 'blue' ? 'blue' : 'green',
     role: classifyRole(row),
   }));

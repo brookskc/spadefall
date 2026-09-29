@@ -34,9 +34,18 @@ const executablePath = process.env.SPADEFALL_BROWSER
   ?? (process.platform === 'win32' && existsSync(edge) ? edge : undefined);
 const browser = await chromium.launch({ headless: true, executablePath });
 const faults = [];
+// Hosted runners render WebGL in software. Keyboard/focus assertions do not
+// need an animated battlefield or a running intermission clock underneath.
+const context = await browser.newContext();
+await context.addInitScript(() => {
+  localStorage.setItem('tos.gfx', 'low');
+  localStorage.setItem('tos.gfxMode', 'manual');
+  window.requestAnimationFrame = () => 0;
+});
+context.setDefaultTimeout(process.env.CI ? 60_000 : 30_000);
 
 try {
-  const page = await browser.newPage();
+  const page = await context.newPage();
   page.on('pageerror', error => faults.push(error.message));
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.player?.controls);
@@ -45,7 +54,7 @@ try {
     mode: document.getElementById('modePref').value,
     ctfVisible: [...document.getElementById('modePref').options].some(option => option.value === 'ctf'),
   })), { mode: 'tdm', ctfVisible: false }, 'fresh selector defaults to flagship TDM');
-  const privatePage = await browser.newPage();
+  const privatePage = await context.newPage();
   await privatePage.goto(`http://127.0.0.1:${port}/?features=privateContent`,
     { waitUntil: 'domcontentloaded' });
   await privatePage.waitForFunction(() => window.__game?.player?.controls);
@@ -97,12 +106,14 @@ try {
   assert.deepEqual(faults, [], `page errors: ${faults.join('; ')}`);
   await page.close();
 
-  const report = await browser.newPage();
+  const report = await context.newPage();
   report.on('pageerror', error => faults.push(error.message));
   await report.goto(`http://127.0.0.1:${port}/?reportqa=victory&auto=1`, {
     waitUntil: 'domcontentloaded',
   });
   await report.waitForSelector('#end:not(.hidden)');
+  assert.equal(await report.evaluate(() => window.__game.over), true,
+    'report fixture completed the actual round-end transition');
   for (const selector of ['#readyBtn', '#shareResultBtn', '#endClassOpts [data-cls="1"]']) {
     const target = report.locator(selector);
     await target.focus();
@@ -112,6 +123,12 @@ try {
   assert.deepEqual(faults, [], `page errors: ${faults.join('; ')}`);
   await report.close();
   console.log('Accessibility browser smoke passed.');
+} catch (error) {
+  // Previously a boot exception was collected but hidden by a later timeout.
+  // Include it in the job log so CI points at the actual failure.
+  console.error(`Accessibility browser failed (${browser.version()}): ${error.message}`);
+  console.error(`Page errors: ${faults.join('; ') || 'none'}`);
+  throw error;
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

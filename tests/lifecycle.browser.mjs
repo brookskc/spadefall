@@ -34,6 +34,91 @@ try {
     await page.waitForFunction(() => !!window.__game);
   }
 
+  const sights = await host.evaluate(() => {
+    const p = window.__game.player;
+    const visible = () => ['scopeOverlay', 'scopeNotches'].map(id =>
+      document.getElementById(id).classList.contains('on'));
+    p.tool = 5; p.aimK = 1;
+    p._updateScopeNotches(true);
+    const sniper = visible();
+    p.tool = 0;
+    p._updateScopeNotches(true);
+    const rifle = visible();
+    p.tool = 5;
+    p._updateScopeNotches(true);
+    p.resetZoom();
+    const reset = visible();
+    p.tool = p.gunClass; p.aimK = 0;
+    return { sniper, rifle, reset };
+  });
+  assert.deepEqual(sights, { sniper: [true, true], rifle: [false, false],
+    reset: [false, false] }, 'sniper reticle clears on gun switch and camera reset');
+  for (const reducedMotion of ['no-preference', 'reduce']) {
+    await host.emulateMedia({ reducedMotion });
+    for (const killed of [false, true]) {
+      await host.evaluate(killed => window.__game.hud.hitmark(killed), killed);
+      await host.waitForFunction(() => {
+        const mark = document.getElementById('hitmark');
+        return mark.getAnimations().every(animation => animation.playState === 'finished')
+          && getComputedStyle(mark).opacity === '0';
+      }, null, { polling: 50 });
+    }
+  }
+
+  // Drive actual score/clock boundaries without waiting fifteen wall minutes.
+  const pacingPage = await browser.newPage();
+  pacingPage.on('pageerror', error => faults.push(error.message));
+  await pacingPage.addInitScript(() => { window.requestAnimationFrame = () => 0; });
+  await pacingPage.goto(`http://127.0.0.1:${server.address().port}/?auto=1&map=1&mode=tdm`);
+  await pacingPage.waitForFunction(() => !!window.__game);
+  const pacing = await pacingPage.evaluate(() => {
+    const g = window.__game;
+    const rows = [];
+    for (const publicRoom of [false, true]) {
+      for (const mode of ['tdm', 'koth']) {
+        g.publicRoom = publicRoom; g.gameMode = mode;
+        g.rebuild(g.seed, mode === 'koth' ? 7 : 1);
+        const clock = g.matchRemaining;
+        const team = g.player.team;
+        if (mode === 'tdm') {
+          const victim = g.bots.find(bot => bot.team !== team);
+          g.captures[team] = publicRoom ? 34 : 49;
+          g.onDeath(victim, g.player);
+        } else {
+          g.player.body.pos.copy(g.hill.pos);
+          g.player.body.pos.y += 1;
+          g.bots.forEach(bot => { bot.alive = false; });
+          g.hill.owner = team;
+          g.captures[team] = publicRoom ? 89.9 : 119.9;
+          g._updateHill(0.2);
+        }
+        const passedOldCap = !g.over;
+        // The score leader wins at regulation even below the new score cap.
+        g._updateMatchClock(899);
+        const beforeRegulation = !g.over && g.matchRemaining === 1;
+        g._updateMatchClock(1);
+        rows.push({ publicRoom, mode, clock, passedOldCap, beforeRegulation,
+          over: g.over, winner: g.winner === team });
+      }
+    }
+    g.publicRoom = false; g.gameMode = 'tdm'; g.rebuild(g.seed, 1);
+    return rows;
+  });
+  for (const row of pacing) assert.deepEqual(row, {
+    publicRoom: row.publicRoom, mode: row.mode, clock: 900, passedOldCap: true, beforeRegulation: true,
+    over: true, winner: true,
+  }, 'solo/private and public rounds survive old caps and finish at regulation');
+
+  await pacingPage.goto(`http://127.0.0.1:${server.address().port}/?auto=1&map=1&mode=tdm&killcap=50&kothtime=120&matchtime=17`);
+  await pacingPage.waitForFunction(() => !!window.__game);
+  assert.deepEqual(await pacingPage.evaluate(async () => {
+    const { modeScoreLimit } = await import('/src/match-modes.js');
+    return { clock: window.__game.matchRemaining,
+      kills: modeScoreLimit('tdm', { publicRoom: true }),
+      hold: modeScoreLimit('koth', { publicRoom: true }) };
+  }), { clock: 17, kills: 50, hold: 120 }, 'explicit QA clock/score overrides still work');
+  await pacingPage.close();
+
   const protection = await host.evaluate(async () => {
     const { RemotePlayer } = await import('/src/remote-player.js');
     const g = window.__game;
@@ -121,9 +206,11 @@ try {
   assert.deepEqual(steering.human, [50, 50], 'host does not auto-steer human guests');
   assert.notDeepEqual(steering.bot, [50, 50], 'actual bot strikes still receive guidance');
 
-  const end = await host.evaluate(() => {
+  const end = await host.evaluate(async () => {
+    const { modeScoreLimit } = await import('/src/match-modes.js');
     const g = window.__game, victim = g.remote.get('guest');
-    g.captures[g.player.team] = 49;
+    g.captures[g.player.team] = modeScoreLimit('tdm', {
+      publicRoom: g.publicRoom }) - 1;
     victim.protT = 0; victim.health = 100;
     victim.body.pos.set(100, 65, 100);
     g.player.body.pos.set(150, 65, 150);
@@ -144,7 +231,7 @@ try {
     results: !document.getElementById('end').classList.contains('hidden'),
   })), { locked: false, results: true }, 'results class picker leaves mouse available');
   assert.deepEqual(faults, [], 'no browser exceptions');
-  console.log('lifecycle browsers: migration repair, spawn protection, human/bot strikes, round end, results cursor passed');
+  console.log('lifecycle browsers: sights, hit-marker fading, fifteen-minute pacing, migration repair, spawn protection, human/bot strikes, round end, results cursor passed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

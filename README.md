@@ -16,8 +16,10 @@ Bots use line of sight, nearby sound, and fading last-known positions rather tha
 
 | Mode | Win condition | Maps |
 | --- | --- | --- |
-| Team Deathmatch | Public: first to 35 kills or 5:30 | Greenbelt, Beachhead, Pinefall |
-| King of the Hill | Public: occupy rotating points for 90 seconds or 6:00 | Caldera |
+| Team Deathmatch | First to 150 kills or 15:00 | Greenbelt, Beachhead, Pinefall |
+| King of the Hill | Occupy rotating points for 10 minutes or 15:00 | Caldera |
+
+These limits apply to solo, private, and public matches. Score targets can end a round early; tied rounds can enter overtime. The longer rounds give players more time to build and use terrain before the map resets.
 
 Capture the Flag is retired from public play. Dunes, Crown, Foundry, and Faultline are also retired from normal matchmaking and hosting. They remain playable in development rooms started with the `privateContent` feature.
 
@@ -34,6 +36,8 @@ Choose one gun for each life. Every class also carries a spade, 50 building bloc
 | Rifle | Hard-hitting semi-automatic fire with moderate zoom |
 | SMG | Fast automatic fire for close fights |
 | Sniper | Bolt-action precision with a calibrated scope reticle |
+
+The sniper cross is its aiming reticle, with range marks below it for bullet drop. A brief gold X confirms a hit; a larger red X confirms a kill. These hit markers fade automatically and are separate from the aiming sights.
 
 The ballistics model includes recoil, spread, range compensation, and bullet drop. The first-person weapon models provide working iron sights and scope alignment. Lifetime match contribution advances a mastery rank without changing weapon stats.
 

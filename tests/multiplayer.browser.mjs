@@ -232,10 +232,12 @@ try {
   // End Beachhead with a real final kill. This is the exact camera state a
   // player can mistake for a failed respawn: the results renderer switches
   // to a high three-quarter view while Game continues ticking networking.
-  const finalDeath = await host.evaluate(() => {
+  const finalDeath = await host.evaluate(async () => {
+    const { modeScoreLimit } = await import('/src/match-modes.js');
     const game = window.__game;
     const victim = [...game.remote.values()][0];
-    game.captures[game.player.team] = 49;
+    game.captures[game.player.team] = modeScoreLimit('tdm', {
+      publicRoom: game.publicRoom }) - 1;
     game.respawnTimers.set(game.player, 0.01); // an older pending wave
     victim.protT = 0;
     game.damage(victim, 200, game.player, game.player.body.pos,

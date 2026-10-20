@@ -1543,19 +1543,15 @@ function botRuleTests() {
 // ---------------------------------------------------------------------------
 function pacingRuleTests() {
   group('match pacing: waves, tactical spawns, regulation, and overtime');
-  ok('mode-specific regulation clocks match the pacing plan',
-    modeMatchSeconds('ctf') === 720 && modeMatchSeconds('tdm') === 540
-      && modeMatchSeconds('koth') === 600);
-  ok('public quick-play uses compact TDM/KOTH clocks and score caps',
-    modeMatchSeconds('tdm', { publicRoom: true }) === 330
-      && modeMatchSeconds('koth', { publicRoom: true }) === 360
-      && modeScoreLimit('tdm', { publicRoom: true }) === 35
-      && modeScoreLimit('koth', { publicRoom: true }) === 90);
-  ok('private defaults, CTF, and explicit clock overrides stay compatible',
-    modeMatchSeconds('tdm', { publicRoom: false }) === 540
-      && modeMatchSeconds('koth', { publicRoom: false }) === 600
-      && modeMatchSeconds('ctf', { publicRoom: true }) === 720
-      && modeMatchSeconds('tdm', { publicRoom: true, override: 17 }) === 17
+  for (const publicRoom of [false, true]) {
+    ok(`${publicRoom ? 'public' : 'solo/private'} rounds allow fifteen minutes of terrain play`,
+      ['ctf', 'tdm', 'koth'].every(mode => modeMatchSeconds(mode, { publicRoom }) === 900)
+        && modeScoreLimit('tdm', { publicRoom }) === 150
+        && modeScoreLimit('koth', { publicRoom }) === 600);
+  }
+  ok('explicit clock overrides and CTF score rules stay compatible',
+    modeMatchSeconds('tdm', { publicRoom: true, override: 17 }) === 17
+      && modeMatchSeconds('koth', { override: 20 }) === 20
       && modeScoreLimit('ctf', { publicRoom: true }) === 3);
   const publicChoices = nextBattleChoices({ maps: MAPS, mode: 'tdm', mapIndex: 0,
     publicRoom: true, seed: 77 });

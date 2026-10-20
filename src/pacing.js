@@ -1,8 +1,9 @@
 // pacing.js — pure round pacing rules shared by the game and headless tests.
 
 export const RESPAWN_WAVE = Object.freeze({ ctf: 7, tdm: 6, koth: 7 });
-export const MATCH_DURATION = Object.freeze({ ctf: 12 * 60, tdm: 9 * 60, koth: 10 * 60 });
-export const PUBLIC_MATCH_DURATION = Object.freeze({ ctf: 12 * 60, tdm: 330, koth: 360 });
+// Give terrain projects time to develop in solo, private, and public rooms.
+export const MATCH_DURATION = Object.freeze({ ctf: 15 * 60, tdm: 15 * 60, koth: 15 * 60 });
+export const PUBLIC_MATCH_DURATION = MATCH_DURATION;
 export const FLAG_RETURN_TIME = 15;
 export const CTF_SPAWN = Object.freeze({
   anchorGrace: 3,

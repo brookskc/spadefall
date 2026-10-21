@@ -4,7 +4,10 @@ Mints short-lived Cloudflare TURN credentials so browsers behind symmetric NAT
 or a restrictive corporate firewall can still reach a match. The long-lived
 TURN API token stays in the Worker's secret store and never reaches a client.
 The same deployment accepts strictly bounded anonymous game-health counters at
-`/diagnostics`, plus strict anonymous human-round summaries at `/gameplay`, and writes them to the `GAME_ANALYTICS` Analytics Engine dataset.
+`/diagnostics`, strict anonymous human-round summaries at `/gameplay`, and
+separate pseudonymous browser-play counts at `/players`, and writes them to the
+`GAME_ANALYTICS` Analytics Engine dataset. Player IDs are never attached to round
+summaries; see [the analytics schema](../docs/HUMAN-ANALYTICS.md).
 
 ## Deploy
 

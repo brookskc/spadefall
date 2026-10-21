@@ -28,6 +28,7 @@ import { AUTO_GFX_BENCHMARK_VERSION,
   FirstSessionGraphicsBenchmark } from './performance-auto.js';
 import { ProductionTelemetry, errorFingerprint } from './telemetry.js';
 import { HumanAnalytics } from './human-analytics.js';
+import { AnonymousPlayers } from './anonymous-players.js';
 import { keyboardMouseUnsupported } from './device-support.js';
 
 const $ = id => document.getElementById(id);
@@ -54,7 +55,10 @@ const humanAnalyticsAllowed = ['spadefall.io', 'www.spadefall.io'].includes(loca
   && !params.has('auto') && ![...params.keys()].some(key => key.endsWith('qa'))
   && navigator.doNotTrack !== '1' && !navigator.globalPrivacyControl;
 const humanAnalytics = new HumanAnalytics({ enabled: humanAnalyticsAllowed && analyticsPreference === 'on' });
-const engagement = new EngagementTracker({ onStart: () => humanAnalytics.start(),
+const anonymousPlayers = new AnonymousPlayers({ enabled: humanAnalytics.enabled });
+const engagement = new EngagementTracker({ onStart: () => {
+  humanAnalytics.start(); anonymousPlayers.played();
+},
   onFinish: summary => humanAnalytics.finish(summary) });
 const fieldTelemetry = new ProductionTelemetry({ build: `p${PROTOCOL_VERSION}` });
 // Page-level choices are sampled once; match-local first-use events are owned
@@ -916,6 +920,7 @@ function choiceRow(id, read, write, apply = () => {}) {
 choiceRow('analyticsOpts', () => analyticsPreference, value => {
   analyticsPreference = value;
   humanAnalytics.enabled = humanAnalyticsAllowed && value === 'on';
+  anonymousPlayers.setEnabled(humanAnalytics.enabled);
   if (!humanAnalytics.enabled) humanAnalytics.activity = null;
   try { localStorage.setItem('tos.analytics', value); } catch { /* best effort */ }
 });

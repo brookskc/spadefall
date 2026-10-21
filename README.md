@@ -106,7 +106,10 @@ Low, Medium, and High graphics presets adjust render resolution, antialiasing, a
 The production game sends one anonymous summary of each human player's played
 round to help tune match pacing, building, weapons, and objectives. Bots do not
 contribute their actions to these summaries. No callsign, chat, room code,
-precise position, or persistent player identifier is included. Players can opt
+precise position, or persistent player identifier is included in round summaries.
+A separate random browser ID counts actual play and returning browsers without
+linking their round totals. It expires after 90 days and is erased on opt-out.
+Browser counts estimate players; they cannot deduplicate devices or shared browsers. Players can opt
 out under display & accessibility; browser Do Not Track and Global Privacy
 Control are also honored. See [the privacy notice](legal.html) and
 [reporting documentation](docs/HUMAN-ANALYTICS.md).

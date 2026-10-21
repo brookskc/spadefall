@@ -123,11 +123,17 @@ try {
   const damagePage = await browser.newPage();
   damagePage.on('pageerror', error => faults.push(error.message));
   await damagePage.addInitScript(() => {
+    localStorage.setItem('tos.damageContrast', 'high');
     window.__damageRaf = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = () => 0;
   });
   await damagePage.goto(`http://127.0.0.1:${server.address().port}/?auto=1&map=1&mode=tdm`);
   await damagePage.waitForFunction(() => !!window.__game);
+  assert.deepEqual(await damagePage.evaluate(() => ({
+    contrast: document.body.dataset.damageContrast,
+    opacity: getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity,
+  })), { contrast: 'high', opacity: '0' },
+  'saved high-contrast setting must not show a damage arrow at game startup');
   await damagePage.evaluate(() => {
     // The game loop remains paused; allow the HUD's own fade callback to run.
     window.requestAnimationFrame = window.__damageRaf;
@@ -209,9 +215,24 @@ try {
       if (boundary === 'death') g._clientDied(1);
       else if (boundary === 'rebuild') g.rebuild(g.seed, 1);
       else g._end(g.player.team);
-      return document.querySelector('#dmgDir .chevron').style.opacity;
+      return getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity;
     }, boundary);
     assert.equal(cleared, '0', `${boundary} clears a previous life's damage warning`);
+  }
+  for (const contrast of ['standard', 'high']) {
+    await damagePage.evaluate(contrast => {
+      const g = window.__game;
+      document.body.dataset.damageContrast = contrast;
+      g.mode = 'solo'; g.net = null; g.rebuild(g.seed, 1);
+      g.hud.damageDir(g, { x: 110, z: 100 });
+    }, contrast);
+    await damagePage.waitForFunction(() =>
+      Number(getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity) > 0);
+    await damagePage.waitForFunction(() =>
+      getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity === '0',
+    null, { polling: 50 });
+    assert.equal(await damagePage.evaluate(() => document.body.dataset.damageContrast), contrast,
+      `${contrast} warning appears only after a hit and fades out`);
   }
   await damagePage.close();
 

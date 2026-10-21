@@ -1,4 +1,5 @@
 import { HUMAN_METRICS, validHumanRound } from '../../src/human-analytics.js';
+import { validPlayerEvent } from '../../src/anonymous-players.js';
 /* global console */
 // index.js — mints short-lived Cloudflare TURN credentials for Spadefall.
 //
@@ -163,7 +164,7 @@ async function acceptDiagnostics(request, env, origin) {
 
 // Anonymous gameplay summaries use the existing dataset and edge limits.
 // Fixed slots make weekly reports stable even when JSON keys are reordered.
-async function acceptGameplay(request, env, origin) {
+async function acceptGameplay(request, env, origin, players = false) {
   if (request.method === 'OPTIONS')
     return new Response(null, { status: 204, headers: corsHeaders(origin) });
   if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405, origin);
@@ -176,13 +177,16 @@ async function acceptGameplay(request, env, origin) {
   if (raw.length > 4096) return json({ error: 'payload too large' }, 413, origin);
   let row;
   try { row = JSON.parse(raw); } catch { return json({ error: 'invalid payload' }, 400, origin); }
-  if (!validHumanRound(row)) return json({ error: 'invalid payload' }, 400, origin);
+  if (!(players ? validPlayerEvent(row) : validHumanRound(row)))
+    return json({ error: 'invalid payload' }, 400, origin);
   let success = false;
   try { ({ success } = await env.DIAGNOSTICS_RATE_LIMITER.limit({
     key: request.headers.get('cf-connecting-ip') || 'unknown' })); }
   catch { return json({ error: 'rate limiter unavailable' }, 503, origin); }
   if (!success) return json({ error: 'rate limited' }, 429, origin);
-  env.GAME_ANALYTICS.writeDataPoint({ indexes: ['human_round'],
+  if (players) env.GAME_ANALYTICS.writeDataPoint({ indexes: [`player:${row.playerId}`],
+    blobs: [row.build, 'played'], doubles: [] });
+  else env.GAME_ANALYTICS.writeDataPoint({ indexes: ['human_round'],
     blobs: [row.build, row.mode, String(row.map), row.network, row.outcome,
       row.result, row.firstAction], doubles: HUMAN_METRICS.map(key => row.metrics[key]) });
   return new Response(null, { status: 204, headers: {
@@ -195,6 +199,7 @@ export async function handleRequest(request, env, fetcher = fetch) {
   if (!originAllowed(origin)) return json({ error: 'forbidden' }, 403, origin);
   if (url.pathname === '/diagnostics') return acceptDiagnostics(request, env, origin);
   if (url.pathname === '/gameplay') return acceptGameplay(request, env, origin);
+  if (url.pathname === '/players') return acceptGameplay(request, env, origin, true);
   if (url.pathname !== '/ice') return json({ error: 'not found' }, 404, origin);
   if (request.method === 'OPTIONS')
     return new Response(null, { status: 204, headers: corsHeaders(origin) });

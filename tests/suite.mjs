@@ -97,6 +97,7 @@ import { createResumeToken, reservationMatches, validResumeToken } from '../src/
 import { FirstSessionGraphicsBenchmark, automaticGraphicsLevel } from '../src/performance-auto.js';
 import { atmosphereCadence } from '../src/settings.js';
 import { HUMAN_METRICS, HumanAnalytics, humanRoundSummary, validHumanRound } from '../src/human-analytics.js';
+import { AnonymousPlayers, PLAYER_ID_KEY, PLAYER_ID_TTL, validPlayerEvent } from '../src/anonymous-players.js';
 import { ProductionTelemetry, errorFingerprint, sanitizeTelemetryEvent,
   telemetryEnvelope } from '../src/telemetry.js';
 import { chooseSpawn } from '../src/spawn-controller.js';
@@ -3697,6 +3698,51 @@ async function humanAnalyticsTests() {
   ok('the production itch CDN allowlist is preserved without wildcards',
     originAllowed('https://html-classic.itch.zone') && originAllowed('https://html.itch.zone')
       && !originAllowed('https://attacker.itch.zone'));
+
+  const values = new Map(), playerRequests = [];
+  const storage = { getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+  let now = 1000000, randomByte = 1;
+  const options = { storage, now: () => now,
+    random: () => new Uint8Array(16).fill(randomByte++), beacon: () => false,
+    fetcher: async (_url, request) => { playerRequests.push(JSON.parse(request.body)); return new Response(); } };
+  const players = new AnonymousPlayers(options);
+  ok('browser identity is created only on actual play', values.size === 0 && players.played());
+  const firstId = playerRequests[0].playerId;
+  new AnonymousPlayers(options).played();
+  ok('separate page loads and repeated rounds reuse the persisted random ID',
+    playerRequests.length === 2 && playerRequests[1].playerId === firstId
+      && validPlayerEvent(playerRequests[0]));
+  now += PLAYER_ID_TTL;
+  players.played();
+  ok('browser IDs rotate after ninety days', playerRequests[2].playerId !== firstId);
+  players.setEnabled(false);
+  ok('opt-out erases the ID and prevents further identity creation or requests',
+    !values.has(PLAYER_ID_KEY) && !players.played() && playerRequests.length === 3);
+  const blocked = new AnonymousPlayers({ ...options, storage: {
+    getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); },
+    removeItem() { throw new Error('blocked'); } } });
+  ok('blocked storage skips unique counting instead of inventing temporary players',
+    !blocked.played() && playerRequests.length === 3);
+  values.set(PLAYER_ID_KEY, JSON.stringify({ id: 'f'.repeat(32), createdAt: now + 1000 }));
+  const fresh = new AnonymousPlayers(options).identity();
+  ok('corrupt or future-dated identity records are replaced safely', fresh !== 'f'.repeat(32));
+  ok('the player schema refuses extra private data and non-random identifiers',
+    !validPlayerEvent({ ...playerRequests[0], name: 'Ada' })
+      && !validPlayerEvent({ ...playerRequests[0], playerId: 'Ada' })
+      && !validPlayerEvent({ ...playerRequests[0], build: 'unexpected' }));
+  const playerRequest = row => new Request('https://turn.example/players', { method: 'POST',
+    headers: { origin: 'https://spadefall.io' }, body: JSON.stringify(row) });
+  const playerResponse = await handleTurnRequest(playerRequest(playerRequests[0]), env);
+  ok('unique-player events are separate from unlinked round summaries and indexed by ID',
+    playerResponse.status === 204 && points.length === 2
+      && points[1].indexes[0] === `player:${firstId}`
+      && points[1].blobs.join(',') === 'players-v1,played' && points[1].doubles.length === 0);
+  ok('player ingestion retains strict privacy validation and rate limits',
+    (await handleTurnRequest(playerRequest({ ...playerRequests[0], x: 10 }), env)).status === 400
+      && (await handleTurnRequest(playerRequest(playerRequests[0]), { ...env,
+        DIAGNOSTICS_RATE_LIMITER: { limit: async () => ({ success: false }) } })).status === 429
+      && points.length === 2);
 }
 
 export async function run() {

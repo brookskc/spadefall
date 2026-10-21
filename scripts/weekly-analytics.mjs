@@ -9,18 +9,22 @@ const tokenPath = process.env.SPADEFALL_ANALYTICS_TOKEN_FILE
 try {
   const token = (await readFile(tokenPath, 'utf8')).trim();
   if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error('The analytics credential file is invalid.');
-  const sql = (await readFile(new URL('../docs/analytics-weekly.sql', import.meta.url), 'utf8'))
-    .split('\n').filter(line => !line.trimStart().startsWith('--')).join('\n');
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/analytics_engine/sql`, {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'text/plain' },
-    body: sql + '\nFORMAT JSON', signal: AbortSignal.timeout(20000),
-  });
-  if (!response.ok) throw new Error(`Analytics query failed (HTTP ${response.status}); check the read token and dataset.`);
-  const payload = await response.json();
-  if (!Array.isArray(payload.data)) throw new Error('Cloudflare did not return report rows.');
+  const query = async name => {
+    const sql = (await readFile(new URL(`../docs/${name}.sql`, import.meta.url), 'utf8'))
+      .split('\n').filter(line => !line.trimStart().startsWith('--')).join('\n');
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/analytics_engine/sql`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'text/plain' },
+      body: sql + '\nFORMAT JSON', signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) throw new Error(`Analytics query failed (HTTP ${response.status}); check the read token and dataset.`);
+    const payload = await response.json();
+    if (!Array.isArray(payload.data)) throw new Error('Cloudflare did not return report rows.');
+    return payload.data;
+  };
+  const [rows, players] = await Promise.all([query('analytics-weekly'), query('analytics-players')]);
   console.log(JSON.stringify({ generatedAt: new Date().toISOString(), windowDays: 7,
     source: 'Cloudflare Analytics Engine', dataset: 'spadefall_game_health',
-    schema: 'human-v1', rows: payload.data }, null, 2));
+    schema: 'human-v1', playerSchema: 'players-v1', rows, players: players[0] ?? null }, null, 2));
 } catch (error) {
   console.error(error?.code === 'ENOENT'
     ? 'Analytics credential or query file is missing. Complete the private read-token setup.'

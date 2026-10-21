@@ -543,6 +543,9 @@ export function createHud(deps = {}) {
     this.updateDamageDir(g);
     const c = $('dmgDir').firstElementChild;
     c.style.transition = 'none'; c.style.opacity = 1;
+    // Commit the visible state before scheduling the fade, including when a
+    // previous warning was cleared or another hit arrived in this frame.
+    void c.offsetWidth;
     requestAnimationFrame(() => {
       c.style.transition = `opacity ${DAMAGE_DIRECTION_MS}ms linear`;
       c.style.opacity = 0;

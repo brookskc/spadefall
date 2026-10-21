@@ -10,5 +10,5 @@
     "paths": { "three": ["node_modules/@types/three/index.d.ts"] },
     "skipLibCheck": true
   },
-  "include": ["src/audio.js", "src/captions.js", "src/controls.js", "src/settings.js", "src/reload-timeline.js", "src/hud.js", "src/spawn-controller.js", "src/objectives.js", "src/match-lifecycle.js", "src/bot-navigation.js", "src/bot-combat.js", "src/performance-auto.js", "src/telemetry.js", "worker/src/index.js"]
+  "include": ["src/audio.js", "src/captions.js", "src/controls.js", "src/settings.js", "src/reload-timeline.js", "src/hud.js", "src/spawn-controller.js", "src/objectives.js", "src/match-lifecycle.js", "src/bot-navigation.js", "src/bot-combat.js", "src/performance-auto.js", "src/telemetry.js", "src/human-analytics.js", "worker/src/index.js"]
 }

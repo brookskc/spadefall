@@ -4,7 +4,7 @@ Mints short-lived Cloudflare TURN credentials so browsers behind symmetric NAT
 or a restrictive corporate firewall can still reach a match. The long-lived
 TURN API token stays in the Worker's secret store and never reaches a client.
 The same deployment accepts strictly bounded anonymous game-health counters at
-`/diagnostics` and writes them to the `GAME_ANALYTICS` Analytics Engine dataset.
+`/diagnostics`, plus strict anonymous human-round summaries at `/gameplay`, and writes them to the `GAME_ANALYTICS` Analytics Engine dataset.
 
 ## Deploy
 
@@ -32,7 +32,7 @@ unavailable; a missing secret or rate-limit binding returns 500.
 
 ## Notes
 
-- Credentials live 2 hours, comfortably longer than the 12-minute CTF
+- Credentials live 2 hours, comfortably longer than the 15-minute match
   regulation. Each browser receives a separate credential; the game caches it
   locally for one hour.
 - `ALLOWED_ORIGINS` rejects requests from unexpected browser origins. It is a
@@ -47,3 +47,10 @@ unavailable; a missing secret or rate-limit binding returns 500.
   uses source addresses only for edge rate limiting and never writes them to
   the analytics dataset. Callsigns, chat, room data, positions, raw URLs, raw
   errors, and persistent identifiers are rejected by the payload schema.
+
+## Gameplay reporting
+
+`/gameplay` writes fixed-column `human_round` rows into the existing dataset.
+See `../docs/HUMAN-ANALYTICS.md` and `../docs/analytics-weekly.sql` for the schema,
+privacy limits, QA exclusion, and weighted weekly query. Deploy this endpoint
+before publishing a browser build that uses it.

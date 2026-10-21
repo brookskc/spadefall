@@ -101,6 +101,16 @@ Low, Medium, and High graphics presets adjust render resolution, antialiasing, a
 - Optional FPS and performance counters
 - Mouse sensitivity and master volume
 
+## Gameplay analytics
+
+The production game sends one anonymous summary of each human player's played
+round to help tune match pacing, building, weapons, and objectives. Bots do not
+contribute their actions to these summaries. No callsign, chat, room code,
+precise position, or persistent player identifier is included. Players can opt
+out under display & accessibility; browser Do Not Track and Global Privacy
+Control are also honored. See [the privacy notice](legal.html) and
+[reporting documentation](docs/HUMAN-ANALYTICS.md).
+
 ## How it is built
 
 The game is plain HTML, CSS, and JavaScript modules. Three.js r170 and PeerJS are vendored in the repository, so the production game has no package install or build step. Playwright is a development-only dependency for the two-browser multiplayer test.

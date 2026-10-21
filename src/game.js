@@ -2297,7 +2297,7 @@ export class Game {
       ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
     if (victim === this.player) {
       hud.clearDamageDir();
-      this.engagement?.combat('death', engagementCause);
+      this.engagement?.combat('death', engagementCause, this.time - this.player._spawnedAt);
       this.funnel('first_death');
     }
     if (killer === this.player && killer !== victim)
@@ -5668,7 +5668,7 @@ export class Game {
       if (this.engagementFeatures.deathRecap && recap) hud.deathRecap(recap);
       return;
     }
-    this.engagement?.combat('death', 'other');
+    this.engagement?.combat('death', 'other', this.time - this.player._spawnedAt);
     this.player.alive = false;
     // A guest's own death never goes through Player.die() at all — the
     // host tells us we're dead over the wire and we land here instead.

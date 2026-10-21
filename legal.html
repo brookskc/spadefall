@@ -23,7 +23,7 @@
   <a class="back" href="./">← Back to SPADEFALL</a>
   <h1>PLAYER INFORMATION</h1>
   <p class="lede">Privacy, terms of play, and community rules for the game as it works today.</p>
-  <p class="date">Effective September 6, 2026</p>
+  <p class="date">Effective October 21, 2026</p>
 
   <h2>Privacy</h2>
   <h3>What SPADEFALL stores</h3>
@@ -36,9 +36,11 @@
   <h3>Services involved</h3>
   <p>The site is hosted on Cloudflare Pages. Cloudflare may process ordinary web-server data such as IP address, device or browser information, referring pages, and requests under its own privacy statement. PeerJS Cloud helps browsers find each other, and WebRTC connection services may process network metadata needed to establish a peer connection. A peer-to-peer connection can expose network information to participating services or peers as permitted by the browser and WebRTC.</p>
   <p>SPADEFALL has no advertising tracker and does not build player or device profiles. It sends a small sample of anonymous operational diagnostics to its Cloudflare edge service: game version, graphics tier, coarse frame-budget results, connection or host-migration outcomes, match-abandonment time ranges, and non-readable crash fingerprints. These reports contain no callsign, peer or persistent identifier, chat, room code, precise position, complete URL, or raw error message. Source network addresses may be processed transiently by Cloudflare for delivery and abuse rate limiting, but SPADEFALL does not write them into its game-health dataset.</p>
+  <p>The production game also sends an anonymous summary of each human player's completed or abandoned round to the same service. It includes map and mode, active visible play time, weapon-use time, kills and deaths, deaths within three seconds of spawning, successful digging and building actions, objective contribution, and whether the round finished or the player left. Bot actions are excluded. Summaries contain no name, persistent player or device identifier, chat, room code, or exact position. They are used for aggregate gameplay reports, not to identify or profile individual people. A person playing several rounds contributes several summaries; these are not unique-player counts.</p>
   <p>Links to GitHub and Ko-fi take you to third-party sites with their own policies.</p>
 
   <h3>Your choices</h3>
+  <p>You can disable anonymous gameplay summaries in the menu under display &amp; accessibility → anonymous gameplay stats. The game also honors browser Do Not Track and Global Privacy Control signals for these summaries. Disabling them stops new summaries; it does not remove already anonymous aggregate data.</p>
   <p>You can reset locally stored progress and preferences by clearing site data for spadefall.io in your browser. You can leave any peer-hosted room at any time. Questions or privacy requests can be opened through the project’s <a href="https://github.com/brookskc/spadefall/issues">GitHub issue tracker</a>.</p>
 
   <h2>Terms of play</h2>

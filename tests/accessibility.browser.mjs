@@ -68,6 +68,10 @@ try {
   assert.equal(await page.locator('#displayDrawer').evaluate(node => node.open), true,
     'display drawer opens without a mouse');
 
+  await page.locator('#analyticsOpts [data-value="off"]').click();
+  assert.equal(await page.evaluate(() => localStorage.getItem('tos.analytics')), 'off',
+    'players can opt out of anonymous gameplay summaries');
+
   const hud120 = page.locator('#hudScaleOpts [data-value="120"]');
   await hud120.focus();
   await page.keyboard.press('Enter');

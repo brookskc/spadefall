@@ -15,7 +15,8 @@
     "test:ci": "npm run lint && npm run typecheck && npm test && npm run test:accessibility && npm run test:lifecycle",
     "capture:results": "node tests/capture-results.mjs",
     "lint": "eslint src worker/src \"tests/*.mjs\"",
-    "typecheck": "tsc --noEmit -p jsconfig.json"
+    "typecheck": "tsc --noEmit -p jsconfig.json",
+    "analytics:weekly": "node scripts/weekly-analytics.mjs"
   },
   "devDependencies": {
     "@types/three": "0.170.0",

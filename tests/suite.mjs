@@ -96,6 +96,7 @@ import { MAX_REWIND_SECONDS, observeSnapshotRtt, recordPose,
 import { createResumeToken, reservationMatches, validResumeToken } from '../src/reconnect.js';
 import { FirstSessionGraphicsBenchmark, automaticGraphicsLevel } from '../src/performance-auto.js';
 import { atmosphereCadence } from '../src/settings.js';
+import { HUMAN_METRICS, HumanAnalytics, humanRoundSummary, validHumanRound } from '../src/human-analytics.js';
 import { ProductionTelemetry, errorFingerprint, sanitizeTelemetryEvent,
   telemetryEnvelope } from '../src/telemetry.js';
 import { chooseSpawn } from '../src/spawn-controller.js';
@@ -3637,10 +3638,72 @@ async function turnWorkerTests() {
     rejected.status === 400 && points.length === 1);
 }
 
+async function humanAnalyticsTests() {
+  group('anonymous human gameplay summaries');
+  const summary = { mode: 'tdm', map: 1, network: 'client', humans: 2, bots: 8,
+    outcome: 'complete', won: true, duration: 900, kills: 4, deaths: 3, spawnDeaths: 1,
+    actions: { shoot: 8, dig: 3, place: 2, ping: 1 }, firstAction: { action: 'dig' },
+    contribution: { points: 400, assists: 2, objective: 5 },
+    name: 'private', room: 'secret', playerId: 'secret', x: 100 };
+  const clean = humanRoundSummary(summary, { playSeconds: 12.3, rifleSeconds: 10 });
+  ok('summaries retain only bounded local gameplay totals', validHumanRound(clean)
+    && clean.metrics.digs === 3 && clean.metrics.places === 2
+    && clean.metrics.spawnDeaths === 1 && clean.metrics.rifleSeconds === 10
+    && !JSON.stringify(clean).includes('private') && !JSON.stringify(clean).includes('secret'));
+  ok('edge validator refuses extra identity fields at either level',
+    !validHumanRound({ ...clean, name: 'private' })
+      && !validHumanRound({ ...clean, metrics: { ...clean.metrics, x: 10 } })
+      && !validHumanRound({ ...clean, metrics: { ...clean.metrics, kills: Infinity } }));
+  const sent = [];
+  const analytics = new HumanAnalytics({ beacon: () => false,
+    fetcher: async (url, options) => { sent.push({ url, options }); return new Response(); } });
+  let starts = 0;
+  const tracker = new EngagementTracker({
+    onStart() { starts++; analytics.start(); }, onFinish: row => analytics.finish(row) });
+  const context = { mode: 'tdm', map: 1, round: 1, network: 'solo', humans: 1, bots: 9 };
+  tracker.beginMatch(context); tracker.beginMatch(context);
+  for (let i = 0; i < 60; i++) analytics.step(1 / 60, 0);
+  analytics.step(1, 5, false);
+  tracker.action('dig'); tracker.combat('death', 'weapon', 2);
+  tracker.finishMatch({ duration: 50 }); tracker.finishMatch({ duration: 50 });
+  const delivered = JSON.parse(sent[0].options.body);
+  ok('one local round sends once despite duplicate start and end edges',
+    starts === 1 && sent.length === 1 && delivered.metrics.digs === 1
+      && delivered.metrics.spawnDeaths === 1 && sent[0].options.keepalive === true);
+  ok('sub-frame weapon time accumulates and hidden tabs do not add time',
+    delivered.metrics.playSeconds === 1 && delivered.metrics.rifleSeconds === 1
+      && delivered.metrics.sniperSeconds === 0);
+  analytics.enabled = false; analytics.start();
+  ok('disabled collection sends nothing and clears the pending round',
+    !analytics.finish(summary) && !analytics.finish(summary) && sent.length === 1);
+  const points = [];
+  const env = { GAME_ANALYTICS: { writeDataPoint: p => points.push(p) },
+    DIAGNOSTICS_RATE_LIMITER: { limit: async () => ({ success: true }) } };
+  const request = row => new Request('https://turn.example/gameplay', { method: 'POST',
+    headers: { origin: 'https://spadefall.io', 'content-type': 'application/json' },
+    body: JSON.stringify(row) });
+  const response = await handleTurnRequest(request(clean), env);
+  ok('gameplay edge stores fixed reporting columns using the existing dataset',
+    response.status === 204 && points.length === 1 && points[0].indexes[0] === 'human_round'
+      && points[0].blobs[4] === 'complete' && points[0].doubles.length === HUMAN_METRICS.length
+      && points[0].doubles[HUMAN_METRICS.indexOf('digs')] === 3);
+  ok('invalid private fields never reach storage',
+    (await handleTurnRequest(request({ ...clean, name: 'private' }), env)).status === 400
+      && points.length === 1);
+  ok('edge rate limits gameplay ingestion without writing rejected requests',
+    (await handleTurnRequest(request(clean), { ...env,
+      DIAGNOSTICS_RATE_LIMITER: { limit: async () => ({ success: false }) } })).status === 429
+      && points.length === 1);
+  ok('the production itch CDN allowlist is preserved without wildcards',
+    originAllowed('https://html-classic.itch.zone') && originAllowed('https://html.itch.zone')
+      && !originAllowed('https://attacker.itch.zone'));
+}
+
 export async function run() {
   await iceConfigTests();
   await matchmakingSetupFailureTests();
   await turnWorkerTests();
+  await humanAnalyticsTests();
   collapseTests();
   wireTests();
   networkSyncTests();

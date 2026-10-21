@@ -27,6 +27,7 @@ import { BINDING_LABELS } from './controls.js';
 import { AUTO_GFX_BENCHMARK_VERSION,
   FirstSessionGraphicsBenchmark } from './performance-auto.js';
 import { ProductionTelemetry, errorFingerprint } from './telemetry.js';
+import { HumanAnalytics } from './human-analytics.js';
 import { keyboardMouseUnsupported } from './device-support.js';
 
 const $ = id => document.getElementById(id);
@@ -46,7 +47,15 @@ const engagementFeatures = parseEngagementFeatures(location.search);
 const privateContent = engagementFeatures.privateContent || params.has('auto');
 if (engagementFeatures.publicChat)
   document.documentElement.dataset.publicChat = 'on';
-const engagement = new EngagementTracker();
+let analyticsPreference = 'on';
+try { analyticsPreference = localStorage.getItem('tos.analytics') === 'off' ? 'off' : 'on'; }
+catch { /* privacy storage may be unavailable */ }
+const humanAnalyticsAllowed = ['spadefall.io', 'www.spadefall.io'].includes(location.hostname)
+  && !params.has('auto') && ![...params.keys()].some(key => key.endsWith('qa'))
+  && navigator.doNotTrack !== '1' && !navigator.globalPrivacyControl;
+const humanAnalytics = new HumanAnalytics({ enabled: humanAnalyticsAllowed && analyticsPreference === 'on' });
+const engagement = new EngagementTracker({ onStart: () => humanAnalytics.start(),
+  onFinish: summary => humanAnalytics.finish(summary) });
 const fieldTelemetry = new ProductionTelemetry({ build: `p${PROTOCOL_VERSION}` });
 // Page-level choices are sampled once; match-local first-use events are owned
 // by Game. A mode click followed by DEPLOY therefore cannot inflate intent.
@@ -124,6 +133,7 @@ game.onRoundEnd = () => {
   if (document.pointerLockElement === renderer.domElement) document.exitPointerLock?.();
 };
 game.onDone = () => {
+  engagement.abandon('menu');
   const oldNet = net;
   net = null;
   game.net = null;
@@ -903,6 +913,12 @@ function choiceRow(id, read, write, apply = () => {}) {
   render();
 }
 
+choiceRow('analyticsOpts', () => analyticsPreference, value => {
+  analyticsPreference = value;
+  humanAnalytics.enabled = humanAnalyticsAllowed && value === 'on';
+  if (!humanAnalytics.enabled) humanAnalytics.activity = null;
+  try { localStorage.setItem('tos.analytics', value); } catch { /* best effort */ }
+});
 choiceRow('hudScaleOpts', () => Math.round(getHudScale() * 100), setHudScale, value => {
   $('hud').style.setProperty('--hud-scale', String(Number(value) / 100));
 });
@@ -1673,6 +1689,10 @@ function frame() {
       diagnostics.soakCycles++;
     }
   }
+
+  if (playing && !game.over)
+    humanAnalytics.step(wallDt, game.player.alive ? game.player.gunClass : -1,
+      document.visibilityState === 'visible');
 
   // The host is authoritative — the simulation must never pause, even while
   // the host's own menu is up, or every client freezes with it.

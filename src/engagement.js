@@ -101,7 +101,9 @@ const addCount = (row, key, amount = 1) => {
 };
 
 export class EngagementTracker {
-  constructor({ now = nowDefault, eventCapacity = 64, matchCapacity = 16 } = {}) {
+  constructor({ now = nowDefault, eventCapacity = 64, matchCapacity = 16,
+    onStart = () => {}, onFinish = _summary => {} } = {}) {
+    this.onStart = onStart; this.onFinish = onFinish;
     this.now = now;
     this.startedAt = now();
     this.eventCapacity = Math.max(16, eventCapacity | 0);
@@ -142,9 +144,11 @@ export class EngagementTracker {
       actions: {},
       contribution: { points: 0, objective: 0, assists: 0 },
       deaths: 0,
+      spawnDeaths: 0,
       kills: 0,
     };
     this.record('match_start', context);
+    this.onStart();
     return true;
   }
 
@@ -179,9 +183,11 @@ export class EngagementTracker {
     return true;
   }
 
-  combat(kind, cause = 'other') {
+  combat(kind, cause = 'other', spawnAge = null) {
     if (!this.active || !['death', 'kill'].includes(kind)) return false;
     this.active[kind === 'death' ? 'deaths' : 'kills']++;
+    if (kind === 'death' && Number.isFinite(spawnAge) && spawnAge >= 0 && spawnAge <= 3)
+      this.active.spawnDeaths++;
     return this.record(kind, { cause });
   }
 
@@ -219,11 +225,13 @@ export class EngagementTracker {
       actions: { ...active.actions },
       contribution: { ...active.contribution },
       deaths: active.deaths,
+      spawnDeaths: active.spawnDeaths,
       kills: active.kills,
     };
     this.matches.push(summary);
     if (this.matches.length > this.matchCapacity) this.matches.shift();
     this.active = null;
+    this.onFinish(summary);
     return summary;
   }
 

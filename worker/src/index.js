@@ -1,3 +1,4 @@
+import { HUMAN_METRICS, validHumanRound } from '../../src/human-analytics.js';
 /* global console */
 // index.js — mints short-lived Cloudflare TURN credentials for Spadefall.
 //
@@ -9,7 +10,7 @@
 
 const DEFAULT_TURN_KEY_ID = '0a266bb92241c6f8f68a8068f72e4c45';
 
-// Longer than the longest match (CTF regulation is 12 minutes plus overtime)
+// Longer than the longest match (regulation is 15 minutes plus overtime)
 // so a credential never expires mid-round, short enough that a leaked one is
 // worth little.
 const CREDENTIAL_TTL = 7200;
@@ -18,6 +19,9 @@ const ALLOWED_ORIGINS = new Set([
   'https://spadefall.io',
   'https://www.spadefall.io',
   'https://spadefall.pages.dev',
+  // Preserve the production Worker's exact itch CDN allowlist.
+  'https://html-classic.itch.zone',
+  'https://html.itch.zone',
   'http://localhost:8000',
   'http://127.0.0.1:8000',
 ]);
@@ -157,11 +161,40 @@ async function acceptDiagnostics(request, env, origin) {
   } });
 }
 
+// Anonymous gameplay summaries use the existing dataset and edge limits.
+// Fixed slots make weekly reports stable even when JSON keys are reordered.
+async function acceptGameplay(request, env, origin) {
+  if (request.method === 'OPTIONS')
+    return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405, origin);
+  if (!env.GAME_ANALYTICS || typeof env.DIAGNOSTICS_RATE_LIMITER?.limit !== 'function')
+    return json({ error: 'not configured' }, 503, origin);
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 4096)
+    return json({ error: 'payload too large' }, 413, origin);
+  const raw = await request.text();
+  if (raw.length > 4096) return json({ error: 'payload too large' }, 413, origin);
+  let row;
+  try { row = JSON.parse(raw); } catch { return json({ error: 'invalid payload' }, 400, origin); }
+  if (!validHumanRound(row)) return json({ error: 'invalid payload' }, 400, origin);
+  let success = false;
+  try { ({ success } = await env.DIAGNOSTICS_RATE_LIMITER.limit({
+    key: request.headers.get('cf-connecting-ip') || 'unknown' })); }
+  catch { return json({ error: 'rate limiter unavailable' }, 503, origin); }
+  if (!success) return json({ error: 'rate limited' }, 429, origin);
+  env.GAME_ANALYTICS.writeDataPoint({ indexes: ['human_round'],
+    blobs: [row.build, row.mode, String(row.map), row.network, row.outcome,
+      row.result, row.firstAction], doubles: HUMAN_METRICS.map(key => row.metrics[key]) });
+  return new Response(null, { status: 204, headers: {
+    ...corsHeaders(origin), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+}
+
 export async function handleRequest(request, env, fetcher = fetch) {
   const url = new URL(request.url);
   const origin = request.headers.get('origin') ?? '';
   if (!originAllowed(origin)) return json({ error: 'forbidden' }, 403, origin);
   if (url.pathname === '/diagnostics') return acceptDiagnostics(request, env, origin);
+  if (url.pathname === '/gameplay') return acceptGameplay(request, env, origin);
   if (url.pathname !== '/ice') return json({ error: 'not found' }, 404, origin);
   if (request.method === 'OPTIONS')
     return new Response(null, { status: 204, headers: corsHeaders(origin) });

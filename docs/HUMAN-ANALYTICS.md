@@ -54,7 +54,7 @@ browser; Cloudflare may sample at scale, so SQL uses `_sample_interval` weights.
 
 ## Weekly report
 
-Run `node scripts/weekly-analytics.mjs` to execute `docs/analytics-weekly.sql` against the private Analytics Engine dataset. The read-only credential is stored outside this repository in `../work/.spadefall-analytics-token` with file mode 600; never print it or commit it.
+Run `node scripts/weekly-analytics.mjs` to execute `docs/analytics-weekly.sql` against the private Analytics Engine dataset. The read-only credential is stored outside this repository in `~/.config/spadefall/analytics-token` with file mode 600; never print it or commit it.
 Report the last seven days, grouped by mode/map/outcome. Include player-round
 counts, completion versus abandonment, average active play time, completed
 round clock averages, digging/building actions per player-round, weapon-time

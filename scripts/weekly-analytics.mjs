@@ -1,10 +1,11 @@
 // Read-only report retrieval. The credential stays outside the repository.
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const account = '50b433a53c0e03c712e74f23fa3c180b';
 const tokenPath = process.env.SPADEFALL_ANALYTICS_TOKEN_FILE
-  ?? fileURLToPath(new URL('../../work/.spadefall-analytics-token', import.meta.url));
+  ?? join(homedir(), '.config', 'spadefall', 'analytics-token');
 try {
   const token = (await readFile(tokenPath, 'utf8')).trim();
   if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error('The analytics credential file is invalid.');

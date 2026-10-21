@@ -37,7 +37,7 @@ Choose one gun for each life. Every class also carries a spade, 50 building bloc
 | SMG | Fast automatic fire for close fights |
 | Sniper | Bolt-action precision with a calibrated scope reticle |
 
-The sniper cross is its aiming reticle, with range marks below it for bullet drop. A brief gold X confirms a hit; a larger red X confirms a kill. These hit markers fade automatically and are separate from the aiming sights.
+The sniper cross is its aiming reticle, with range marks below it for bullet drop. A brief gold X confirms a hit; a larger red X confirms a kill. These hit markers fade automatically and are separate from the aiming sights. The red stepped arrow around the aiming dot shows where the latest damage came from; it tracks that hit location as you turn or move, then fades after 1.5 seconds.
 
 The ballistics model includes recoil, spread, range compensation, and bullet drop. The first-person weapon models provide working iron sights and scope alignment. Lifetime match contribution advances a mastery rank without changing weapon stats.
 

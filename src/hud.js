@@ -1,5 +1,7 @@
 import { holdClock, modeScoreLimit } from './match-modes.js';
 
+const DAMAGE_DIRECTION_MS = 1500;
+
 export function matchClockPresentation(overtime, remaining) {
   return {
     text: overtime ? 'OVERTIME' : holdClock(Math.max(0, remaining ?? 0)),
@@ -53,6 +55,9 @@ export function createHud(deps = {}) {
     typeof document === 'undefined' ? null : document);
   /** @param {string} id @returns {any} */
   const $ = id => getDom()?.getElementById(id);
+  // Snapshot the hit location, rather than retaining a moving attacker's body.
+  /** @type {{ x: number, z: number, until: number } | null} */
+  let damageSource = null;
   return {
   refreshTool(p) {
     const t = TOOLS[p.tool];
@@ -530,17 +535,31 @@ export function createHud(deps = {}) {
     v.style.transition = 'none'; v.style.opacity = 1;
     requestAnimationFrame(() => { v.style.transition = 'opacity .7s'; v.style.opacity = 0; });
   },
-  // bearing: radians, 0 = source straight ahead, computed by Game#_bearingTo.
-  // Same instant-flash-then-fade pattern as damage() above — snap the
-  // rotation and opacity in with transitions off, then re-enable the
-  // transition next frame so the browser actually animates the fade
-  // instead of jumping straight to the end state.
-  damageDir(bearing) {
-    const el = $('dmgDir');
-    el.style.transform = `rotate(${bearing}rad)`;
-    const c = el.firstElementChild;
+  // Remember where the latest hit came from. Only a new hit restarts the
+  // fade; frame updates rotate the warning as the viewer turns or moves.
+  damageDir(g, source) {
+    if (g.over || !g.player.alive) return;
+    damageSource = { x: source.x, z: source.z, until: performance.now() + DAMAGE_DIRECTION_MS };
+    this.updateDamageDir(g);
+    const c = $('dmgDir').firstElementChild;
     c.style.transition = 'none'; c.style.opacity = 1;
-    requestAnimationFrame(() => { c.style.transition = 'opacity 1.5s linear'; c.style.opacity = 0; });
+    requestAnimationFrame(() => {
+      c.style.transition = `opacity ${DAMAGE_DIRECTION_MS}ms linear`;
+      c.style.opacity = 0;
+    });
+  },
+  updateDamageDir(g) {
+    if (!damageSource) return;
+    if (g.over || !g.player.alive || performance.now() >= damageSource.until) {
+      this.clearDamageDir();
+      return;
+    }
+    $('dmgDir').style.transform = `rotate(${g._bearingTo(damageSource)}rad)`;
+  },
+  clearDamageDir() {
+    damageSource = null;
+    const c = $('dmgDir').firstElementChild;
+    c.style.transition = 'none'; c.style.opacity = 0;
   },
   // tier: 'double' | 'triple' | 'multi'. Owns BOTH the sound and the text —
   // the fanfare replaces the ordinary kill chime entirely rather than

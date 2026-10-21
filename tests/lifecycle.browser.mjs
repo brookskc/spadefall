@@ -119,6 +119,102 @@ try {
   }), { clock: 17, kills: 50, hold: 120 }, 'explicit QA clock/score overrides still work');
   await pacingPage.close();
 
+  // Damage warnings retain a world-space hit location while the viewer moves.
+  const damagePage = await browser.newPage();
+  damagePage.on('pageerror', error => faults.push(error.message));
+  await damagePage.addInitScript(() => {
+    window.__damageRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = () => 0;
+  });
+  await damagePage.goto(`http://127.0.0.1:${server.address().port}/?auto=1&map=1&mode=tdm`);
+  await damagePage.waitForFunction(() => !!window.__game);
+  await damagePage.evaluate(() => {
+    // The game loop remains paused; allow the HUD's own fade callback to run.
+    window.requestAnimationFrame = window.__damageRaf;
+    const g = window.__game;
+    g.bots = [];
+    g.player.body.pos.set(100, 60, 100);
+    g.player.body.vel.set(0, 0, 0);
+    g.player.protT = 0;
+    g.player.yaw = 0;
+  });
+  for (const mode of ['solo', 'client']) {
+    const bearings = await damagePage.evaluate(mode => {
+      const g = window.__game, p = g.player;
+      g.mode = mode;
+      g.net = { send() {} };
+      g.hud.clearDamageDir();
+      p.body.pos.set(100, 60, 100); p.body.vel.set(0, 0, 0); p.yaw = 0;
+      const source = p.body.pos.clone().set(110, 60, 100);
+      if (mode === 'solo') g.damage(p, 1, null, source, { environmental: true });
+      else g._clientEvent({ k: 'dmgdir', x: source.x, z: source.z });
+      const angle = () => Number(document.getElementById('dmgDir').style.transform
+        .match(/rotate\(([^r]+)rad\)/)[1]);
+      const ahead = angle();
+      // Moving the attacker/source after the hit must not leak new positions.
+      source.set(50, 60, 50);
+      p.yaw = -Math.PI / 2;
+      g.update(0);
+      const turned = angle();
+      p.body.pos.set(110, 60, 90); p.yaw = 0;
+      g.update(0);
+      const moved = angle();
+      g._clientEvent({ k: 'dmgdir', x: 100, z: 90 });
+      g.update(0);
+      const latest = angle();
+      return { ahead, turned, moved, latest };
+    }, mode);
+    assert.equal(bearings.ahead, 0, `${mode}: hit ahead starts at the top`);
+    assert.ok(Math.abs(bearings.turned + Math.PI / 2) < 1e-5,
+      `${mode}: turning right moves the hit warning left on the next game frame`);
+    assert.ok(Math.abs(bearings.moved - Math.PI / 2) < 1e-5,
+      `${mode}: moving past the source updates its bearing`);
+    assert.ok(Math.abs(Math.abs(bearings.latest) - Math.PI) < 1e-5,
+      `${mode}: a new hit replaces the remembered coordinates`);
+  }
+  // Tracking must not repeatedly restart the flash or prolong its lifetime.
+  await damagePage.waitForFunction(() => {
+    const opacity = Number(getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity);
+    return opacity > 0 && opacity < 0.9;
+  }, null, { polling: 25 });
+  const fading = await damagePage.evaluate(() => {
+    const g = window.__game, mark = document.querySelector('#dmgDir .chevron');
+    const before = Number(getComputedStyle(mark).opacity);
+    for (let i = 0; i < 30; i++) { g.player.yaw += 0.05; g.update(0); }
+    return { before, after: Number(getComputedStyle(mark).opacity) };
+  });
+  assert.ok(fading.after <= fading.before && fading.after < 0.9,
+    'frame updates do not flash the damage warning again');
+  await damagePage.waitForFunction(() =>
+    getComputedStyle(document.querySelector('#dmgDir .chevron')).opacity === '0',
+  null, { polling: 50 });
+  const expired = await damagePage.evaluate(() => {
+    const g = window.__game, el = document.getElementById('dmgDir');
+    // Also expire the tracking record if a frame resumes after a tab pause.
+    const now = performance.now.bind(performance);
+    performance.now = () => now() + 2000;
+    g.update(0);
+    const before = el.style.transform;
+    g.player.yaw += 1; g.update(0);
+    performance.now = now;
+    return before === el.style.transform;
+  });
+  assert.equal(expired, true, 'expired warnings stop tracking without a new hit');
+  for (const boundary of ['death', 'rebuild', 'results']) {
+    const cleared = await damagePage.evaluate(boundary => {
+      const g = window.__game;
+      g.mode = 'solo'; g.net = null;
+      g.rebuild(g.seed, 1);
+      g._clientEvent({ k: 'dmgdir', x: 110, z: 100 });
+      if (boundary === 'death') g._clientDied(1);
+      else if (boundary === 'rebuild') g.rebuild(g.seed, 1);
+      else g._end(g.player.team);
+      return document.querySelector('#dmgDir .chevron').style.opacity;
+    }, boundary);
+    assert.equal(cleared, '0', `${boundary} clears a previous life's damage warning`);
+  }
+  await damagePage.close();
+
   const protection = await host.evaluate(async () => {
     const { RemotePlayer } = await import('/src/remote-player.js');
     const g = window.__game;
@@ -231,7 +327,7 @@ try {
     results: !document.getElementById('end').classList.contains('hidden'),
   })), { locked: false, results: true }, 'results class picker leaves mouse available');
   assert.deepEqual(faults, [], 'no browser exceptions');
-  console.log('lifecycle browsers: sights, hit-marker fading, fifteen-minute pacing, migration repair, spawn protection, human/bot strikes, round end, results cursor passed');
+  console.log('lifecycle browsers: sights, hit-marker fading, world-space damage tracking, fifteen-minute pacing, migration repair, spawn protection, human/bot strikes, round end, results cursor passed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

@@ -684,6 +684,7 @@ export class Game {
 
   rebuild(seed, map = this.mapIndex) {
     this._roundSerial++;
+    hud.clearDamageDir();
     this._pendingTerrainActions.clear();
     this._funnelSeen.clear();
     this._entityFrameActive = false;
@@ -2213,7 +2214,7 @@ export class Game {
     }
     if (victim === this.player) {
       hud.damage(); sfx.hurt(); hud.health(this.player);
-      if (src) hud.damageDir(this._bearingTo(src));
+      if (src) hud.damageDir(this, src);
     } else if (victim.isRemote && options.environmental && victim.health > 0) {
       // Environmental harm has no direction, but the guest still needs the
       // same flash/sound feedback the host gets locally.
@@ -2295,6 +2296,7 @@ export class Game {
     const engagementCause = deathCause
       ?? (killer === victim ? 'suicide' : killer ? 'weapon' : 'environment');
     if (victim === this.player) {
+      hud.clearDamageDir();
       this.engagement?.combat('death', engagementCause);
       this.funnel('first_death');
     }
@@ -3390,6 +3392,7 @@ export class Game {
     const retainedMine = keepClientIntermission ? this._myBattleChoice : null;
     this._broadcastScoreboard(true);
     this.over = true;
+    hud.clearDamageDir();
     this.winner = winner;
     this._squadVotes.clear();
     this._intermissionReady = retainedReady;
@@ -5518,7 +5521,7 @@ export class Game {
         else d.kill ? sfx.kill() : sfx.hit();
         break;
       case 'dmgdir': this._noteAction(this.player);
-        hud.damageDir(this._bearingTo({ x: d.x, z: d.z })); break;
+        hud.damageDir(this, { x: d.x, z: d.z }); break;
       case 'envdmg': this._noteAction(this.player); hud.damage(); sfx.hurt(); break;
       case 'chat':
         if (d.scope === 'all' && !this.publicChatEnabled()) break;
@@ -5644,6 +5647,7 @@ export class Game {
   }
 
   _clientDied(redeploy, recap = null) {
+    hud.clearDamageDir();
     // A final-kill death event can trail the score/end transition. Results
     // already own the screen, so keep the player down without reopening the
     // death recap or arming a respawn repair against a completed round.
@@ -5868,7 +5872,7 @@ export class Game {
     this._updateGrenadeWarning();
     this._updateIntensityCues();
     if (this.mode === 'client') {
-      this._clientUpdate(dt); this._updateBlueprintGhost();
+      this._clientUpdate(dt); hud.updateDamageDir(this); this._updateBlueprintGhost();
       this.world.flushDirty(); this._endEntityFrame(); return;
     }
 
@@ -6035,6 +6039,7 @@ export class Game {
     // Camera shake rides on top of whatever the player camera did.
     this._shakeCamera();
     this._updateBlueprintGhost();
+    hud.updateDamageDir(this);
     this.effects.update(dt);
     // One remesh pass per frame: single-voxel set() calls queue their chunks
     // here instead of each synchronously rebuilding up to 5 of them.
